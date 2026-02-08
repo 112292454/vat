@@ -1,5 +1,7 @@
 # VAT — Video Auto Translator
 
+> **🇬🇧 [English Documentation](README.md)**
+
 一个端到端的视频翻译自动化系统。从 YouTube 下载视频，到语音识别、智能断句、LLM 翻译、字幕嵌入，直至上传 B 站，全流程自动完成。
 
 <!-- TODO: 插入效果展示截图/GIF -->
@@ -42,6 +44,8 @@ YouTube URL / 本地视频
 
 ### 智能断句
 
+参考VideoCaptioner项目（见致谢）
+
 Whisper 输出的片段通常是零碎的、不完整的。VAT 使用 LLM 将这些片段重组为符合人类阅读习惯的完整句子：
 
 - 支持分块断句（长视频）和全文断句（短视频）
@@ -49,6 +53,8 @@ Whisper 输出的片段通常是零碎的、不完整的。VAT 使用 LLM 将这
 - 场景感知：不同类型的视频（游戏、闲聊、歌曲等）使用不同的断句策略
 
 ### 字幕翻译
+
+参考VideoCaptioner项目（见致谢）
 
 - **反思翻译**（基于吴恩达方法论）：初译 → 反思 → 重译，显著提升翻译质量
 - **上下文管理**：批量处理时维护前文上下文，保持术语和风格一致
@@ -118,6 +124,8 @@ pip install -e .
 | AlimamaFangYuanTiVF-Thin-2.ttf | 竖屏风格 | [Alimama Fonts](https://fonts.alibabagroup.com/) |
 
 如果不需要硬字幕或只使用默认样式，只需 NotoSansCJKsc-VF.ttf 即可。
+
+（事实上，大部分ubuntu系统上可以找到NotoSansCJKsc-VF.ttf）
 
 ### 配置
 

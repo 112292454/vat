@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}VAT Manager{% endblock %}</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+    <style>
+        .status-completed { background-color: #10b981; }
+        .status-running { background-color: #3b82f6; animation: pulse 2s infinite; }
+        .status-failed { background-color: #ef4444; }
+        .status-pending { background-color: #6b7280; }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.7; }
+        }
+        /* Toast 动画 */
+        .toast-enter { animation: toastIn 0.3s ease-out; }
+        .toast-exit { animation: toastOut 0.3s ease-in forwards; }
+        @keyframes toastIn {
+            from { transform: translateY(-20px); opacity: 0; }
+            to { transform: translateY(0); opacity: 1; }
+        }
+        @keyframes toastOut {
+            from { transform: translateY(0); opacity: 1; }
+            to { transform: translateY(-20px); opacity: 0; }
+        }
+    </style>
+</head>
+<body class="bg-gray-100 min-h-screen">
+    <nav class="bg-white shadow-sm border-b">
+        <div class="max-w-7xl mx-auto px-4 py-3">
+            <div class="flex items-center justify-between">
+                <a href="/" class="text-xl font-bold text-gray-800">🎬 VAT Manager</a>
+                <div class="flex items-center space-x-6">
+                    <a href="/" class="text-gray-600 hover:text-gray-900 {% if request.url.path == '/' %}font-semibold text-blue-600{% endif %}">
+                        📹 视频
+                    </a>
+                    <a href="/playlists" class="text-gray-600 hover:text-gray-900 {% if '/playlists' in request.url.path %}font-semibold text-blue-600{% endif %}">
+                        📂 Playlist
+                    </a>
+                    <a href="/tasks" class="text-gray-600 hover:text-gray-900 {% if '/tasks' in request.url.path %}font-semibold text-blue-600{% endif %}">
+                        ⚙️ 任务
+                    </a>
+                    <a href="/prompts" class="text-gray-600 hover:text-gray-900 {% if '/prompts' in request.url.path %}font-semibold text-blue-600{% endif %}">
+                        📝 Prompts
+                    </a>
+                    <a href="/bilibili" class="text-gray-600 hover:text-gray-900 {% if '/bilibili' in request.url.path %}font-semibold text-pink-600{% endif %}">
+                        📺 B站
+                    </a>
+                </div>
+            </div>
+        </div>
+    </nav>
+    
+    <main class="max-w-7xl mx-auto px-4 py-6">
+        {% block content %}{% endblock %}
+    </main>
+    
+    <footer class="text-center text-gray-500 text-sm py-4">
+        VAT - Video to Hanzi Translator
+    </footer>
+    
+    <!-- Toast 容器 -->
+    <div id="toast-container" class="fixed top-4 right-4 z-50 space-y-2"></div>
+    
+    <!-- 全局 Toast 和模态框工具函数 -->
+    <script>
+    // Toast 通知系统
+    function showToast(message, type = 'info', duration = 3000) {
+        const container = document.getElementById('toast-container');
+        const toast = document.createElement('div');
+        
+        const colors = {
+            success: 'bg-green-500',
+            error: 'bg-red-500',
+            warning: 'bg-yellow-500',
+            info: 'bg-blue-500'
+        };
+        
+        const icons = {
+            success: '✓',
+            error: '✕',
+            warning: '⚠',
+            info: 'ℹ'
+        };
+        
+        toast.className = `${colors[type] || colors.info} text-white px-4 py-3 rounded-lg shadow-lg flex items-center space-x-2 toast-enter min-w-64 max-w-md`;
+        toast.innerHTML = `
+            <span class="text-lg">${icons[type] || icons.info}</span>
+            <span class="flex-1">${message}</span>
+            <button onclick="this.parentElement.remove()" class="ml-2 hover:opacity-70">×</button>
+        `;
+        
+        container.appendChild(toast);
+        
+        if (duration > 0) {
+            setTimeout(() => {
+                toast.classList.remove('toast-enter');
+                toast.classList.add('toast-exit');
+                setTimeout(() => toast.remove(), 300);
+            }, duration);
+        }
+        
+        return toast;
+    }
+    
+    // 模态框点击外部关闭支持
+    function setupModalClickOutside(modalId, closeCallback) {
+        const modal = document.getElementById(modalId);
+        if (!modal) return;
+        
+        modal.addEventListener('click', function(e) {
+            // 只有点击模态框背景（而非内容区域）时才关闭
+            if (e.target === modal) {
+                if (typeof closeCallback === 'function') {
+                    closeCallback();
+                } else {
+                    modal.classList.add('hidden');
+                    modal.classList.remove('flex');
+                }
+            }
+        });
+    }
+    
+    // 初始化所有带 data-modal-close 属性的模态框
+    document.addEventListener('DOMContentLoaded', function() {
+        document.querySelectorAll('[data-modal]').forEach(modal => {
+            modal.addEventListener('click', function(e) {
+                if (e.target === modal) {
+                    modal.classList.add('hidden');
+                    modal.classList.remove('flex');
+                }
+            });
+        });
+    });
+    </script>
+</body>
+</html>

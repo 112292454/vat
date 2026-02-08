@@ -1,0 +1,790 @@
+"""
+Playlist 管理服务
+
+提供 Playlist 的增量同步、视频排序等功能。
+"""
+import time
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta
+from typing import List, Optional, Dict, Any, Set, Callable
+from dataclasses import dataclass, field
+
+from vat.models import Video, Playlist, SourceType
+from vat.database import Database
+from vat.downloaders import YouTubeDownloader
+from vat.utils.logger import setup_logger
+
+logger = setup_logger("playlist_service")
+
+# 全局翻译线程池（限制并发避免 LLM API 过载）
+_translate_executor = ThreadPoolExecutor(max_workers=10, thread_name_prefix="translate_")
+
+
+@dataclass
+class SyncResult:
+    """同步结果"""
+    playlist_id: str
+    new_videos: List[str]  # 新增视频 ID 列表
+    existing_videos: List[str]  # 已存在视频 ID 列表
+    total_videos: int
+    
+    @property
+    def new_count(self) -> int:
+        return len(self.new_videos)
+    
+    @property
+    def existing_count(self) -> int:
+        return len(self.existing_videos)
+
+
+class PlaylistService:
+    """Playlist 管理服务"""
+    
+    def __init__(self, db: Database, downloader: Optional[YouTubeDownloader] = None):
+        """
+        初始化 PlaylistService
+        
+        Args:
+            db: 数据库实例
+            downloader: YouTube 下载器（用于获取 Playlist 信息）
+        """
+        self.db = db
+        self._downloader = downloader
+    
+    @property
+    def downloader(self) -> YouTubeDownloader:
+        """延迟初始化下载器"""
+        if self._downloader is None:
+            self._downloader = YouTubeDownloader()
+        return self._downloader
+    
+    def sync_playlist(
+        self,
+        playlist_url: str,
+        auto_add_videos: bool = True,
+        fetch_upload_dates: bool = True,  # 默认获取，用于按时间排序
+        rate_limit_delay: float = 0.0,
+        progress_callback: Optional[callable] = None
+    ) -> SyncResult:
+        """
+        同步 Playlist（增量）
+        
+        只添加新视频，不删除已存在的视频。
+        增量同步时只对新增视频获取 upload_date。
+        
+        Args:
+            playlist_url: Playlist URL
+            auto_add_videos: 是否自动添加新视频到数据库
+            fetch_upload_dates: 是否为每个视频单独获取 upload_date（默认开启，用于按时间排序）
+            rate_limit_delay: 获取 upload_date 时的速率限制延迟（秒）
+            progress_callback: 进度回调
+            
+        Returns:
+            SyncResult 同步结果
+        """
+        callback = progress_callback or (lambda msg: logger.info(msg))
+        
+        callback(f"开始同步 Playlist: {playlist_url}")
+        
+        # 获取 Playlist 信息
+        playlist_info = self.downloader.get_playlist_info(playlist_url)
+        if not playlist_info:
+            raise ValueError(f"无法获取 Playlist 信息: {playlist_url}")
+        
+        playlist_id = playlist_info['id']
+        playlist_title = playlist_info.get('title', 'Unknown Playlist')
+        channel = playlist_info.get('uploader', '')
+        channel_id = playlist_info.get('uploader_id', '')
+        
+        callback(f"Playlist: {playlist_title} (ID: {playlist_id})")
+        
+        # 获取或创建 Playlist 记录
+        existing_playlist = self.db.get_playlist(playlist_id)
+        if existing_playlist:
+            callback(f"更新已存在的 Playlist")
+        else:
+            callback(f"创建新 Playlist")
+            existing_playlist = Playlist(
+                id=playlist_id,
+                title=playlist_title,
+                source_url=playlist_url,
+                channel=channel,
+                channel_id=channel_id
+            )
+            self.db.add_playlist(existing_playlist)
+        
+        # 获取已存在的视频 ID
+        existing_video_ids = self.db.get_playlist_video_ids(playlist_id)
+        callback(f"已有 {len(existing_video_ids)} 个视频")
+        
+        # 获取 Playlist 中的所有视频
+        entries = playlist_info.get('entries', [])
+        total_videos = len(entries)
+        callback(f"Playlist 共 {total_videos} 个视频")
+        
+        new_videos = []
+        existing_videos = []
+        
+        for index, entry in enumerate(entries, start=1):
+            if entry is None:
+                continue
+            
+            video_id = entry.get('id', '')
+            if not video_id:
+                continue
+            
+            if video_id in existing_video_ids:
+                existing_videos.append(video_id)
+                # 更新索引（可能顺序变化）- 使用关联表
+                self.db.update_video_playlist_info(video_id, playlist_id, index)
+            else:
+                new_videos.append(video_id)
+                
+                if auto_add_videos:
+                    # 检查视频是否已存在（可能在其他 playlist 中）
+                    existing_video = self.db.get_video(video_id)
+                    if existing_video:
+                        # 视频已存在，只添加 playlist 关联
+                        self.db.add_video_to_playlist(video_id, playlist_id, index)
+                        callback(f"[{index}/{total_videos}] 关联已有视频: {existing_video.title[:40]}...")
+                    else:
+                        # 创建新视频记录
+                        video = Video(
+                            id=video_id,
+                            source_type=SourceType.YOUTUBE,
+                            source_url=f"https://www.youtube.com/watch?v={video_id}",
+                            title=entry.get('title', ''),
+                            playlist_id=playlist_id,
+                            playlist_index=index,
+                            metadata={
+                                'duration': entry.get('duration', 0),
+                                'uploader': entry.get('uploader', channel),
+                                'thumbnail': entry.get('thumbnail', ''),
+                                'upload_date': entry.get('upload_date', ''),  # YYYYMMDD 格式
+                            }
+                        )
+                        self.db.add_video(video)
+                        # 添加到关联表
+                        self.db.add_video_to_playlist(video_id, playlist_id, index)
+                        callback(f"[{index}/{total_videos}] 新增: {video.title[:50]}...")
+        
+        # 更新 Playlist 信息
+        self.db.update_playlist(
+            playlist_id,
+            title=playlist_title,
+            video_count=total_videos,
+            last_synced_at=datetime.now()
+        )
+        
+        callback(f"同步完成: 新增 {len(new_videos)} 个, 已存在 {len(existing_videos)} 个")
+        
+        # 收集缺少日期的已存在视频（可能是之前同步被中断或删除playlist后重建）
+        videos_missing_date = []
+        if fetch_upload_dates and existing_videos:
+            for vid in existing_videos:
+                video = self.db.get_video(vid)
+                if video and video.metadata:
+                    upload_date = video.metadata.get('upload_date', '')
+                    if not upload_date:
+                        videos_missing_date.append(vid)
+            if videos_missing_date:
+                callback(f"发现 {len(videos_missing_date)} 个已存在视频缺少日期，将一并获取")
+        
+        # 合并需要获取日期的视频：新视频 + 缺少日期的已存在视频
+        videos_to_fetch = new_videos + videos_missing_date
+        
+        # 如果需要获取 upload_date，并行获取详细信息
+        if fetch_upload_dates and videos_to_fetch:
+            max_workers = 10  # 并行获取数量（测试可用 5-10 个）
+            callback(f"开始并行获取视频信息（共 {len(videos_to_fetch)} 个，{max_workers} 个并发）...")
+            
+            # 收集所有视频的日期信息，用于后续插值我
+            date_results = []  # [(video_id, upload_date or None, is_unavailable)]
+            completed_count = 0
+            results_lock = threading.Lock()
+            
+            def fetch_video_info(vid: str) -> tuple:
+                """获取单个视频的信息"""
+                nonlocal completed_count
+                upload_date = None
+                is_unavailable = False
+                video_info = None
+                
+                try:
+                    video_info = self.downloader.get_video_info(f"https://www.youtube.com/watch?v={vid}")
+                    if video_info and video_info.get('upload_date'):
+                        upload_date = video_info['upload_date']
+                        
+                        # 立即更新基本信息到 metadata（duration、thumbnail 等）
+                        video = self.db.get_video(vid)
+                        if video:
+                            metadata = video.metadata or {}
+                            metadata['upload_date'] = upload_date
+                            metadata['duration'] = video_info.get('duration', 0)
+                            metadata['thumbnail'] = video_info.get('thumbnail', '')
+                            metadata['uploader'] = video_info.get('uploader', '')
+                            metadata['view_count'] = video_info.get('view_count', 0)
+                            metadata['like_count'] = video_info.get('like_count', 0)
+                            self.db.update_video(vid, metadata=metadata)
+                        
+                        # 异步发起 LLM 翻译（第二层异步）
+                        self._submit_translate_task(vid, video_info)
+                    else:
+                        is_unavailable = True
+                except Exception as e:
+                    is_unavailable = True
+                    logger.warning(f"获取视频 {vid} 信息失败: {e}")
+                
+                with results_lock:
+                    completed_count += 1
+                    if completed_count % 5 == 0 or completed_count == len(videos_to_fetch):
+                        callback(f"已获取 {completed_count}/{len(videos_to_fetch)} 个视频信息...")
+                
+                return (vid, upload_date, is_unavailable, video_info)
+            
+            # 使用线程池并行获取
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {executor.submit(fetch_video_info, vid): vid for vid in videos_to_fetch}
+                for future in futures:
+                    try:
+                        vid, upload_date, is_unavailable, video_info = future.result(timeout=60)
+                        date_results.append((vid, upload_date, is_unavailable))
+                    except Exception as e:
+                        vid = futures[future]
+                        logger.warning(f"获取视频 {vid} 超时或异常: {e}")
+                        date_results.append((vid, None, True))
+            
+            # 对获取失败的视频进行时间插值
+            callback("处理无法获取日期的视频...")
+            self._interpolate_missing_dates(date_results, callback)
+            
+            callback("发布日期获取完成")
+            
+            # 为新视频分配 upload_order_index（只读，一旦分配不再改变）
+            callback("分配时间顺序索引...")
+            self._assign_upload_order_index(playlist_id, new_videos, callback)
+        
+        return SyncResult(
+            playlist_id=playlist_id,
+            new_videos=new_videos,
+            existing_videos=existing_videos,
+            total_videos=total_videos
+        )
+    
+    def _interpolate_missing_dates(
+        self,
+        date_results: List[tuple],
+        callback: callable
+    ) -> None:
+        """
+        对获取失败的视频进行时间插值
+        
+        Args:
+            date_results: [(video_id, upload_date or None, is_unavailable), ...]
+            callback: 进度回调
+        """
+        # 先收集所有有效日期
+        valid_dates = [(i, r[1]) for i, r in enumerate(date_results) if r[1]]
+        
+        for i, (vid, upload_date, is_unavailable) in enumerate(date_results):
+            if upload_date:
+                # 已有日期，直接更新
+                video = self.db.get_video(vid)
+                if video:
+                    metadata = video.metadata or {}
+                    metadata['upload_date'] = upload_date
+                    self.db.update_video(vid, metadata=metadata)
+            elif is_unavailable:
+                # 需要插值
+                interpolated_date = self._calc_interpolated_date(i, valid_dates)
+                video = self.db.get_video(vid)
+                if video:
+                    metadata = video.metadata or {}
+                    metadata['upload_date'] = interpolated_date
+                    metadata['upload_date_interpolated'] = True  # 标记为插值
+                    metadata['unavailable'] = True  # 标记为不可用
+                    self.db.update_video(vid, metadata=metadata)
+                    callback(f"  视频 {vid}: 使用插值日期 {interpolated_date}（不可用）")
+    
+    def _calc_interpolated_date(self, index: int, valid_dates: List[tuple]) -> str:
+        """
+        计算插值日期
+        
+        在前后有效日期之间取中间值
+        """
+        if not valid_dates:
+            # 没有任何有效日期，使用当前日期
+            return datetime.now().strftime('%Y%m%d')
+        
+        # 找前一个和后一个有效日期
+        prev_date = None
+        next_date = None
+        
+        for idx, date_str in valid_dates:
+            if idx < index:
+                prev_date = date_str
+            elif idx > index and next_date is None:
+                next_date = date_str
+                break
+        
+        # 计算插值
+        if prev_date and next_date:
+            # 取中间值
+            try:
+                d1 = datetime.strptime(prev_date, '%Y%m%d')
+                d2 = datetime.strptime(next_date, '%Y%m%d')
+                mid = d1 + (d2 - d1) / 2
+                return mid.strftime('%Y%m%d')
+            except:
+                return prev_date
+        elif prev_date:
+            # 只有前一个，用前一个日期 +1 天
+            try:
+                d = datetime.strptime(prev_date, '%Y%m%d')
+                return (d + timedelta(days=1)).strftime('%Y%m%d')
+            except:
+                return prev_date
+        elif next_date:
+            # 只有后一个，用后一个日期 -1 天
+            try:
+                d = datetime.strptime(next_date, '%Y%m%d')
+                return (d - timedelta(days=1)).strftime('%Y%m%d')
+            except:
+                return next_date
+        else:
+            return datetime.now().strftime('%Y%m%d')
+    
+    def _assign_upload_order_index(
+        self,
+        playlist_id: str,
+        new_video_ids: List[str],
+        callback: Callable[[str], None]
+    ) -> None:
+        """
+        为新视频分配 upload_order_index
+        
+        设计原则：
+        1. upload_order_index 一旦分配就不再改变（只读）
+        2. 新视频按 upload_date 排序后，在现有最大索引基础上递增分配
+        3. 已有视频的索引永远不受新视频影响
+        
+        Args:
+            playlist_id: Playlist ID
+            new_video_ids: 本次新增的视频 ID 列表
+            callback: 进度回调
+        """
+        if not new_video_ids:
+            return
+        
+        # 1. 获取现有视频的最大 upload_order_index
+        all_videos = self.get_playlist_videos(playlist_id, order_by="upload_date")
+        max_index = 0
+        for v in all_videos:
+            if v.metadata:
+                existing_index = v.metadata.get('upload_order_index', 0)
+                if existing_index > max_index:
+                    max_index = existing_index
+        
+        # 2. 收集新视频及其 upload_date，排序
+        new_videos_with_date = []
+        for vid in new_video_ids:
+            video = self.db.get_video(vid)
+            if video:
+                upload_date = (video.metadata or {}).get('upload_date', '99999999')
+                new_videos_with_date.append((vid, upload_date, video))
+        
+        # 按 upload_date 排序（最早的在前）
+        new_videos_with_date.sort(key=lambda x: x[1])
+        
+        # 3. 分配新索引（同时更新关联表和 video.metadata）
+        assigned_count = 0
+        for vid, upload_date, video in new_videos_with_date:
+            # 检查关联表中是否已有索引
+            pv_info = self.db.get_playlist_video_info(playlist_id, vid)
+            existing_order_index = pv_info.get('upload_order_index') if pv_info else None
+            
+            if not existing_order_index:
+                max_index += 1
+                # 更新关联表
+                self.db.update_playlist_video_order_index(playlist_id, vid, max_index)
+                # 向后兼容：同时更新 video.metadata
+                metadata = video.metadata or {}
+                metadata['upload_order_index'] = max_index
+                self.db.update_video(vid, metadata=metadata)
+                assigned_count += 1
+        
+        if assigned_count > 0:
+            callback(f"已分配 {assigned_count} 个视频的时间顺序索引")
+            logger.info(f"Playlist {playlist_id}: 分配了 {assigned_count} 个 upload_order_index (max={max_index})")
+    
+    def _submit_translate_task(self, video_id: str, video_info: Dict[str, Any], force: bool = False) -> None:
+        """
+        提交异步翻译任务
+        
+        在获取到 video_info 后，异步调用 LLM 翻译 title/description。
+        翻译结果存入 video.metadata['translated']。
+        
+        Args:
+            video_id: 视频 ID
+            video_info: 视频信息
+            force: 强制重新翻译（即使已有翻译结果）
+        """
+        def translate_video_info():
+            try:
+                from vat.config import load_config
+                config = load_config()
+                
+                if not config.llm.is_available():
+                    logger.debug(f"LLM 配置不可用，跳过视频 {video_id} 的翻译")
+                    return
+                
+                # 检查是否已有翻译结果
+                video = self.db.get_video(video_id)
+                if not video:
+                    return
+                
+                metadata = video.metadata or {}
+                if 'translated' in metadata and not force:
+                    logger.debug(f"视频 {video_id} 已有翻译结果，跳过")
+                    return
+                
+                # 执行翻译
+                from vat.llm.video_info_translator import VideoInfoTranslator
+                translator = VideoInfoTranslator(model=config.translator.llm.model)
+                
+                title = video_info.get('title', '')
+                description = video_info.get('description', '')
+                tags = video_info.get('tags', [])
+                uploader = video_info.get('uploader', '')
+                
+                translated_info = translator.translate(
+                    title=title,
+                    description=description,
+                    tags=tags,
+                    uploader=uploader
+                )
+                
+                # 更新 metadata
+                metadata['translated'] = translated_info.to_dict()
+                
+                # 同时存储完整视频信息冗余
+                metadata['_video_info'] = {
+                    'video_id': video_info.get('id', video_id),
+                    'url': video_info.get('webpage_url', f"https://www.youtube.com/watch?v={video_id}"),
+                    'title': title,
+                    'uploader': video_info.get('uploader', ''),
+                    'description': description,
+                    'duration': video_info.get('duration', 0),
+                    'upload_date': video_info.get('upload_date', ''),
+                    'thumbnail': video_info.get('thumbnail', ''),
+                    'tags': tags,
+                }
+                
+                self.db.update_video(video_id, title=title, metadata=metadata)
+                logger.info(f"视频 {video_id} 翻译完成")
+                
+            except Exception as e:
+                logger.warning(f"视频 {video_id} 翻译失败: {e}")
+        
+        # 提交到线程池异步执行
+        _translate_executor.submit(translate_video_info)
+    
+    def get_playlist_videos(
+        self,
+        playlist_id: str,
+        order_by: str = "upload_date"
+    ) -> List[Video]:
+        """
+        获取 Playlist 下的所有视频
+        
+        Args:
+            playlist_id: Playlist ID
+            order_by: 排序方式
+                - "upload_date": 按发布日期（默认，最早在前，支持增量更新）
+                - "playlist_index": 按 Playlist 中的顺序
+                - "created_at": 按添加时间
+                
+        Returns:
+            视频列表
+        """
+        videos = self.db.list_videos(playlist_id=playlist_id)
+        
+        if order_by == "upload_date":
+            # 按发布日期排序（最早在前），无日期的排最后
+            def get_upload_date(v):
+                date_str = v.metadata.get('upload_date', '') if v.metadata else ''
+                return date_str if date_str else '99999999'  # 无日期排最后
+            videos.sort(key=get_upload_date)
+        elif order_by == "playlist_index":
+            videos.sort(key=lambda v: v.playlist_index or 0)
+        elif order_by == "created_at":
+            videos.sort(key=lambda v: v.created_at or datetime.min)
+        
+        return videos
+    
+    def get_pending_videos(
+        self,
+        playlist_id: str,
+        target_step: Optional[str] = None
+    ) -> List[Video]:
+        """
+        获取 Playlist 中待处理的视频
+        
+        Args:
+            playlist_id: Playlist ID
+            target_step: 目标阶段（可选），如果指定则只返回该阶段未完成的视频
+            
+        Returns:
+            待处理视频列表（按 playlist_index 排序）
+        """
+        from vat.models import TaskStep, TaskStatus
+        
+        videos = self.get_playlist_videos(playlist_id)
+        pending_videos = []
+        
+        for video in videos:
+            pending_steps = self.db.get_pending_steps(video.id)
+            
+            if target_step:
+                # 检查特定阶段是否未完成
+                try:
+                    step = TaskStep(target_step.lower())
+                    if step in pending_steps:
+                        pending_videos.append(video)
+                except ValueError:
+                    pass
+            else:
+                # 任何阶段未完成都算待处理
+                if pending_steps:
+                    pending_videos.append(video)
+        
+        return pending_videos
+    
+    def get_completed_videos(self, playlist_id: str) -> List[Video]:
+        """
+        获取 Playlist 中已完成所有阶段的视频
+        
+        Args:
+            playlist_id: Playlist ID
+            
+        Returns:
+            已完成视频列表
+        """
+        videos = self.get_playlist_videos(playlist_id)
+        completed_videos = []
+        
+        for video in videos:
+            pending_steps = self.db.get_pending_steps(video.id)
+            if not pending_steps:
+                completed_videos.append(video)
+        
+        return completed_videos
+    
+    def list_playlists(self) -> List[Playlist]:
+        """列出所有 Playlist"""
+        return self.db.list_playlists()
+    
+    def get_playlist(self, playlist_id: str) -> Optional[Playlist]:
+        """获取 Playlist 信息"""
+        return self.db.get_playlist(playlist_id)
+    
+    def delete_playlist(self, playlist_id: str, delete_videos: bool = False) -> Dict[str, Any]:
+        """
+        删除 Playlist
+        
+        Args:
+            playlist_id: Playlist ID
+            delete_videos: 是否同时删除关联的视频（默认 False，只解除关联）
+            
+        Returns:
+            {"deleted_videos": N} 如果 delete_videos=True
+        """
+        result = {"deleted_videos": 0}
+        
+        if delete_videos:
+            from pathlib import Path
+            from vat.utils.file_ops import delete_processed_files
+            
+            # 获取 Playlist 关联的所有视频
+            videos = self.get_playlist_videos(playlist_id)
+            deleted_count = 0
+            for video in videos:
+                try:
+                    # 删除处理产物文件（保留原始下载文件）
+                    if video.output_dir:
+                        output_dir = Path(video.output_dir)
+                        if output_dir.exists():
+                            delete_processed_files(output_dir)
+                    # 删除数据库记录
+                    self.db.delete_video(video.id)
+                    deleted_count += 1
+                    logger.info(f"已删除视频: {video.id} ({video.title})")
+                except Exception as e:
+                    logger.warning(f"删除视频失败: {video.id} - {e}")
+            result["deleted_videos"] = deleted_count
+            logger.info(f"共删除 {deleted_count} 个视频")
+        
+        self.db.delete_playlist(playlist_id)
+        logger.info(f"已删除 Playlist: {playlist_id}")
+        return result
+    
+    def backfill_upload_order_index(
+        self,
+        playlist_id: str,
+        callback: Callable[[str], None] = lambda x: None
+    ) -> Dict[str, Any]:
+        """
+        为现有 playlist 中缺少 upload_order_index 的视频补充索引
+        
+        用于对已有 playlist 进行一次性补齐，按 upload_date 排序分配索引。
+        已有索引的视频不会被修改。
+        
+        Args:
+            playlist_id: Playlist ID
+            callback: 进度回调
+            
+        Returns:
+            {'assigned': N, 'skipped': N}
+        """
+        videos = self.get_playlist_videos(playlist_id, order_by="upload_date")
+        assigned = 0
+        skipped = 0
+        
+        callback(f"检查 {len(videos)} 个视频的时间顺序索引...")
+        
+        # 遍历排序后的视频，按顺序分配索引
+        for i, video in enumerate(videos, 1):
+            metadata = video.metadata or {}
+            if 'upload_order_index' not in metadata:
+                metadata['upload_order_index'] = i
+                self.db.update_video(video.id, metadata=metadata)
+                assigned += 1
+            else:
+                skipped += 1
+        
+        callback(f"补齐完成: 分配 {assigned} 个, 跳过 {skipped} 个")
+        logger.info(f"Playlist {playlist_id}: backfill upload_order_index - assigned={assigned}, skipped={skipped}")
+        return {'assigned': assigned, 'skipped': skipped}
+    
+    def retranslate_videos(
+        self,
+        playlist_id: str,
+        callback: Callable[[str], None] = lambda x: None
+    ) -> Dict[str, Any]:
+        """
+        重新翻译 Playlist 中所有视频的标题/简介
+        
+        用于在更新翻译逻辑或提示词后，批量更新已有视频的翻译结果。
+        
+        Args:
+            playlist_id: Playlist ID
+            callback: 进度回调函数
+            
+        Returns:
+            {'submitted': N, 'skipped': N}
+        """
+        videos = self.get_playlist_videos(playlist_id)
+        submitted = 0
+        skipped = 0
+        
+        callback(f"开始重新翻译 {len(videos)} 个视频...")
+        
+        for i, video in enumerate(videos, 1):
+            metadata = video.metadata or {}
+            
+            # 跳过不可用视频
+            if metadata.get('unavailable', False):
+                skipped += 1
+                continue
+            
+            # 构建 video_info
+            video_info = metadata.get('_video_info', {})
+            if not video_info:
+                # 没有缓存的 video_info，从 metadata 构建
+                video_info = {
+                    'title': video.title or '',
+                    'description': metadata.get('description', ''),
+                    'tags': metadata.get('tags', []),
+                    'uploader': metadata.get('uploader', ''),
+                }
+            
+            if video_info.get('title') or video_info.get('description'):
+                self._submit_translate_task(video.id, video_info, force=True)
+                submitted += 1
+            else:
+                skipped += 1
+            
+            if i % 10 == 0:
+                callback(f"已提交 {i}/{len(videos)} 个视频...")
+        
+        callback(f"重新翻译任务已提交: {submitted} 个, 跳过 {skipped} 个")
+        return {'submitted': submitted, 'skipped': skipped}
+    
+    def get_playlist_progress(self, playlist_id: str) -> Dict[str, Any]:
+        """
+        获取 Playlist 处理进度统计
+        
+        Returns:
+            {
+                'total': 总视频数,
+                'completed': 完成数,
+                'pending': 待处理数,
+                'failed': 失败数,
+                'by_step': {step: {'completed': N, 'pending': N, 'failed': N}}
+            }
+        """
+        from vat.models import TaskStep, TaskStatus, DEFAULT_STAGE_SEQUENCE
+        
+        videos = self.get_playlist_videos(playlist_id)
+        total = len(videos)
+        completed = 0
+        failed = 0
+        unavailable = 0
+        by_step = {}
+        
+        # 初始化每个阶段的统计
+        for step in DEFAULT_STAGE_SEQUENCE:
+            by_step[step.value] = {'completed': 0, 'pending': 0, 'failed': 0}
+        
+        for video in videos:
+            metadata = video.metadata or {}
+            
+            # 检查是否为不可用视频
+            if metadata.get('unavailable', False):
+                unavailable += 1
+                continue  # 不可用视频不计入阶段统计
+            
+            tasks = self.db.get_tasks(video.id)
+            task_by_step = {t.step: t for t in tasks}
+            
+            # 检查是否全部完成
+            pending_steps = self.db.get_pending_steps(video.id)
+            if not pending_steps:
+                completed += 1
+            
+            # 统计每个阶段
+            for step in DEFAULT_STAGE_SEQUENCE:
+                task = task_by_step.get(step)
+                if task:
+                    if task.status == TaskStatus.COMPLETED:
+                        by_step[step.value]['completed'] += 1
+                    elif task.status == TaskStatus.FAILED:
+                        by_step[step.value]['failed'] += 1
+                        failed += 1
+                    else:
+                        by_step[step.value]['pending'] += 1
+                else:
+                    by_step[step.value]['pending'] += 1
+        
+        # 可处理视频数 = 总数 - 不可用
+        processable = total - unavailable
+        
+        return {
+            'total': total,
+            'completed': completed,
+            'pending': processable - completed,
+            'failed': failed,
+            'unavailable': unavailable,
+            'by_step': by_step
+        }

@@ -1,0 +1,74 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+*.pth
+
+# IDEs & Editors
+.vscode/
+.idea/
+.cursor/
+.specstory/
+.windsurf/
+*.swp
+*.swo
+*~
+
+# 运行时数据（不提交）
+data/
+local
+work/
+cookies/
+*.db
+*.log
+
+# 模型文件 & 字体（体积大，独立管理）
+models/
+vat/resources/fonts/
+*.pt
+*.bin
+*.onnx
+*.safetensors
+
+# 用户配置（只提交 default.yaml 模板）
+config/config.yaml
+config/bilibili_cookies.txt
+
+# 参考项目（独立仓库）
+ref/
+
+# 缓存
+.cache/
+.pytest_cache/
+.mypy_cache/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# NFS 临时文件
+.nfs*
+
+# 环境
+.env
+.venv/
+env/
+venv/
+

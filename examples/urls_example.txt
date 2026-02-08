@@ -1,0 +1,14 @@
+# VAT URL 列表示例文件
+# 每行一个 URL，支持注释（# 开头）
+
+# 单个视频
+https://www.youtube.com/watch?v=example_video_1
+
+# 另一个视频
+https://www.youtube.com/watch?v=example_video_2
+
+# 播放列表也可以放在这里
+# https://www.youtube.com/playlist?list=PLAYLIST_ID
+
+# 可以混合使用
+https://www.youtube.com/watch?v=example_video_3

@@ -1,0 +1,189 @@
+# vtuber 直播场景配置
+# 每个场景包含：ID、名称、描述、关键词、各阶段的额外提示词
+
+scenes:
+  - id: "gaming"
+    name: "游戏直播"
+    description: "Playing video games with commentary and reactions. Includes competitive gaming, casual gaming, game tutorials."
+    keywords:
+      - "game"
+      - "gameplay"
+      - "boss"
+      - "level"
+      - "play"
+      - "ゲーム"
+      - "プレイ"
+    
+    prompts:
+      # 断句阶段的场景特定提示词
+      split: |
+        Scene: gaming livestream. Extra splitting preferences (break placement only).
+        - Prefer shorter lines during action; allow denser <br> when reactions are rapid.
+        - Split "event" vs "reaction": what happened first, emotion/comment next.
+        - Keep game/UI terms intact: boss/stage/skill/item/quest/character names; abbreviations (HP/MP/FPS/Lv); number+unit.
+        - Keep NAME + honorific together (Xさん/ちゃん/先輩) on the same line; do not split inside a term.
+        - Short callouts can be standalone lines (right/left/behind/run/dodge/heal etc.) without rewriting.
+        - Onomatopoeia/SFX: standalone only at peak moments; otherwise attach to the related action line.
+        - Viewer thanks/callouts (@name / SC / superchat / ありがとう) should be standalone when possible.
+
+      optimize: |
+        Scene: gaming livestream. Extra optimization priorities (same language, minimal edits).
+        - Prioritize fixing misrecognized game terms/UI labels/items/skills/names using local context.
+        - Do NOT remove reaction tokens that carry meaning in gaming (e.g., えっ/うわ/やば/ナイス/ファイト); keep them but fix obvious ASR typos.
+        - Keep numbers/units/abbreviations exactly; do not “normalize away” percentages, HP/MP, ranks, levels.
+        - Keep repeated emotional bursts if they show hype, but compress extreme repeats to readable length.
+        - Avoid over-correcting into formal prose; keep short, chatty, reactive style.
+
+      translate: |
+        Scene: gaming livestream. Extra translation preferences (Chinese output).
+        - Pace-first: short, punchy Chinese; keep reactions strong but not “mainland influencer slang”.
+        - Terms-first: keep community-standard game terms; keep HP/MP/FPS/Lv, numbers, keybind-like tokens.
+        - Commands/callouts should stay short and readable (e.g., “右边/后面/快跑/躲/奶我”).
+        - If a katakana word is clearly an item/skill/food/tool, translate it (do not romaji).
+        - For unknown player/call names: keep NAME in romaji; translate honorifics (chan/senpai etc.) per global rules.
+        - Keep “www” only for laughter (if your global rule allows it); do not use it for other sounds.
+
+
+  - id: "chatting"
+    name: "闲聊直播"
+    description: "Casual conversation, Q&A session, daily life sharing, viewer interaction."
+    keywords:
+      - "chat"
+      - "talk"
+      - "雑談"
+      - "freetalk"
+      - "zatsudan"
+    
+    prompts:
+      split: |
+        Scene: casual chatting (雑談). Extra splitting preferences (break placement only).
+        - Prefer fewer breaks; keep natural conversational chunks when within length limits.
+        - Break at topic shifts, story beats, turn-taking, Q->A boundaries.
+        - Do not isolate fillers unless emphatic; usually attach (えっと/あの/なんか/うーん etc.).
+        - Greetings, direct address, viewer interaction/thanks should be their own line when possible.
+        - If forced to split for length, split by clauses (because/so/but) rather than fragmenting phrases.
+
+      optimize: |
+        Scene: casual chatting. Extra optimization priorities (same language, minimal edits).
+        - Remove only truly redundant fillers/repeats; keep natural hesitations that set a friendly tone.
+        - Fix “valid word but wrong context” ASR errors using nearby lines; do not invent new facts.
+        - Keep names/call-names consistent within the batch (same spelling/romaji choice).
+        - Keep casual punctuation; do not rewrite into formal written style.
+
+      translate: |
+        Scene: casual chatting. Extra translation preferences (Chinese output).
+        - Friend-to-friend tone: natural Chinese syntax, warm and light; avoid “宝子们/家人们/YYDS/绝绝子”等尴尬话术。
+        - Viewer address: prefer neutral “大家/各位/你们”; thanks should sound sincere, not salesy.
+        - Keep small pauses and soft interjections when they help rhythm (嗯——/诶——/那个…).
+        - If a term looks like a practical meaning (food/tool/game item), translate it rather than romaji.
+        - Unknown collab names: romaji for the NAME only; honorifics translated per global rules.
+
+
+  - id: "asmr"
+    name: "ASMR放松"
+    description: "ASMR content with soft speaking, whispering, relaxation, sleep aid, trigger sounds."
+    keywords:
+      - "asmr"
+      - "relax"
+      - "sleep"
+      - "whisper"
+      - "耳かき"
+      - "癒し"
+    
+    prompts:
+      split: |
+        Scene: ASMR/whisper/relaxation. Extra splitting preferences (break placement only).
+        - Gentle rhythm: use short lines, but avoid choppy fragmentation of a single calm meaning unit.
+        - Prefer breaks at action changes, trigger changes, or natural pauses.
+        - Onomatopoeia/trigger sounds may be standalone or attached to the action line (do not rewrite).
+        - Avoid single-character lines unless clearly intentional/emphatic.
+        - Keep viewer interaction/thanks standalone when present, but compact.
+
+      optimize: |
+        Scene: ASMR/whisper. Extra optimization priorities (same language, minimal edits).
+        - Do NOT aggressively delete “fillers”: many are intentional soft sounds in ASMR (breath, tiny hesitations).
+        - Fix only clear ASR mistakes that break meaning; keep softness markers, elongated vowels, gentle repeats.
+        - Preserve trigger/onomatopoeia tokens; compress only if they are unreadably long.
+        - Avoid making text “loud”: no added exclamation, no strong punctuation changes.
+
+      translate: |
+        Scene: ASMR/whisper. Extra translation preferences (Chinese output).
+        - Soft, calming Chinese; prefer “…” / gentle wording; avoid exclamation marks.
+        - Keep short lines; do not over-connect sentences.
+        - Translate trigger actions clearly (e.g., 耳かき -> 掏耳朵) when unambiguous.
+        - Onomatopoeia: prefer readable Chinese sound words (“沙沙/轻轻/呼——”) over romaji; keep it minimal.
+        - If a token is clearly a NAME, romaji is ok; otherwise translate for comprehension.
+
+
+  - id: "singing"
+    name: "歌回直播"
+    description: "Singing stream, karaoke, music performance, song covers."
+    keywords:
+      - "sing"
+      - "song"
+      - "karaoke"
+      - "歌"
+      - "カラオケ"
+      - "utawaku"
+    
+    prompts:
+      split: |
+        Scene: singing/karaoke (歌枠). Extra splitting preferences (break placement only).
+        - Separate "lyrics-like" parts vs spoken commentary by break density (lyrics often shorter lines).
+        - Lyrics-like text: prefer rhythmic short lines (like lyric lines) without rewriting.
+        - Keep song title/artist/work names intact; break before/after them if needed.
+        - Spoken talk between songs: follow chatting-style chunking (avoid over-splitting).
+        - Repeated syllables/interjections may be standalone if it matches rhythm.
+
+      optimize: |
+        Scene: singing/karaoke. Extra optimization priorities (same language, minimal edits).
+        - Distinguish lyrics vs speech; do not “correct” lyrics into normal prose.
+        - For lyrics, fix only obvious ASR garbage; preserve repetition and rhythm cues.
+        - Keep song titles/artist names consistent (same spelling/romaji choice).
+        - Avoid deleting elongated vowels or small adlibs if they are part of singing.
+
+      translate: |
+        Scene: singing/karaoke. Extra translation preferences (Chinese output).
+        - Lyrics: translate lightly and concisely; keep line rhythm; avoid modern meme/slang; do not add commentary.
+        - Spoken parts: use chatting-style natural Chinese.
+        - Song title/artist: use official Chinese name if clearly known; otherwise keep as romaji (NAME only).
+        - Keep musical terms (key/pitch/tempo) accurate and compact.
+
+
+  - id: "teaching"
+    name: "教学解说"
+    description: "Tutorial, educational content, knowledge sharing, explanation streams."
+    keywords:
+      - "tutorial"
+      - "how to"
+      - "guide"
+      - "explain"
+      - "教学"
+      - "講座"
+    
+    prompts:
+      split: |
+        Scene: tutorial/explanation. Extra splitting preferences (break placement only).
+        - Break at step/discourse markers (まず/次に/最後/注意/要するに/例えば etc.).
+        - Prefer “definition -> explanation -> conclusion” as separate lines when length requires.
+        - Keep technical terms/abbreviations/variable-like tokens intact.
+        - Keep code/commands/paths as a single unit; allow slight overflow rather than splitting inside.
+        - Enumerations (A,B,C) can be separate lines if it improves readability.
+
+      optimize: |
+        Scene: tutorial/explanation. Extra optimization priorities (same language, minimal edits).
+        - Prioritize correcting technical terms, numbers, commands, file paths, APIs using local context.
+        - Do NOT “simplify away” symbols, operators, or formatting that matters (%, ->, ::, /path, flags).
+        - Keep logical connectors (まず/次に/だから/つまり) unless they are clear ASR noise.
+        - Avoid stylistic rewriting; keep meaning and structure close.
+
+      translate: |
+        Scene: tutorial/explanation. Extra translation preferences (Chinese output).
+        - Clarity-first: structured, stepwise Chinese; slightly more formal is ok, but still subtitle-friendly.
+        - Keep technical tokens unchanged (code/paths/flags); translate surrounding explanation.
+        - Term consistency: use one Chinese rendering per term; if helpful and unambiguous, allow tiny parentheses (e.g., VRAM（显存）).
+        - Avoid slang; keep precise wording; do not invent missing steps or facts.
+
+
+# 默认场景（无法判断时使用）
+default_scene: "chatting"

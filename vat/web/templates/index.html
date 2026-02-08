@@ -1,0 +1,375 @@
+{% extends "base.html" %}
+
+{% block title %}视频列表 - VAT Manager{% endblock %}
+
+{% block content %}
+<!-- 统计卡片 -->
+<div class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
+    <div class="bg-white rounded-lg shadow p-4">
+        <div class="text-2xl font-bold text-gray-800">{{ stats.total_videos }}</div>
+        <div class="text-sm text-gray-500">视频总数</div>
+    </div>
+    <a href="?status=completed" class="bg-white rounded-lg shadow p-4 hover:bg-green-50 transition">
+        <div class="text-2xl font-bold text-green-600">
+            {{ videos | selectattr('progress', 'eq', 100) | list | length if not status_filter else (videos | length if status_filter == 'completed' else '-') }}
+        </div>
+        <div class="text-sm text-gray-500">已完成</div>
+    </a>
+    <a href="?status=running" class="bg-white rounded-lg shadow p-4 hover:bg-blue-50 transition">
+        <div class="text-2xl font-bold text-blue-600">-</div>
+        <div class="text-sm text-gray-500">进行中</div>
+    </a>
+    <a href="?status=failed" class="bg-white rounded-lg shadow p-4 hover:bg-red-50 transition">
+        <div class="text-2xl font-bold text-red-600">-</div>
+        <div class="text-sm text-gray-500">失败</div>
+    </a>
+</div>
+
+<!-- 搜索和过滤栏 -->
+<div class="flex flex-wrap items-center gap-4 mb-4">
+    <!-- 搜索框 -->
+    <div class="flex-1 min-w-[200px] max-w-md">
+        <form action="/" method="GET" class="flex">
+            <input type="text" name="q" value="{{ search_query }}" placeholder="搜索标题/频道/ID..."
+                   class="flex-1 px-3 py-2 border border-gray-300 rounded-l-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
+            {% if status_filter %}<input type="hidden" name="status" value="{{ status_filter }}">{% endif %}
+            {% if playlist_filter %}<input type="hidden" name="playlist_id" value="{{ playlist_filter }}">{% endif %}
+            <button type="submit" class="px-4 py-2 bg-blue-600 text-white rounded-r-lg hover:bg-blue-700">搜索</button>
+        </form>
+    </div>
+    
+    <!-- Playlist 过滤 -->
+    <div class="flex items-center space-x-2">
+        <span class="text-gray-600 text-sm">Playlist:</span>
+        <select onchange="filterByPlaylist(this.value)" class="px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500">
+            <option value="">全部</option>
+            {% for pl in playlists %}
+            <option value="{{ pl.id }}" {% if playlist_filter == pl.id %}selected{% endif %}>{{ pl.title | truncate(30) }}</option>
+            {% endfor %}
+        </select>
+    </div>
+</div>
+
+<!-- 状态筛选和操作栏 -->
+<div class="flex items-center justify-between mb-4">
+    <div class="flex items-center space-x-2">
+        <span class="text-gray-600 text-sm">状态:</span>
+        <a href="/?{% if search_query %}q={{ search_query }}&{% endif %}{% if playlist_filter %}playlist_id={{ playlist_filter }}{% endif %}" 
+           class="px-3 py-1 rounded-full text-sm {% if not status_filter %}bg-gray-800 text-white{% else %}bg-gray-200 text-gray-700 hover:bg-gray-300{% endif %}">全部</a>
+        <a href="/?status=completed{% if search_query %}&q={{ search_query }}{% endif %}{% if playlist_filter %}&playlist_id={{ playlist_filter }}{% endif %}" 
+           class="px-3 py-1 rounded-full text-sm {% if status_filter == 'completed' %}bg-green-600 text-white{% else %}bg-gray-200 text-gray-700 hover:bg-gray-300{% endif %}">已完成</a>
+        <a href="/?status=running{% if search_query %}&q={{ search_query }}{% endif %}{% if playlist_filter %}&playlist_id={{ playlist_filter }}{% endif %}" 
+           class="px-3 py-1 rounded-full text-sm {% if status_filter == 'running' %}bg-blue-600 text-white{% else %}bg-gray-200 text-gray-700 hover:bg-gray-300{% endif %}">进行中</a>
+        <a href="/?status=failed{% if search_query %}&q={{ search_query }}{% endif %}{% if playlist_filter %}&playlist_id={{ playlist_filter }}{% endif %}" 
+           class="px-3 py-1 rounded-full text-sm {% if status_filter == 'failed' %}bg-red-600 text-white{% else %}bg-gray-200 text-gray-700 hover:bg-gray-300{% endif %}">失败</a>
+        <span class="text-gray-400 mx-2">|</span>
+        <span class="text-sm text-gray-600">共 {{ total }} 个视频</span>
+    </div>
+    <div class="flex items-center space-x-2">
+        <button onclick="showAddVideoDialog()" class="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700">
+            + 添加视频
+        </button>
+        <button id="batch-delete-btn" onclick="batchDeleteVideos()" class="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 hidden">
+            删除选中 (<span id="selected-count">0</span>)
+        </button>
+    </div>
+</div>
+
+<!-- 视频列表 -->
+<div class="bg-white rounded-lg shadow overflow-hidden">
+    <table class="w-full">
+        <thead class="bg-gray-50 border-b">
+            <tr>
+                <th class="px-2 py-3 w-10">
+                    <input type="checkbox" id="select-all" onchange="toggleSelectAll()" class="rounded">
+                </th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">视频</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">来源</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">时长</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">任务状态</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">进度</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">创建时间</th>
+            </tr>
+        </thead>
+        <tbody class="divide-y divide-gray-200">
+            {% for video in videos %}
+            <tr class="hover:bg-gray-50">
+                <td class="px-2 py-3" onclick="event.stopPropagation()">
+                    <input type="checkbox" class="video-checkbox rounded" value="{{ video.id }}" onchange="updateSelectedCount()">
+                </td>
+                <td class="px-4 py-3 cursor-pointer" onclick="window.location='/video/{{ video.id }}'">
+                    <div class="flex items-center space-x-3">
+                        {% if video.thumbnail %}
+                        <img src="{{ video.thumbnail }}" alt="" class="w-20 h-12 object-cover rounded">
+                        {% else %}
+                        <div class="w-20 h-12 bg-gray-200 rounded flex items-center justify-center text-gray-400">
+                            🎬
+                        </div>
+                        {% endif %}
+                        <div class="min-w-0 flex-1">
+                            <div class="text-sm font-medium text-gray-900 truncate max-w-md hover:text-blue-600" title="{{ video.title }}">
+                                {{ video.title | truncate(50) }}
+                            </div>
+                            {% if video.translated_title and video.translated_title != video.title %}
+                            <div class="text-xs text-blue-600 truncate max-w-md" title="{{ video.translated_title }}">
+                                → {{ video.translated_title | truncate(50) }}
+                            </div>
+                            {% endif %}
+                            {% if video.channel %}
+                            <div class="text-xs text-gray-500">{{ video.channel }}</div>
+                            {% endif %}
+                        </div>
+                    </div>
+                </td>
+                <td class="px-4 py-3">
+                    <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium
+                        {% if video.source_type == 'youtube' %}bg-red-100 text-red-800
+                        {% elif video.source_type == 'bilibili' %}bg-pink-100 text-pink-800
+                        {% else %}bg-gray-100 text-gray-800{% endif %}">
+                        {{ video.source_type }}
+                    </span>
+                </td>
+                <td class="px-4 py-3 text-sm text-gray-600">
+                    {{ video.duration | format_duration }}
+                </td>
+                <td class="px-4 py-3">
+                    <div class="flex items-center space-x-1">
+                        {% for step in ['download', 'whisper', 'split', 'optimize', 'translate', 'embed', 'upload'] %}
+                        {% set task = video.task_status.get(step, {}) %}
+                        {% set status = task.get('status', 'pending') %}
+                        <div class="w-4 h-4 rounded-full status-{{ status }} flex items-center justify-center text-white text-xs"
+                             title="{{ step }}: {{ status }}{% if task.get('error') %} - {{ task.error }}{% endif %}">
+                            {% if status == 'completed' %}✓
+                            {% elif status == 'running' %}⟳
+                            {% elif status == 'failed' %}✗
+                            {% else %}·{% endif %}
+                        </div>
+                        {% endfor %}
+                    </div>
+                </td>
+                <td class="px-4 py-3">
+                    <div class="flex items-center space-x-2">
+                        <div class="w-24 bg-gray-200 rounded-full h-2">
+                            <div class="h-2 rounded-full {% if video.progress == 100 %}bg-green-500{% elif video.progress > 0 %}bg-blue-500{% else %}bg-gray-400{% endif %}"
+                                 style="width: {{ video.progress }}%"></div>
+                        </div>
+                        <span class="text-xs text-gray-600">{{ video.progress }}%</span>
+                    </div>
+                </td>
+                <td class="px-4 py-3 text-sm text-gray-600">
+                    {{ video.created_at | format_datetime }}
+                </td>
+            </tr>
+            {% else %}
+            <tr>
+                <td colspan="6" class="px-4 py-8 text-center text-gray-500">
+                    暂无视频
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<!-- 分页 -->
+{% if total_pages > 1 %}
+<div class="flex justify-center items-center mt-4 space-x-2">
+    {% if current_page > 1 %}
+    <a href="?page={{ current_page - 1 }}{% if status_filter %}&status={{ status_filter }}{% endif %}{% if search_query %}&q={{ search_query }}{% endif %}{% if playlist_filter %}&playlist_id={{ playlist_filter }}{% endif %}" 
+       class="px-3 py-1 bg-white border rounded hover:bg-gray-50">上一页</a>
+    {% endif %}
+    
+    <!-- 页码跳转 -->
+    <div class="flex items-center space-x-1">
+        <input type="number" id="page-jump-input" min="1" max="{{ total_pages }}" value="{{ current_page }}"
+               class="w-16 px-2 py-1 border rounded text-center" onkeypress="if(event.key==='Enter')jumpToPage()">
+        <span class="text-gray-600">/ {{ total_pages }}</span>
+        <button onclick="jumpToPage()" class="px-2 py-1 bg-gray-100 border rounded hover:bg-gray-200 text-sm">跳转</button>
+    </div>
+    
+    {% if current_page < total_pages %}
+    <a href="?page={{ current_page + 1 }}{% if status_filter %}&status={{ status_filter }}{% endif %}{% if search_query %}&q={{ search_query }}{% endif %}{% if playlist_filter %}&playlist_id={{ playlist_filter }}{% endif %}"
+       class="px-3 py-1 bg-white border rounded hover:bg-gray-50">下一页</a>
+    {% endif %}
+</div>
+{% endif %}
+
+<!-- 添加视频弹窗 -->
+<div id="add-video-modal" class="fixed inset-0 bg-black bg-opacity-50 hidden items-center justify-center z-50">
+    <div class="bg-white rounded-lg shadow-xl p-6 w-full max-w-md mx-4">
+        <h3 class="text-lg font-bold mb-4">添加视频</h3>
+        <div class="mb-4">
+            <label class="block text-sm font-medium text-gray-700 mb-1">视频 URL</label>
+            <input type="text" id="video-url-input" placeholder="YouTube 或 Bilibili 视频链接"
+                   class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
+            <p class="text-xs text-gray-500 mt-1">支持 YouTube、Bilibili 视频链接</p>
+        </div>
+        <div class="flex justify-end space-x-2">
+            <button onclick="closeAddVideoDialog()" class="px-4 py-2 text-gray-600 hover:bg-gray-100 rounded-lg">取消</button>
+            <button onclick="addVideo()" class="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700">添加</button>
+        </div>
+    </div>
+</div>
+
+<script>
+// Playlist 过滤
+function filterByPlaylist(playlistId) {
+    const params = new URLSearchParams(window.location.search);
+    if (playlistId) {
+        params.set('playlist_id', playlistId);
+    } else {
+        params.delete('playlist_id');
+    }
+    params.delete('page');  // 重置到第一页
+    window.location.href = '/?' + params.toString();
+}
+
+// 页码跳转
+function jumpToPage() {
+    const input = document.getElementById('page-jump-input');
+    const page = parseInt(input.value);
+    const maxPage = parseInt(input.max);
+    if (page >= 1 && page <= maxPage) {
+        const params = new URLSearchParams(window.location.search);
+        params.set('page', page);
+        window.location.href = '/?' + params.toString();
+    }
+}
+
+// 选择相关
+function toggleSelectAll() {
+    const selectAll = document.getElementById('select-all');
+    const checkboxes = document.querySelectorAll('.video-checkbox');
+    checkboxes.forEach(cb => cb.checked = selectAll.checked);
+    updateSelectedCount();
+}
+
+function updateSelectedCount() {
+    const checkboxes = document.querySelectorAll('.video-checkbox:checked');
+    const count = checkboxes.length;
+    document.getElementById('selected-count').textContent = count;
+    document.getElementById('batch-delete-btn').classList.toggle('hidden', count === 0);
+}
+
+// 批量删除
+let pendingDeleteIds = [];
+
+function batchDeleteVideos() {
+    const checkboxes = document.querySelectorAll('.video-checkbox:checked');
+    pendingDeleteIds = Array.from(checkboxes).map(cb => cb.value);
+    
+    if (pendingDeleteIds.length === 0) return;
+    
+    document.getElementById('batch-delete-count').textContent = pendingDeleteIds.length;
+    document.getElementById('batch-delete-modal').classList.remove('hidden');
+    document.getElementById('batch-delete-modal').classList.add('flex');
+}
+
+function closeBatchDeleteModal() {
+    document.getElementById('batch-delete-modal').classList.add('hidden');
+    document.getElementById('batch-delete-modal').classList.remove('flex');
+    document.getElementById('batch-delete-all-files').checked = false;
+}
+
+async function confirmBatchDelete() {
+    const deleteAllFiles = document.getElementById('batch-delete-all-files').checked;
+    
+    let success = 0, failed = 0;
+    for (const id of pendingDeleteIds) {
+        try {
+            const response = await fetch(`/api/videos/${id}?delete_all_files=${deleteAllFiles}`, {method: 'DELETE'});
+            if (response.ok) success++;
+            else failed++;
+        } catch (e) {
+            failed++;
+        }
+    }
+    
+    closeBatchDeleteModal();
+    showToast(`删除完成：成功 ${success} 个，失败 ${failed} 个`, success > 0 ? 'success' : 'warning');
+    setTimeout(() => location.reload(), 1000);
+}
+
+// 添加视频弹窗
+function showAddVideoDialog() {
+    document.getElementById('add-video-modal').classList.remove('hidden');
+    document.getElementById('add-video-modal').classList.add('flex');
+    document.getElementById('video-url-input').focus();
+}
+
+function closeAddVideoDialog() {
+    document.getElementById('add-video-modal').classList.add('hidden');
+    document.getElementById('add-video-modal').classList.remove('flex');
+    document.getElementById('video-url-input').value = '';
+}
+
+async function addVideo() {
+    const url = document.getElementById('video-url-input').value.trim();
+    if (!url) {
+        showToast('请输入视频 URL', 'warning');
+        return;
+    }
+    
+    try {
+        const response = await fetch('/api/videos', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({url: url})
+        });
+        
+        if (response.ok) {
+            const result = await response.json();
+            showToast('添加成功！', 'success');
+            closeAddVideoDialog();
+            location.href = `/video/${result.video_id}`;
+        } else {
+            const error = await response.json();
+            showToast('添加失败: ' + (error.detail || '未知错误'), 'error');
+        }
+    } catch (e) {
+        showToast('请求失败: ' + e.message, 'error');
+    }
+}
+
+// ESC 关闭弹窗
+document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape') {
+        closeAddVideoDialog();
+        closeBatchDeleteModal();
+    }
+});
+
+// 点击模态框外部关闭
+document.addEventListener('DOMContentLoaded', function() {
+    setupModalClickOutside('add-video-modal', closeAddVideoDialog);
+    setupModalClickOutside('batch-delete-modal', closeBatchDeleteModal);
+});
+</script>
+
+<!-- 批量删除确认弹窗 -->
+<div id="batch-delete-modal" class="fixed inset-0 bg-black bg-opacity-50 hidden items-center justify-center z-50">
+    <div class="bg-white rounded-lg shadow-xl p-6 w-full max-w-md mx-4">
+        <h3 class="text-lg font-bold mb-4 text-red-600">批量删除视频</h3>
+        <p class="text-gray-600 mb-4">确定要删除选中的 <span id="batch-delete-count" class="font-bold">0</span> 个视频吗？</p>
+        
+        <div class="bg-gray-50 rounded p-3 mb-4">
+            <label class="flex items-start space-x-2 cursor-pointer">
+                <input type="checkbox" id="batch-delete-all-files" class="mt-1 rounded">
+                <div>
+                    <span class="text-sm font-medium text-gray-700">同时删除所有文件</span>
+                    <p class="text-xs text-gray-500">勾选后将删除整个输出目录，包括原始下载的视频、音频和字幕文件</p>
+                </div>
+            </label>
+        </div>
+        
+        <p class="text-xs text-gray-500 mb-4">
+            默认只删除处理产物（翻译字幕、嵌入视频等），保留原始下载文件。
+        </p>
+        
+        <div class="flex justify-end space-x-2">
+            <button onclick="closeBatchDeleteModal()" class="px-4 py-2 text-gray-600 hover:bg-gray-100 rounded-lg">取消</button>
+            <button onclick="confirmBatchDelete()" class="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700">确认删除</button>
+        </div>
+    </div>
+</div>
+{% endblock %}

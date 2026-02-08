@@ -1,0 +1,9 @@
+# 忽略用户配置和敏感信息
+config.yaml
+*cookies*.txt
+dict_*.txt
+*.key
+*.pem
+
+# 保留默认配置模板
+!default.yaml

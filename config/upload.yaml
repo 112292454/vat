@@ -1,0 +1,90 @@
+bilibili:
+  copyright: 1
+  default_tid: 21
+  default_tags:
+  - VTuber
+  - hololive
+  - 虚拟主播
+  auto_cover: true
+  cover_source: thumbnail
+  season_id: null
+  templates:
+    title: '【${channel_name}】${translated_title} | ${brand} | #${playlist_index}'
+    description: '简介摘要:${tldr}
+
+
+      完整简介：${translated_desc}
+
+
+      ━━━━━━━━━━━━━━━━━━━━━━
+
+
+      📺 原视频: ${source_url}
+
+      📺 原始标题${original_title}
+
+      📅 原发布日期: ${original_date}
+
+      ⏱️ 时长: ${duration}
+
+      📺 原频道: ${channel_name}
+
+      🔗 频道链接: ${channel_url}
+
+
+      ━━━━━━━━━━━━━━━━━━━━━━
+
+      🤖 关于本翻译
+
+
+      本视频由 AI 全自动翻译生成，全流程无人工参与，作者不对其中任何言论的内容或翻译准确性负责。
+
+      使用 Whisper ASR + LLM 翻译 pipeline，成本约 0.1~0.5 元/小时视频，用爱发电。如收到任何支持，将用于填补翻译成本的token费用。建议参考github页面
+
+
+      翻译质量说明：
+
+      • 整体意思基本通顺，但可能存在误译
+
+      • 多人对话场景、歌唱识别效果有限
+
+      • 专有名词/术语可能翻译不准确
+
+
+      项目初衷："有个翻译总比没有好"
+
+
+      注：欢迎所有人基于视频质量、翻译方式等提出意见。并诚邀有兴趣得到更好的翻译效果的开发人员(见github)、有自己制作字幕能力的、同样喜欢搬运的该主播的朋友们交流（暂定群：1047066927）
+
+
+      ━━━━━━━━━━━━━━━━━━━━━━
+
+      📂 项目相关
+
+
+      ${project_description}
+
+      ${project_url}
+
+      该项目开源主要是提供了“机翻的整个流程”，并且人工可以任意编辑其中的环节。供有能力进行日语翻译者加工，以及技术人员和爱好者基于AI进行翻译。
+
+
+      如有翻译建议或技术交流，欢迎访问项目仓库。
+
+
+      ━━━━━━━━━━━━━━━━━━━━━━
+
+      ⚠️ 版权声明
+
+
+      如相关版权方提出任何依据中国现行法律的侵权意见，
+
+      本人将在收到消息核实后尽快删除相关视频，对造成的不便深表歉意。
+
+      本视频仅供学习、参考 LLM 相关技术以及日语交流使用。
+
+      '
+    custom_vars:
+      brand: AI全熟
+      project_description: 开源项目 VAT (Video Auto Translator) - 自动翻译 VTuber 视频
+      project_url: https://github.com/112292454/VAT  **如果你看到这段文字，说明这个视频只是测试用，请勿投币收藏等操作**

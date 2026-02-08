@@ -1,0 +1,447 @@
+{% extends "base.html" %}
+
+{% block title %}B站设置 - VAT{% endblock %}
+
+{% block content %}
+<div class="container mx-auto px-4 py-6">
+    <h1 class="text-2xl font-bold mb-6">B站设置</h1>
+    
+    <!-- 登录状态 -->
+    <div class="bg-white rounded-lg shadow p-6 mb-6">
+        <h2 class="text-lg font-semibold mb-4">账号状态</h2>
+        
+        <div id="login-status">
+            {% if login_status.logged_in %}
+            <div class="flex items-center gap-4">
+                <span class="inline-flex items-center px-3 py-1 rounded-full text-sm font-medium bg-green-100 text-green-800">
+                    ✓ 已登录
+                </span>
+                <span class="text-gray-700">
+                    {{ login_status.username }} (UID: {{ login_status.uid }}) Lv{{ login_status.level }}
+                </span>
+            </div>
+            {% else %}
+            <div class="flex items-center gap-4">
+                <span class="inline-flex items-center px-3 py-1 rounded-full text-sm font-medium bg-red-100 text-red-800">
+                    ✗ 未登录
+                </span>
+                <button onclick="showLoginModal()" class="px-4 py-2 bg-pink-500 text-white rounded hover:bg-pink-600">
+                    扫码登录
+                </button>
+            </div>
+            {% endif %}
+        </div>
+    </div>
+    
+    <!-- 合集管理 -->
+    <div class="bg-white rounded-lg shadow p-6 mb-6">
+        <div class="flex justify-between items-center mb-4">
+            <h2 class="text-lg font-semibold">合集管理</h2>
+            <button onclick="showCreateSeasonModal()" class="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 text-sm"
+                    {% if not login_status.logged_in %}disabled{% endif %}>
+                + 创建合集
+            </button>
+        </div>
+        
+        {% if not login_status.logged_in %}
+        <p class="text-gray-500">请先登录B站账号</p>
+        {% elif seasons %}
+        <div class="overflow-x-auto">
+            <table class="min-w-full divide-y divide-gray-200">
+                <thead class="bg-gray-50">
+                    <tr>
+                        <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">ID</th>
+                        <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">名称</th>
+                        <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">视频数</th>
+                        <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">操作</th>
+                    </tr>
+                </thead>
+                <tbody class="bg-white divide-y divide-gray-200">
+                    {% for s in seasons %}
+                    <tr>
+                        <td class="px-4 py-3 text-sm text-gray-900">{{ s.season_id }}</td>
+                        <td class="px-4 py-3 text-sm text-gray-900">{{ s.name or '(未命名)' }}</td>
+                        <td class="px-4 py-3 text-sm text-gray-500">{{ s.total }}</td>
+                        <td class="px-4 py-3 text-sm">
+                            <button onclick="copySeasonId({{ s.season_id }})" class="text-blue-600 hover:text-blue-800">
+                                复制ID
+                            </button>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% else %}
+        <p class="text-gray-500">暂无合集</p>
+        {% endif %}
+    </div>
+    
+    <!-- 上传模板设置 -->
+    <div class="bg-white rounded-lg shadow p-6 mb-6">
+        <h2 class="text-lg font-semibold mb-4">上传模板</h2>
+        <p class="text-sm text-gray-500 mb-4">
+            模板支持变量替换，格式: <code class="bg-gray-100 px-1 rounded">${变量名}</code>
+        </p>
+        
+        <form id="template-form" class="space-y-4">
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">标题模板</label>
+                <input type="text" name="title_template" 
+                       value="{{ templates.title }}"
+                       class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder="【${channel_name}】${translated_title}">
+            </div>
+            
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">简介模板</label>
+                <textarea name="desc_template" rows="6"
+                          class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                          placeholder="${translated_desc}">{{ templates.description }}</textarea>
+            </div>
+            
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">可用变量 <span class="text-gray-400 font-normal">(点击插入)</span></label>
+                <div class="space-y-2 text-xs">
+                    <div>
+                        <span class="text-gray-500 mr-2">频道:</span>
+                        <span class="px-2 py-1 bg-blue-50 rounded cursor-pointer hover:bg-blue-100" onclick="insertVar('channel_name')">channel_name</span>
+                        <span class="px-2 py-1 bg-blue-50 rounded cursor-pointer hover:bg-blue-100" onclick="insertVar('channel_url')">channel_url</span>
+                        <span class="px-2 py-1 bg-blue-50 rounded cursor-pointer hover:bg-blue-100" onclick="insertVar('channel_id')">channel_id</span>
+                    </div>
+                    <div>
+                        <span class="text-gray-500 mr-2">翻译:</span>
+                        <span class="px-2 py-1 bg-green-50 rounded cursor-pointer hover:bg-green-100" onclick="insertVar('translated_title')">translated_title</span>
+                        <span class="px-2 py-1 bg-green-50 rounded cursor-pointer hover:bg-green-100" onclick="insertVar('translated_desc')">translated_desc</span>
+                        <span class="px-2 py-1 bg-green-50 rounded cursor-pointer hover:bg-green-100" onclick="insertVar('tldr')">tldr</span>
+                    </div>
+                    <div>
+                        <span class="text-gray-500 mr-2">原始:</span>
+                        <span class="px-2 py-1 bg-yellow-50 rounded cursor-pointer hover:bg-yellow-100" onclick="insertVar('original_title')">original_title</span>
+                        <span class="px-2 py-1 bg-yellow-50 rounded cursor-pointer hover:bg-yellow-100" onclick="insertVar('original_desc')">original_desc</span>
+                        <span class="px-2 py-1 bg-yellow-50 rounded cursor-pointer hover:bg-yellow-100" onclick="insertVar('original_date')">original_date</span>
+                    </div>
+                    <div>
+                        <span class="text-gray-500 mr-2">视频:</span>
+                        <span class="px-2 py-1 bg-purple-50 rounded cursor-pointer hover:bg-purple-100" onclick="insertVar('source_url')">source_url</span>
+                        <span class="px-2 py-1 bg-purple-50 rounded cursor-pointer hover:bg-purple-100" onclick="insertVar('video_id')">video_id</span>
+                        <span class="px-2 py-1 bg-purple-50 rounded cursor-pointer hover:bg-purple-100" onclick="insertVar('duration')">duration</span>
+                        <span class="px-2 py-1 bg-purple-50 rounded cursor-pointer hover:bg-purple-100" onclick="insertVar('duration_minutes')">duration_minutes</span>
+                    </div>
+                    <div>
+                        <span class="text-gray-500 mr-2">列表:</span>
+                        <span class="px-2 py-1 bg-pink-50 rounded cursor-pointer hover:bg-pink-100" onclick="insertVar('playlist_name')">playlist_name</span>
+                        <span class="px-2 py-1 bg-pink-50 rounded cursor-pointer hover:bg-pink-100" onclick="insertVar('playlist_index')">playlist_index</span>
+                    </div>
+                    <div>
+                        <span class="text-gray-500 mr-2">其他:</span>
+                        <span class="px-2 py-1 bg-gray-100 rounded cursor-pointer hover:bg-gray-200" onclick="insertVar('today')">today</span>
+                        <span class="px-2 py-1 bg-gray-100 rounded cursor-pointer hover:bg-gray-200" onclick="insertVar('brand')">brand</span>
+                        <span class="px-2 py-1 bg-gray-100 rounded cursor-pointer hover:bg-gray-200" onclick="insertVar('project_description')">project_description</span>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="pt-4">
+                <button type="button" onclick="saveTemplates()" class="px-4 py-2 bg-green-500 text-white rounded hover:bg-green-600">
+                    保存模板
+                </button>
+                <!-- <span class="text-sm text-gray-500 ml-4">注意：修改后需要编辑 config/default.yaml 以持久保存</span> -->
+            </div>
+        </form>
+    </div>
+    
+    <!-- 默认设置 -->
+    <div class="bg-white rounded-lg shadow p-6">
+        <h2 class="text-lg font-semibold mb-4">默认上传设置</h2>
+        
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">版权类型</label>
+                <select name="copyright" class="w-full px-3 py-2 border border-gray-300 rounded-md">
+                    <option value="1" {% if config.copyright == 1 %}selected{% endif %}>自制</option>
+                    <option value="2" {% if config.copyright == 2 %}selected{% endif %}>转载</option>
+                </select>
+            </div>
+            
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">默认分区</label>
+                <input type="number" name="default_tid" value="{{ config.default_tid }}"
+                       class="w-full px-3 py-2 border border-gray-300 rounded-md">
+            </div>
+            
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">默认标签</label>
+                <input type="text" name="default_tags" value="{{ config.default_tags | join(', ') }}"
+                       class="w-full px-3 py-2 border border-gray-300 rounded-md"
+                       placeholder="VTuber, 日本">
+            </div>
+            
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">默认合集</label>
+                <select name="season_id" class="w-full px-3 py-2 border border-gray-300 rounded-md">
+                    <option value="">不加入合集</option>
+                    {% for s in seasons %}
+                    <option value="{{ s.season_id }}" {% if config.season_id == s.season_id %}selected{% endif %}>
+                        {{ s.name or '(未命名)' }}
+                    </option>
+                    {% endfor %}
+                </select>
+            </div>
+            
+            <div class="flex items-center">
+                <input type="checkbox" name="auto_cover" id="auto_cover" 
+                       {% if config.auto_cover %}checked{% endif %}
+                       class="h-4 w-4 text-blue-600 border-gray-300 rounded">
+                <label for="auto_cover" class="ml-2 text-sm text-gray-700">自动使用视频封面</label>
+            </div>
+        </div>
+        
+        <div class="pt-4 mt-4 border-t">
+            <button type="button" onclick="saveSettings()" class="px-4 py-2 bg-green-500 text-white rounded hover:bg-green-600">
+                保存设置
+            </button>
+            <!-- <span class="text-sm text-gray-500 ml-4">注意：修改后需要编辑 config/default.yaml 以持久保存</span> -->
+        </div>
+    </div>
+</div>
+
+<!-- 登录弹窗 -->
+<div id="login-modal" class="fixed inset-0 bg-black bg-opacity-50 hidden flex items-center justify-center z-50">
+    <div class="bg-white rounded-lg p-6 max-w-md w-full mx-4">
+        <div class="flex justify-between items-center mb-4">
+            <h3 class="text-lg font-semibold">扫码登录B站</h3>
+            <button onclick="closeLoginModal()" class="text-gray-500 hover:text-gray-700">&times;</button>
+        </div>
+        
+        <div id="qrcode-container" class="text-center py-4">
+            <div class="text-gray-500">正在获取二维码...</div>
+        </div>
+        
+        <div id="login-message" class="text-center text-sm text-gray-500 mt-2"></div>
+    </div>
+</div>
+
+<!-- 创建合集弹窗 -->
+<div id="create-season-modal" class="fixed inset-0 bg-black bg-opacity-50 hidden flex items-center justify-center z-50">
+    <div class="bg-white rounded-lg p-6 max-w-md w-full mx-4">
+        <div class="flex justify-between items-center mb-4">
+            <h3 class="text-lg font-semibold">创建合集</h3>
+            <button onclick="closeCreateSeasonModal()" class="text-gray-500 hover:text-gray-700">&times;</button>
+        </div>
+        
+        <form id="create-season-form" class="space-y-4">
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">合集名称</label>
+                <input type="text" name="season_title" required
+                       class="w-full px-3 py-2 border border-gray-300 rounded-md">
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">合集简介</label>
+                <textarea name="season_desc" rows="3"
+                          class="w-full px-3 py-2 border border-gray-300 rounded-md"></textarea>
+            </div>
+            <div class="flex justify-end gap-2">
+                <button type="button" onclick="closeCreateSeasonModal()" class="px-4 py-2 border rounded hover:bg-gray-50">
+                    取消
+                </button>
+                <button type="submit" class="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600">
+                    创建
+                </button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<script>
+// 登录相关
+let qrData = null;
+let loginCheckInterval = null;
+
+function showLoginModal() {
+    document.getElementById('login-modal').classList.remove('hidden');
+    fetchQRCode();
+}
+
+function closeLoginModal() {
+    document.getElementById('login-modal').classList.add('hidden');
+    if (loginCheckInterval) {
+        clearInterval(loginCheckInterval);
+        loginCheckInterval = null;
+    }
+}
+
+async function fetchQRCode() {
+    const container = document.getElementById('qrcode-container');
+    container.innerHTML = '<div class="text-gray-500">正在获取二维码...</div>';
+    
+    try {
+        const resp = await fetch('/bilibili/qrcode');
+        const data = await resp.json();
+        
+        if (data.success) {
+            qrData = data.qr_data;
+            // 生成二维码图片
+            container.innerHTML = `
+                <div class="flex flex-col items-center">
+                    <img src="https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(data.qr_url)}" 
+                         alt="登录二维码" class="border rounded">
+                    <p class="mt-2 text-sm text-gray-600">请使用B站APP扫描</p>
+                </div>
+            `;
+            document.getElementById('login-message').textContent = '等待扫码...';
+            
+            // 启动后台登录任务（会阻塞等待扫码完成）
+            startLoginTask();
+            
+            // 同时开始轮询登录状态
+            startLoginCheck();
+        } else {
+            container.innerHTML = `<div class="text-red-500">${data.error}</div>`;
+        }
+    } catch (e) {
+        container.innerHTML = `<div class="text-red-500">获取二维码失败: ${e}</div>`;
+    }
+}
+
+async function startLoginTask() {
+    // 调用后台登录接口，它会在后台线程等待扫码
+    try {
+        const formData = new FormData();
+        formData.append('qr_data', qrData);
+        await fetch('/bilibili/login', {
+            method: 'POST',
+            body: formData
+        });
+    } catch (e) {
+        console.error('启动登录任务失败:', e);
+    }
+}
+
+function startLoginCheck() {
+    // 每3秒检查一次登录状态
+    loginCheckInterval = setInterval(async () => {
+        try {
+            const resp = await fetch('/bilibili/status');
+            const data = await resp.json();
+            
+            if (data.logged_in) {
+                clearInterval(loginCheckInterval);
+                document.getElementById('login-message').textContent = '登录成功！';
+                setTimeout(() => {
+                    location.reload();
+                }, 1000);
+            }
+        } catch (e) {
+            console.error('检查登录状态失败:', e);
+        }
+    }, 3000);
+}
+
+// 创建合集
+function showCreateSeasonModal() {
+    document.getElementById('create-season-modal').classList.remove('hidden');
+}
+
+function closeCreateSeasonModal() {
+    document.getElementById('create-season-modal').classList.add('hidden');
+}
+
+document.getElementById('create-season-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const form = e.target;
+    const formData = new FormData();
+    formData.append('title', form.season_title.value);
+    formData.append('description', form.season_desc.value);
+    
+    try {
+        const resp = await fetch('/bilibili/seasons', {
+            method: 'POST',
+            body: formData
+        });
+        const data = await resp.json();
+        
+        if (data.success) {
+            alert(`合集创建成功！ID: ${data.season_id}`);
+            location.reload();
+        } else {
+            alert(`创建失败: ${data.error}`);
+        }
+    } catch (e) {
+        alert(`创建失败: ${e}`);
+    }
+});
+
+// 复制合集ID
+function copySeasonId(id) {
+    navigator.clipboard.writeText(id.toString());
+    alert('已复制: ' + id);
+}
+
+// 插入变量
+function insertVar(varName) {
+    const textarea = document.querySelector('textarea[name="desc_template"]');
+    const text = '${' + varName + '}';
+    const start = textarea.selectionStart;
+    const end = textarea.selectionEnd;
+    textarea.value = textarea.value.substring(0, start) + text + textarea.value.substring(end);
+    textarea.focus();
+    textarea.selectionStart = textarea.selectionEnd = start + text.length;
+}
+
+// 保存模板配置
+async function saveTemplates() {
+    const config = {
+        templates: {
+            title: document.querySelector('input[name="title_template"]').value,
+            description: document.querySelector('textarea[name="desc_template"]').value,
+        }
+    };
+    
+    try {
+        const resp = await fetch('/bilibili/config', {
+            method: 'PUT',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(config)
+        });
+        const data = await resp.json();
+        
+        if (data.success) {
+            alert('✓ 模板配置已保存到 config/upload.yaml');
+        } else {
+            alert('保存失败: ' + data.error);
+        }
+    } catch (e) {
+        alert('保存失败: ' + e);
+    }
+}
+
+// 保存默认设置
+async function saveSettings() {
+    const config = {
+        copyright: parseInt(document.querySelector('select[name="copyright"]').value),
+        default_tid: parseInt(document.querySelector('input[name="default_tid"]').value),
+        default_tags: document.querySelector('input[name="default_tags"]').value.split(',').map(t => t.trim()).filter(t => t),
+        auto_cover: document.getElementById('auto_cover').checked,
+        season_id: document.querySelector('select[name="season_id"]').value || null,
+    };
+    
+    try {
+        const resp = await fetch('/bilibili/config', {
+            method: 'PUT',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(config)
+        });
+        const data = await resp.json();
+        
+        if (data.success) {
+            alert('✓ 上传设置已保存到 config/upload.yaml');
+        } else {
+            alert('保存失败: ' + data.error);
+        }
+    } catch (e) {
+        alert('保存失败: ' + e);
+    }
+}
+</script>
+{% endblock %}

@@ -1,0 +1,263 @@
+{% extends "base.html" %}
+
+{% block title %}Custom Prompts - VAT Manager{% endblock %}
+
+{% block content %}
+<div class="flex justify-between items-center mb-6">
+    <h1 class="text-2xl font-bold text-gray-800">Custom Prompts</h1>
+    <button onclick="showCreateModal()" class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700">
+        + 新建 Prompt
+    </button>
+</div>
+
+<!-- Prompt 列表 -->
+<div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+    <!-- 翻译 Prompts -->
+    <div class="bg-white rounded-lg shadow">
+        <div class="px-6 py-4 border-b">
+            <h2 class="text-lg font-semibold">翻译 Prompts</h2>
+            <p class="text-sm text-gray-500">用于 LLM 翻译阶段</p>
+        </div>
+        <div class="divide-y" id="translate-prompts">
+            <!-- 动态加载 -->
+        </div>
+    </div>
+    
+    <!-- 优化 Prompts -->
+    <div class="bg-white rounded-lg shadow">
+        <div class="px-6 py-4 border-b">
+            <h2 class="text-lg font-semibold">优化 Prompts</h2>
+            <p class="text-sm text-gray-500">用于字幕优化阶段</p>
+        </div>
+        <div class="divide-y" id="optimize-prompts">
+            <!-- 动态加载 -->
+        </div>
+    </div>
+</div>
+
+<!-- 当前选择状态 -->
+<div class="mt-6 bg-white rounded-lg shadow p-6">
+    <h2 class="text-lg font-semibold mb-4">当前使用的 Prompt</h2>
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">翻译 Prompt</label>
+            <select id="current-translate-prompt" onchange="setCurrentPrompt('translate', this.value)"
+                    class="w-full border rounded-lg px-3 py-2">
+                <option value="">（不使用）</option>
+            </select>
+        </div>
+        <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">优化 Prompt</label>
+            <select id="current-optimize-prompt" onchange="setCurrentPrompt('optimize', this.value)"
+                    class="w-full border rounded-lg px-3 py-2">
+                <option value="">（不使用）</option>
+            </select>
+        </div>
+    </div>
+    <p class="text-sm text-gray-500 mt-2">
+        💡 这里选择的 Prompt 将作为默认使用。Playlist 可单独配置专属 Prompt。
+    </p>
+</div>
+
+<!-- 新建/编辑模态框 -->
+<div id="prompt-modal" class="hidden fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+    <div class="bg-white rounded-lg shadow-xl w-full max-w-3xl max-h-[90vh] overflow-hidden">
+        <div class="px-6 py-4 border-b flex justify-between items-center">
+            <h3 class="text-lg font-semibold" id="modal-title">新建 Prompt</h3>
+            <button onclick="hideModal()" class="text-gray-400 hover:text-gray-600">&times;</button>
+        </div>
+        <form onsubmit="savePrompt(event)" class="p-6">
+            <div class="grid grid-cols-2 gap-4 mb-4">
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">名称</label>
+                    <input type="text" name="name" id="prompt-name" required
+                           class="w-full border rounded-lg px-3 py-2" placeholder="如: fubuki">
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">类型</label>
+                    <select name="type" id="prompt-type" class="w-full border rounded-lg px-3 py-2">
+                        <option value="translate">翻译</option>
+                        <option value="optimize">优化</option>
+                    </select>
+                </div>
+            </div>
+            <div class="mb-4">
+                <label class="block text-sm font-medium text-gray-700 mb-1">内容 (Markdown)</label>
+                <textarea name="content" id="prompt-content" rows="15" required
+                          class="w-full border rounded-lg px-3 py-2 font-mono text-sm"
+                          placeholder="# 翻译要求&#10;&#10;## 术语表&#10;- 配信: 直播&#10;&#10;## 翻译风格&#10;- 保持原有语气"></textarea>
+            </div>
+            <div class="flex justify-end space-x-3">
+                <button type="button" onclick="hideModal()" class="px-4 py-2 text-gray-600 hover:text-gray-800">取消</button>
+                <button type="submit" class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700">保存</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<script>
+let prompts = [];
+let editingPrompt = null;
+
+// 加载 Prompts 列表
+async function loadPrompts() {
+    try {
+        const response = await fetch('/api/prompts');
+        const data = await response.json();
+        prompts = data.prompts;
+        renderPrompts();
+        updateSelectors();
+    } catch (e) {
+        console.error('加载 Prompts 失败:', e);
+    }
+}
+
+function renderPrompts() {
+    const translateContainer = document.getElementById('translate-prompts');
+    const optimizeContainer = document.getElementById('optimize-prompts');
+    
+    const translatePrompts = prompts.filter(p => p.type === 'translate');
+    const optimizePrompts = prompts.filter(p => p.type === 'optimize');
+    
+    translateContainer.innerHTML = translatePrompts.length ? 
+        translatePrompts.map(p => renderPromptItem(p)).join('') :
+        '<div class="px-6 py-4 text-gray-500 text-sm">暂无翻译 Prompt</div>';
+    
+    optimizeContainer.innerHTML = optimizePrompts.length ?
+        optimizePrompts.map(p => renderPromptItem(p)).join('') :
+        '<div class="px-6 py-4 text-gray-500 text-sm">暂无优化 Prompt</div>';
+}
+
+function renderPromptItem(p) {
+    return `
+        <div class="px-6 py-3 flex items-center justify-between hover:bg-gray-50">
+            <div>
+                <span class="font-medium">${p.name}</span>
+                <span class="text-sm text-gray-500 ml-2">${formatSize(p.size)}</span>
+            </div>
+            <div class="flex space-x-2">
+                <button onclick="editPrompt('${p.type}', '${p.name}')" 
+                        class="text-blue-600 hover:text-blue-800 text-sm">编辑</button>
+                <button onclick="deletePrompt('${p.type}', '${p.name}')" 
+                        class="text-red-600 hover:text-red-800 text-sm">删除</button>
+            </div>
+        </div>
+    `;
+}
+
+function formatSize(bytes) {
+    if (bytes < 1024) return bytes + ' B';
+    return (bytes / 1024).toFixed(1) + ' KB';
+}
+
+function updateSelectors() {
+    const translateSelect = document.getElementById('current-translate-prompt');
+    const optimizeSelect = document.getElementById('current-optimize-prompt');
+    
+    // 保留第一个选项
+    translateSelect.innerHTML = '<option value="">（不使用）</option>';
+    optimizeSelect.innerHTML = '<option value="">（不使用）</option>';
+    
+    prompts.forEach(p => {
+        const option = `<option value="${p.name}">${p.name}</option>`;
+        if (p.type === 'translate') {
+            translateSelect.innerHTML += option;
+        } else {
+            optimizeSelect.innerHTML += option;
+        }
+    });
+    
+    // 恢复当前选择
+    const savedTranslate = localStorage.getItem('vat_current_translate_prompt');
+    const savedOptimize = localStorage.getItem('vat_current_optimize_prompt');
+    if (savedTranslate) translateSelect.value = savedTranslate;
+    if (savedOptimize) optimizeSelect.value = savedOptimize;
+}
+
+function setCurrentPrompt(type, name) {
+    localStorage.setItem(`vat_current_${type}_prompt`, name);
+}
+
+function showCreateModal() {
+    editingPrompt = null;
+    document.getElementById('modal-title').textContent = '新建 Prompt';
+    document.getElementById('prompt-name').value = '';
+    document.getElementById('prompt-name').disabled = false;
+    document.getElementById('prompt-type').value = 'translate';
+    document.getElementById('prompt-type').disabled = false;
+    document.getElementById('prompt-content').value = '';
+    document.getElementById('prompt-modal').classList.remove('hidden');
+}
+
+async function editPrompt(type, name) {
+    try {
+        const response = await fetch(`/api/prompts/${type}/${name}`);
+        if (!response.ok) throw new Error('获取失败');
+        
+        const data = await response.json();
+        editingPrompt = { type, name };
+        
+        document.getElementById('modal-title').textContent = '编辑 Prompt';
+        document.getElementById('prompt-name').value = name;
+        document.getElementById('prompt-name').disabled = true;
+        document.getElementById('prompt-type').value = type;
+        document.getElementById('prompt-type').disabled = true;
+        document.getElementById('prompt-content').value = data.content;
+        document.getElementById('prompt-modal').classList.remove('hidden');
+    } catch (e) {
+        showToast('获取 Prompt 失败: ' + e.message, 'error');
+    }
+}
+
+function hideModal() {
+    document.getElementById('prompt-modal').classList.add('hidden');
+}
+
+async function savePrompt(event) {
+    event.preventDefault();
+    
+    const name = document.getElementById('prompt-name').value.trim();
+    const type = document.getElementById('prompt-type').value;
+    const content = document.getElementById('prompt-content').value;
+    
+    if (!name || !content) {
+        showToast('请填写完整信息', 'warning');
+        return;
+    }
+    
+    try {
+        const method = editingPrompt ? 'PUT' : 'POST';
+        const response = await fetch(`/api/prompts/${type}/${name}`, {
+            method,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ content })
+        });
+        
+        if (!response.ok) {
+            const error = await response.json();
+            throw new Error(error.detail || '保存失败');
+        }
+        
+        hideModal();
+        loadPrompts();
+    } catch (e) {
+        showToast('保存失败: ' + e.message, 'error');
+    }
+}
+
+async function deletePrompt(type, name) {
+    if (!confirm(`确定要删除 Prompt "${name}" 吗？`)) return;
+    
+    try {
+        const response = await fetch(`/api/prompts/${type}/${name}`, { method: 'DELETE' });
+        if (!response.ok) throw new Error('删除失败');
+        loadPrompts();
+    } catch (e) {
+        showToast('删除失败: ' + e.message, 'error');
+    }
+}
+
+// 初始化
+loadPrompts();
+</script>
+{% endblock %}

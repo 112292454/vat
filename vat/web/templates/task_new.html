@@ -1,0 +1,289 @@
+{% extends "base.html" %}
+
+{% block title %}新建任务 - VAT Manager{% endblock %}
+
+{% block content %}
+<div class="space-y-6">
+    <a href="{{ back_url|default('/tasks', true) }}" class="text-blue-600 hover:text-blue-800">&larr; 返回</a>
+    
+    <div class="bg-white rounded-lg shadow p-6">
+        <h1 class="text-2xl font-bold text-gray-800 mb-6">新建处理任务</h1>
+        
+        <form id="task-form" onsubmit="submitTask(event)">
+            <!-- 视频选择 -->
+            <div class="mb-6">
+                <label class="block text-sm font-medium text-gray-700 mb-2">选择视频</label>
+                
+                {% if playlist_id %}
+                <div class="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-4">
+                    <p class="text-blue-800">已选择 Playlist: <strong>{{ playlist_title }}</strong></p>
+                    <p class="text-blue-600 text-sm">包含 {{ playlist_video_count }} 个视频</p>
+                    <input type="hidden" name="playlist_id" value="{{ playlist_id }}">
+                </div>
+                {% endif %}
+                
+                <!-- 搜索框 -->
+                <div class="mb-2">
+                    <input type="text" id="video-search" placeholder="搜索视频标题..." 
+                           class="w-full px-3 py-2 border rounded-lg text-sm"
+                           oninput="filterVideos()">
+                </div>
+                
+                <div id="video-list" class="space-y-2 max-h-80 overflow-y-auto border rounded-lg p-3">
+                    {% for video in videos %}
+                    <label class="video-item flex items-center p-2 hover:bg-gray-50 rounded cursor-pointer"
+                           data-title="{{ (video.title or video.id) | lower }}"
+                           data-playlist="{{ video.playlist_id or '' }}">
+                        <input type="checkbox" name="video_ids" value="{{ video.id }}" 
+                               class="mr-3" {% if video.selected %}checked{% endif %}>
+                        <span class="text-sm flex-1 truncate">{{ video.title or video.id }}</span>
+                        <span class="ml-2 text-xs text-gray-500 whitespace-nowrap">{{ video.progress_text }}</span>
+                    </label>
+                    {% else %}
+                    <p class="text-gray-500 text-center py-4">没有可处理的视频</p>
+                    {% endfor %}
+                </div>
+                
+                <div class="mt-2 flex flex-wrap gap-3 text-sm">
+                    <button type="button" onclick="selectAll()" class="text-blue-600 hover:underline">全选</button>
+                    <button type="button" onclick="selectNone()" class="text-blue-600 hover:underline">取消全选</button>
+                    <button type="button" onclick="selectPending()" class="text-blue-600 hover:underline">选择待处理</button>
+                    <button type="button" onclick="selectVisible()" class="text-blue-600 hover:underline">选择可见</button>
+                </div>
+            </div>
+            
+            <!-- 阶段选择 -->
+            <div class="mb-6">
+                <label class="block text-sm font-medium text-gray-700 mb-2">执行阶段</label>
+                <div class="space-y-3">
+                    <!-- 下载 -->
+                    <label class="flex items-center p-3 border rounded-lg hover:bg-gray-50 cursor-pointer">
+                        <input type="checkbox" name="steps" value="download" class="mr-2" checked>
+                        <span class="text-sm font-medium">下载</span>
+                    </label>
+                    
+                    <!-- ASR 阶段组 -->
+                    <div class="border rounded-lg">
+                        <label class="flex items-center p-3 hover:bg-gray-50 cursor-pointer border-b">
+                            <input type="checkbox" id="asr-group" class="mr-2" checked 
+                                   onchange="toggleSubSteps('asr', this.checked)">
+                            <span class="text-sm font-medium">ASR (语音识别)</span>
+                        </label>
+                        <div class="pl-8 py-2 bg-gray-50 space-y-1">
+                            <label class="flex items-center p-2 hover:bg-gray-100 cursor-pointer rounded">
+                                <input type="checkbox" name="steps" value="whisper" class="mr-2 asr-sub" checked
+                                       onchange="updateGroupCheckbox('asr')">
+                                <span class="text-sm">Whisper (语音转文字)</span>
+                            </label>
+                            <label class="flex items-center p-2 hover:bg-gray-100 cursor-pointer rounded">
+                                <input type="checkbox" name="steps" value="split" class="mr-2 asr-sub" checked
+                                       onchange="updateGroupCheckbox('asr')">
+                                <span class="text-sm">Split (智能断句)</span>
+                            </label>
+                        </div>
+                    </div>
+                    
+                    <!-- 翻译阶段组 -->
+                    <div class="border rounded-lg">
+                        <label class="flex items-center p-3 hover:bg-gray-50 cursor-pointer border-b">
+                            <input type="checkbox" id="translate-group" class="mr-2" checked
+                                   onchange="toggleSubSteps('translate', this.checked)">
+                            <span class="text-sm font-medium">翻译</span>
+                        </label>
+                        <div class="pl-8 py-2 bg-gray-50 space-y-1">
+                            <label class="flex items-center p-2 hover:bg-gray-100 cursor-pointer rounded">
+                                <input type="checkbox" name="steps" value="optimize" class="mr-2 translate-sub" checked
+                                       onchange="updateGroupCheckbox('translate')">
+                                <span class="text-sm">Optimize (提示词优化)</span>
+                            </label>
+                            <label class="flex items-center p-2 hover:bg-gray-100 cursor-pointer rounded">
+                                <input type="checkbox" name="steps" value="translate" class="mr-2 translate-sub" checked
+                                       onchange="updateGroupCheckbox('translate')">
+                                <span class="text-sm">Translate (翻译)</span>
+                            </label>
+                        </div>
+                    </div>
+                    
+                    <!-- 嵌入字幕 -->
+                    <label class="flex items-center p-3 border rounded-lg hover:bg-gray-50 cursor-pointer">
+                        <input type="checkbox" name="steps" value="embed" class="mr-2" checked>
+                        <span class="text-sm font-medium">嵌入字幕</span>
+                    </label>
+                    
+                    <!-- 上传 -->
+                    <label class="flex items-center p-3 border rounded-lg hover:bg-gray-50 cursor-pointer">
+                        <input type="checkbox" name="steps" value="upload" class="mr-2">
+                        <span class="text-sm font-medium">上传到B站</span>
+                        <span class="ml-2 text-xs text-gray-500">(需要先登录B站)</span>
+                    </label>
+                </div>
+            </div>
+            
+            <!-- GPU 设置 -->
+            <div class="mb-6">
+                <label class="block text-sm font-medium text-gray-700 mb-2">GPU 设置</label>
+                <select name="gpu_device" class="border rounded-lg px-3 py-2 w-full max-w-xs">
+                    <option value="auto">自动选择 (推荐)</option>
+                    <option value="cuda:0">GPU 0</option>
+                    <option value="cuda:1">GPU 1</option>
+                    <option value="cpu">仅 CPU</option>
+                </select>
+            </div>
+            
+            <!-- 其他选项 -->
+            <div class="mb-6">
+                <label class="flex items-center">
+                    <input type="checkbox" name="force" class="mr-2">
+                    <span class="text-sm text-gray-700">强制重新处理 (即使已完成)</span>
+                </label>
+            </div>
+            
+            <!-- 提交按钮 -->
+            <div class="flex items-center space-x-4">
+                <button type="submit" 
+                        class="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition">
+                    开始执行
+                </button>
+                <button type="button" onclick="generateCLI()" 
+                        class="px-4 py-2 text-gray-600 hover:text-gray-800 border rounded-lg">
+                    生成 CLI 命令
+                </button>
+            </div>
+        </form>
+        
+        <!-- CLI 命令显示区域 -->
+        <div id="cli-output" class="hidden mt-6 p-4 bg-gray-100 rounded-lg">
+            <p class="text-sm text-gray-500 mb-2">等价 CLI 命令:</p>
+            <code id="cli-command" class="text-sm font-mono text-gray-800 break-all"></code>
+        </div>
+    </div>
+</div>
+
+<script>
+function selectAll() {
+    document.querySelectorAll('input[name="video_ids"]').forEach(cb => cb.checked = true);
+}
+
+function selectNone() {
+    document.querySelectorAll('input[name="video_ids"]').forEach(cb => cb.checked = false);
+}
+
+function selectPending() {
+    document.querySelectorAll('input[name="video_ids"]').forEach(cb => {
+        const progressText = cb.closest('label').querySelector('.text-gray-500').textContent;
+        cb.checked = !progressText.includes('100%');
+    });
+}
+
+function filterVideos() {
+    const query = document.getElementById('video-search').value.toLowerCase();
+    document.querySelectorAll('.video-item').forEach(item => {
+        const title = item.dataset.title || '';
+        item.style.display = title.includes(query) ? '' : 'none';
+    });
+}
+
+function selectVisible() {
+    document.querySelectorAll('.video-item').forEach(item => {
+        if (item.style.display !== 'none') {
+            item.querySelector('input[type="checkbox"]').checked = true;
+        }
+    });
+}
+
+function toggleSubSteps(group, checked) {
+    document.querySelectorAll(`.${group}-sub`).forEach(cb => cb.checked = checked);
+}
+
+function updateGroupCheckbox(group) {
+    const subs = document.querySelectorAll(`.${group}-sub`);
+    const groupCb = document.getElementById(`${group}-group`);
+    const checkedCount = Array.from(subs).filter(cb => cb.checked).length;
+    
+    if (checkedCount === 0) {
+        groupCb.checked = false;
+        groupCb.indeterminate = false;
+    } else if (checkedCount === subs.length) {
+        groupCb.checked = true;
+        groupCb.indeterminate = false;
+    } else {
+        groupCb.checked = false;
+        groupCb.indeterminate = true;
+    }
+}
+
+function getFormData() {
+    const form = document.getElementById('task-form');
+    const videoIds = Array.from(form.querySelectorAll('input[name="video_ids"]:checked'))
+        .map(cb => cb.value);
+    const steps = Array.from(form.querySelectorAll('input[name="steps"]:checked'))
+        .map(cb => cb.value);
+    const gpuDevice = form.querySelector('select[name="gpu_device"]').value;
+    const force = form.querySelector('input[name="force"]').checked;
+    
+    return { videoIds, steps, gpuDevice, force };
+}
+
+async function submitTask(event) {
+    event.preventDefault();
+    
+    const { videoIds, steps, gpuDevice, force } = getFormData();
+    
+    if (videoIds.length === 0) {
+        showToast('请至少选择一个视频', 'warning');
+        return;
+    }
+    
+    if (steps.length === 0) {
+        showToast('请至少选择一个阶段', 'warning');
+        return;
+    }
+    
+    try {
+        const response = await fetch('/api/tasks/execute', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                video_ids: videoIds,
+                steps: steps,
+                gpu_device: gpuDevice,
+                force: force
+            })
+        });
+        
+        if (response.ok) {
+            const result = await response.json();
+            location.href = `/tasks/${result.task_id}`;
+        } else {
+            const error = await response.json();
+            showToast('提交失败: ' + (error.detail || '未知错误'), 'error');
+        }
+    } catch (e) {
+        showToast('请求失败: ' + e.message, 'error');
+    }
+}
+
+function generateCLI() {
+    const { videoIds, steps, gpuDevice, force } = getFormData();
+    
+    let cmd = 'vat process';
+    videoIds.slice(0, 5).forEach(vid => cmd += ` -v ${vid}`);
+    if (videoIds.length > 5) cmd += ' # ...更多视频';
+    
+    if (steps.length > 0 && steps.join(',') !== 'download,asr,translate,embed') {
+        cmd += ` -s ${steps.join(',')}`;
+    }
+    
+    if (gpuDevice !== 'auto') {
+        cmd += ` -g ${gpuDevice}`;
+    }
+    
+    if (force) {
+        cmd += ' -f';
+    }
+    
+    document.getElementById('cli-command').textContent = cmd;
+    document.getElementById('cli-output').classList.remove('hidden');
+}
+</script>
+{% endblock %}

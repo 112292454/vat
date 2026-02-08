@@ -1,0 +1,368 @@
+{% extends "base.html" %}
+
+{% block title %}任务 {{ task.task_id }} - VAT Manager{% endblock %}
+
+{% block content %}
+<div class="space-y-6">
+    <!-- 返回按钮 -->
+    <div class="flex items-center space-x-4">
+        <a href="/tasks" class="text-blue-600 hover:text-blue-800">&larr; 返回任务列表</a>
+        {% if task.video_ids and task.video_ids|length == 1 %}
+        <a href="/video/{{ task.video_ids[0] }}" class="text-green-600 hover:text-green-800">→ 查看视频详情</a>
+        {% endif %}
+    </div>
+    
+    <!-- 任务信息卡片 -->
+    <div class="bg-white rounded-lg shadow p-6">
+        <div class="flex justify-between items-start mb-4">
+            <div>
+                <h1 class="text-2xl font-bold text-gray-800">任务 #{{ task.task_id }}</h1>
+                <p class="text-gray-600">创建于 {{ task.created_at[:19] }}</p>
+            </div>
+            <span class="px-3 py-1 text-sm rounded-full 
+                {% if task.status == 'completed' %}bg-green-100 text-green-800
+                {% elif task.status == 'running' %}bg-blue-100 text-blue-800
+                {% elif task.status == 'failed' %}bg-red-100 text-red-800
+                {% elif task.status == 'cancelled' %}bg-gray-100 text-gray-800
+                {% else %}bg-yellow-100 text-yellow-800{% endif %}">
+                {{ task.status }}
+            </span>
+        </div>
+        
+        <!-- 进度条 -->
+        <div class="mb-4">
+            <div class="flex justify-between text-sm text-gray-600 mb-1">
+                <span>进度</span>
+                <span>{{ (task.progress * 100)|int }}%</span>
+            </div>
+            <div class="w-full bg-gray-200 rounded-full h-3">
+                <div class="bg-blue-500 h-3 rounded-full transition-all" 
+                     style="width: {{ (task.progress * 100)|int }}%"></div>
+            </div>
+        </div>
+        
+        <!-- 任务详情 -->
+        <div class="grid grid-cols-2 gap-4 text-sm">
+            <div>
+                <span class="text-gray-500">视频数量:</span>
+                <span class="ml-2 font-medium">{{ task.video_ids|length }}</span>
+            </div>
+            <div>
+                <span class="text-gray-500">执行阶段:</span>
+                <span class="ml-2 font-medium">{{ task.steps|join(', ') }}</span>
+            </div>
+            <div class="col-span-2">
+                <span class="text-gray-500">处理视频:</span>
+                <span class="ml-2 font-medium">
+                    {% if task.video_info_list|length == 1 %}
+                        <a href="/video/{{ task.video_info_list[0].id }}" class="text-blue-600 hover:underline">
+                            {{ task.video_info_list[0].title }}
+                        </a>
+                    {% elif task.video_info_list|length <= 3 %}
+                        {% for v in task.video_info_list %}
+                            <a href="/video/{{ v.id }}" class="text-blue-600 hover:underline">{{ v.title }}</a>{% if not loop.last %}, {% endif %}
+                        {% endfor %}
+                    {% else %}
+                        <span x-data="{ expanded: false }">
+                            <span x-show="!expanded">
+                                {% for v in task.video_info_list[:2] %}
+                                    <a href="/video/{{ v.id }}" class="text-blue-600 hover:underline">{{ v.title }}</a>, 
+                                {% endfor %}
+                                <button @click="expanded = true" class="text-gray-500 hover:text-gray-700">
+                                    等 {{ task.video_info_list|length }} 个视频...
+                                </button>
+                            </span>
+                            <span x-show="expanded" x-cloak>
+                                {% for v in task.video_info_list %}
+                                    <a href="/video/{{ v.id }}" class="text-blue-600 hover:underline">{{ v.title }}</a>{% if not loop.last %}, {% endif %}
+                                {% endfor %}
+                                <button @click="expanded = false" class="text-gray-500 hover:text-gray-700 ml-2">[收起]</button>
+                            </span>
+                        </span>
+                    {% endif %}
+                </span>
+            </div>
+            <div>
+                <span class="text-gray-500">当前阶段:</span>
+                <span id="current-step-display" class="ml-2 font-medium">-</span>
+            </div>
+        </div>
+        
+        {% if task.error %}
+        <div class="mt-4 p-3 bg-red-50 border border-red-200 rounded-lg">
+            <p class="text-red-800 text-sm font-medium">错误信息:</p>
+            <p class="text-red-600 text-sm">{{ task.error }}</p>
+        </div>
+        {% endif %}
+        
+        <!-- 操作按钮 -->
+        <div class="mt-4 flex gap-2">
+            {% if task.status == 'running' %}
+            <button onclick="cancelTask('{{ task.task_id }}')" 
+                    class="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700">
+                取消任务
+            </button>
+            {% else %}
+            <button onclick="retryTask('{{ task.task_id }}')" 
+                    class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700">
+                重新运行
+            </button>
+            <button onclick="deleteTask('{{ task.task_id }}')" 
+                    class="px-4 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700">
+                删除任务
+            </button>
+            {% endif %}
+        </div>
+    </div>
+    
+    <!-- 实时日志 -->
+    <div class="bg-white rounded-lg shadow">
+        <div class="px-6 py-4 border-b flex justify-between items-center">
+            <h2 class="text-lg font-semibold">实时日志</h2>
+            <div class="flex items-center gap-4">
+                <label class="flex items-center gap-2 text-sm text-gray-600 cursor-pointer">
+                    <input type="checkbox" id="auto-scroll" checked class="rounded">
+                    <span>自动滚动</span>
+                </label>
+                <button onclick="clearLogs()" class="text-sm text-gray-600 hover:text-gray-800">清空</button>
+            </div>
+        </div>
+        <div id="log-container" class="p-4 bg-gray-900 text-green-400 font-mono text-sm h-96 overflow-y-auto">
+            <div id="log-content">
+                <!-- 日志内容 -->
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+const taskId = '{{ task.task_id }}';
+const logContent = document.getElementById('log-content');
+const logContainer = document.getElementById('log-container');
+const autoScrollCheckbox = document.getElementById('auto-scroll');
+let eventSource = null;
+let progressPollInterval = null;
+let currentStep = null;
+const MAX_LOG_LINES = 500;  // 最大显示日志行数，防止页面卡死
+let logLineCount = 0;
+
+function updateProgressBar(progress) {
+    const percent = Math.round(progress * 100);
+    const progressText = document.querySelector('.mb-4 .text-sm.text-gray-600 span:last-child');
+    const progressBar = document.querySelector('.bg-blue-500.h-3');
+    if (progressText) progressText.textContent = percent + '%';
+    if (progressBar) progressBar.style.width = percent + '%';
+}
+
+function appendLog(message) {
+    const line = document.createElement('div');
+    line.textContent = message;
+    line.className = 'py-0.5';
+    logContent.appendChild(line);
+    logLineCount++;
+    
+    // 限制日志行数，防止页面卡死
+    if (logLineCount > MAX_LOG_LINES) {
+        // 移除最旧的日志行
+        const firstChild = logContent.firstChild;
+        if (firstChild) {
+            logContent.removeChild(firstChild);
+            logLineCount--;
+        }
+    }
+    
+    // 只在勾选自动滚动时滚动到底部
+    if (autoScrollCheckbox && autoScrollCheckbox.checked) {
+        logContainer.scrollTop = logContainer.scrollHeight;
+    }
+    
+    // 解析当前阶段信息（从日志中提取正在执行的步骤）
+    parseLogForStep(message);
+}
+
+function parseLogForStep(message) {
+    // 解析当前阶段: "开始执行步骤: xxx" 或 "直通模式执行步骤: xxx"
+    const stepMatch = message.match(/执行步骤[：:]\s*(\w+)/) ||
+                      message.match(/开始 (\w+) 阶段/);
+    if (stepMatch) {
+        currentStep = stepMatch[1];
+        const stepSpan = document.getElementById('current-step-display');
+        if (stepSpan) stepSpan.textContent = currentStep;
+    }
+}
+
+function clearLogs() {
+    logContent.innerHTML = '';
+}
+
+function startLogStream() {
+    if (eventSource) {
+        eventSource.close();
+    }
+    
+    eventSource = new EventSource(`/api/tasks/${taskId}/logs`);
+    
+    eventSource.onmessage = (event) => {
+        appendLog(event.data);
+    };
+    
+    eventSource.addEventListener('complete', (event) => {
+        appendLog(`\n=== 任务${event.data === 'completed' ? '完成' : event.data} ===`);
+        eventSource.close();
+        // 更新页面状态
+        updateTaskStatus(event.data);
+        setTimeout(() => location.reload(), 1500);
+    });
+    
+    eventSource.onerror = (error) => {
+        console.error('SSE error:', error);
+        eventSource.close();
+        // SSE 断开时检查任务状态
+        checkTaskStatus();
+    };
+}
+
+async function checkTaskStatus() {
+    try {
+        const response = await fetch(`/api/tasks/${taskId}`);
+        if (response.ok) {
+            const data = await response.json();
+            // 更新进度条
+            updateProgressBar(data.progress);
+            
+            if (data.status !== 'running') {
+                stopProgressPolling();
+                appendLog(`\n=== 任务${data.status === 'completed' ? '完成' : data.status} ===`);
+                updateTaskStatus(data.status);
+                setTimeout(() => location.reload(), 1000);
+            } else {
+                // 任务仍在运行，3秒后重连
+                setTimeout(startLogStream, 3000);
+            }
+        }
+    } catch (e) {
+        console.error('检查状态失败:', e);
+        // 5秒后重试
+        setTimeout(checkTaskStatus, 5000);
+    }
+}
+
+function startProgressPolling() {
+    if (progressPollInterval) return;
+    progressPollInterval = setInterval(async () => {
+        try {
+            const response = await fetch(`/api/tasks/${taskId}`);
+            if (response.ok) {
+                const data = await response.json();
+                updateProgressBar(data.progress);
+                if (data.status !== 'running') {
+                    stopProgressPolling();
+                }
+            }
+        } catch (e) {
+            console.error('轮询进度失败:', e);
+        }
+    }, 2000);  // 每2秒轮询一次
+}
+
+function stopProgressPolling() {
+    if (progressPollInterval) {
+        clearInterval(progressPollInterval);
+        progressPollInterval = null;
+    }
+}
+
+function updateTaskStatus(status) {
+    const statusBadge = document.querySelector('[class*="rounded-full"]');
+    if (statusBadge) {
+        statusBadge.textContent = status;
+        statusBadge.className = 'px-3 py-1 text-sm rounded-full ' + 
+            (status === 'completed' ? 'bg-green-100 text-green-800' :
+             status === 'failed' ? 'bg-red-100 text-red-800' :
+             status === 'cancelled' ? 'bg-gray-100 text-gray-800' :
+             'bg-blue-100 text-blue-800');
+    }
+}
+
+async function cancelTask(taskId) {
+    if (!confirm('确定要取消此任务?')) return;
+    
+    try {
+        const response = await fetch(`/api/tasks/${taskId}/cancel`, {method: 'POST'});
+        if (response.ok) {
+            location.reload();
+        } else {
+            const error = await response.json();
+            showToast('取消失败: ' + (error.detail || '未知错误'), 'error');
+        }
+    } catch (e) {
+        showToast('请求失败: ' + e.message, 'error');
+    }
+}
+
+async function deleteTask(taskId) {
+    if (!confirm('确定要删除此任务记录？此操作不可恢复。')) return;
+    
+    try {
+        const response = await fetch(`/api/tasks/${taskId}`, {method: 'DELETE'});
+        if (response.ok) {
+            window.location.href = '/tasks';
+        } else {
+            const error = await response.json();
+            showToast('删除失败: ' + (error.detail || '未知错误'), 'error');
+        }
+    } catch (e) {
+        showToast('请求失败: ' + e.message, 'error');
+    }
+}
+
+async function retryTask(taskId) {
+    if (!confirm('确定要重新运行此任务？将使用相同的参数创建新任务。')) return;
+    
+    try {
+        const response = await fetch(`/api/tasks/${taskId}/retry`, {method: 'POST'});
+        if (response.ok) {
+            const data = await response.json();
+            window.location.href = `/tasks/${data.new_task_id}`;
+        } else {
+            const error = await response.json();
+            showToast('重新运行失败: ' + (error.detail || '未知错误'), 'error');
+        }
+    } catch (e) {
+        showToast('请求失败: ' + e.message, 'error');
+    }
+}
+
+// 加载已有日志（限制数量防止卡死）
+async function loadExistingLogs() {
+    try {
+        const response = await fetch(`/api/tasks/${taskId}/log-content`);
+        if (response.ok) {
+            const data = await response.json();
+            if (data.content) {
+                const lines = data.content.split('\n').filter(line => line.trim());
+                // 只加载最后 MAX_LOG_LINES 行
+                const startIdx = Math.max(0, lines.length - MAX_LOG_LINES);
+                if (startIdx > 0) {
+                    appendLog(`... (已省略 ${startIdx} 条早期日志) ...`);
+                }
+                lines.slice(startIdx).forEach(line => {
+                    appendLog(line);
+                });
+            }
+        }
+    } catch (e) {
+        console.error('加载日志失败:', e);
+    }
+}
+
+// 页面加载时加载已有日志
+loadExistingLogs();
+
+// 如果任务正在运行，启动日志流和进度轮询
+{% if task.status == 'running' %}
+startLogStream();
+startProgressPolling();
+{% endif %}
+</script>
+{% endblock %}

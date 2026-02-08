@@ -1,0 +1,5 @@
+[V4+ Styles]
+Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding
+Style: Secondary,LXGW WenKai,36,&H00FFFFFF,&H000000FF,&H00503020,&H80000000,-1,-1,0,0,100,100,1,0,1,2,2,2,10,10,125,1
+Style: Default_Base,Noto Sans CJK SC,55,&H00FFFFA0,&H000000FF,&H00FFFFFF,&H80000000,-1,0,0,0,100,100,3,0,1,4,4,2,10,10,60,1
+Style: Default,Noto Sans CJK SC,55,&H00FFFFA0,&H000000FF,&H00804000,&H80000000,-1,0,0,0,100,100,3,0,1,2,0,2,10,10,60,1

@@ -1,0 +1,624 @@
+{% extends "base.html" %}
+
+{% block title %}{{ video.title or '视频详情' }} - VAT Manager{% endblock %}
+
+{% block content %}
+<!-- 返回按钮：根据来源决定返回目标 -->
+{% if from_playlist and playlist_id %}
+<a href="/playlists/{{ playlist_id }}" class="inline-flex items-center text-gray-600 hover:text-gray-800 mb-4">
+    ← 返回 Playlist
+</a>
+{% else %}
+<a href="/" class="inline-flex items-center text-gray-600 hover:text-gray-800 mb-4">
+    ← 返回视频列表
+</a>
+{% endif %}
+
+<div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+    <!-- 左侧：视频信息 -->
+    <div class="lg:col-span-2 space-y-6">
+        <!-- 基本信息 -->
+        <div class="bg-white rounded-lg shadow p-6">
+            <div class="flex items-start space-x-4">
+                {% if metadata and metadata.thumbnail %}
+                <img src="{{ metadata.thumbnail }}" alt="" class="w-48 h-28 object-cover rounded-lg">
+                {% else %}
+                <div class="w-48 h-28 bg-gray-200 rounded-lg flex items-center justify-center text-4xl text-gray-400">
+                    🎬
+                </div>
+                {% endif %}
+                <div class="flex-1 min-w-0">
+                    <h1 class="text-xl font-bold text-gray-900 mb-2">{{ video.title or '未知标题' }}</h1>
+                    {% if translated_info and translated_info.title_optimized %}
+                    <div class="text-blue-600 mb-2">
+                        <span class="text-gray-500 text-sm">翻译标题:</span>
+                        {{ translated_info.title_optimized }}
+                    </div>
+                    {% endif %}
+                    <div class="flex flex-wrap gap-2 text-sm text-gray-600">
+                        <span class="inline-flex items-center px-2 py-0.5 rounded bg-gray-100">
+                            {{ video.source_type.value }}
+                        </span>
+                        {% if metadata and metadata.duration %}
+                        <span>时长: {{ metadata.duration | format_duration }}</span>
+                        {% endif %}
+                        {% if metadata and metadata.channel %}
+                        <span>频道: {{ metadata.channel }}</span>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+            
+            <!-- 源链接 -->
+            <div class="mt-4 pt-4 border-t">
+                <div class="text-sm text-gray-500 mb-1">源地址</div>
+                <a href="{{ video.source_url }}" target="_blank" class="text-blue-600 hover:underline break-all">
+                    {{ video.source_url }}
+                </a>
+            </div>
+        </div>
+        
+        <!-- 任务时间线 -->
+        <div class="bg-white rounded-lg shadow p-6">
+            <h2 class="text-lg font-semibold mb-4">处理进度</h2>
+            <div class="space-y-3">
+                {% for task in task_timeline %}
+                <div class="flex items-center space-x-3 p-3 border rounded-lg hover:bg-gray-50 group
+                            {% if task.status == 'completed' %}border-green-200 bg-green-50{% endif %}
+                            {% if task.status == 'running' %}border-blue-200 bg-blue-50{% endif %}
+                            {% if task.status == 'failed' %}border-red-200 bg-red-50{% endif %}">
+                    <!-- 状态图标 -->
+                    <div class="flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center
+                                {% if task.status == 'completed' %}bg-green-500 text-white
+                                {% elif task.status == 'running' %}bg-blue-500 text-white animate-pulse
+                                {% elif task.status == 'failed' %}bg-red-500 text-white
+                                {% else %}bg-gray-200 text-gray-600{% endif %}">
+                        {% if task.status == 'completed' %}✓
+                        {% elif task.status == 'running' %}⟳
+                        {% elif task.status == 'failed' %}✗
+                        {% else %}{{ loop.index }}{% endif %}
+                    </div>
+                    
+                    <!-- 阶段信息 -->
+                    <div class="flex-1 min-w-0">
+                        <div class="flex items-center justify-between">
+                            <span class="font-medium text-gray-900">{{ task.step_name }}</span>
+                            <span class="text-xs text-gray-500">
+                                {% if task.status == 'completed' %}已完成
+                                {% elif task.status == 'running' %}运行中
+                                {% elif task.status == 'failed' %}失败
+                                {% else %}待处理{% endif %}
+                            </span>
+                        </div>
+                        {% if task.completed_at %}
+                        <div class="text-xs text-gray-500">{{ task.completed_at[:16].replace('T', ' ') }}</div>
+                        {% endif %}
+                        {% if task.error_message %}
+                        <div class="mt-1 text-xs text-red-600 bg-red-100 rounded p-1">
+                            {{ task.error_message[:100] }}{% if task.error_message|length > 100 %}...{% endif %}
+                        </div>
+                        {% endif %}
+                    </div>
+                    
+                    <!-- 操作按钮 -->
+                    <div class="opacity-0 group-hover:opacity-100 flex space-x-1">
+                        {% if task.status != 'running' %}
+                        <button onclick="runStep('{{ task.step }}', false)" 
+                                class="px-2 py-1 text-xs bg-blue-100 text-blue-700 rounded hover:bg-blue-200"
+                                title="执行此阶段">
+                            ▶
+                        </button>
+                        {% if task.status == 'completed' %}
+                        <button onclick="runStep('{{ task.step }}', true)" 
+                                class="px-2 py-1 text-xs bg-yellow-100 text-yellow-700 rounded hover:bg-yellow-200"
+                                title="强制重新执行">
+                            ↺
+                        </button>
+                        {% endif %}
+                        {% endif %}
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+            
+            <!-- 快捷操作 -->
+            <div class="mt-4 pt-4 border-t flex flex-wrap gap-2">
+                <button onclick="runNextStep()" 
+                        class="px-3 py-1.5 text-sm bg-green-600 text-white rounded hover:bg-green-700">
+                    执行下一步
+                </button>
+                <button onclick="showStepSelector()" 
+                        class="px-3 py-1.5 text-sm bg-blue-600 text-white rounded hover:bg-blue-700">
+                    选择阶段执行...
+                </button>
+                <button onclick="generateCLI()" 
+                        class="px-3 py-1.5 text-sm border text-gray-600 rounded hover:bg-gray-100">
+                    生成 CLI 命令
+                </button>
+                <button onclick="deleteVideo()" 
+                        class="px-3 py-1.5 text-sm bg-red-600 text-white rounded hover:bg-red-700">
+                    删除视频
+                </button>
+            </div>
+            
+            <!-- CLI 命令显示 -->
+            <div id="cli-output" class="hidden mt-3 p-3 bg-gray-100 rounded text-xs font-mono break-all"></div>
+        </div>
+        
+        <!-- 翻译信息 -->
+        {% if translated_info %}
+        <div class="bg-white rounded-lg shadow p-6">
+            <h2 class="text-lg font-semibold mb-4">翻译信息</h2>
+            
+            {% if translated_info.title_translated %}
+            <div class="mb-4">
+                <div class="text-sm text-gray-500 mb-1">翻译标题</div>
+                <div class="text-blue-600 font-medium">{{ translated_info.title_translated }}</div>
+            </div>
+            {% endif %}
+            
+            {% set desc_summary = translated_info.description_summary or translated_info.get('description_optimized', '') %}
+            {% if desc_summary %}
+            <div class="mb-4">
+                <div class="text-sm text-gray-500 mb-1">简介摘要</div>
+                <div class="text-gray-900 whitespace-pre-wrap">{{ desc_summary }}</div>
+            </div>
+            {% endif %}
+            
+            {% if translated_info.description_translated %}
+            <div class="mb-4">
+                <div class="text-sm text-gray-500 mb-1">完整翻译简介</div>
+                <div class="text-gray-700 whitespace-pre-wrap text-sm max-h-48 overflow-y-auto">{{ translated_info.description_translated }}</div>
+            </div>
+            {% endif %}
+            
+            {% if translated_info.tags_generated %}
+            <div class="mb-4">
+                <div class="text-sm text-gray-500 mb-1">生成标签</div>
+                <div class="flex flex-wrap gap-2">
+                    {% for tag in translated_info.tags_generated %}
+                    <span class="px-2 py-1 bg-blue-100 text-blue-800 text-sm rounded">{{ tag }}</span>
+                    {% endfor %}
+                </div>
+            </div>
+            {% endif %}
+            
+            {% if translated_info.recommended_tid_name %}
+            <div>
+                <div class="text-sm text-gray-500 mb-1">推荐分区</div>
+                <span class="px-2 py-1 bg-green-100 text-green-800 text-sm rounded">
+                    {{ translated_info.recommended_tid_name }}
+                </span>
+                {% if translated_info.tid_reason %}
+                <span class="text-sm text-gray-500 ml-2">{{ translated_info.tid_reason }}</span>
+                {% endif %}
+            </div>
+            {% endif %}
+        </div>
+        {% endif %}
+        
+        <!-- 相关文件 -->
+        {% if files %}
+        <div class="bg-white rounded-lg shadow p-6">
+            <h2 class="text-lg font-semibold mb-4">相关文件</h2>
+            <div class="space-y-2">
+                {% for file in files %}
+                <div class="flex items-center justify-between p-2 hover:bg-gray-50 rounded group">
+                    <div class="flex items-center space-x-2">
+                        <span class="text-lg">
+                            {% if file.ext in ['.mp4', '.webm', '.mkv'] %}🎬
+                            {% elif file.ext in ['.srt', '.ass', '.vtt'] %}📄
+                            {% elif file.ext in ['.json'] %}📋
+                            {% elif file.ext in ['.mp3', '.wav', '.m4a'] %}🎵
+                            {% else %}📁{% endif %}
+                        </span>
+                        <span class="text-sm text-gray-900">{{ file.name }}</span>
+                    </div>
+                    <div class="flex items-center space-x-2">
+                        <span class="text-xs text-gray-500">{{ (file.size / 1024 / 1024) | round(1) }} MB</span>
+                        {% if file.ext in ['.srt', '.ass', '.json', '.txt', '.log'] %}
+                        <button onclick="viewFile('{{ file.name }}')" 
+                                class="opacity-0 group-hover:opacity-100 px-2 py-1 text-xs bg-blue-100 text-blue-700 rounded hover:bg-blue-200">
+                            查看
+                        </button>
+                        {% endif %}
+                        {% if file.ext in ['.srt', '.ass', '.json', '.txt'] %}
+                        <button onclick="editFile('{{ file.name }}')" 
+                                class="opacity-0 group-hover:opacity-100 px-2 py-1 text-xs bg-green-100 text-green-700 rounded hover:bg-green-200">
+                            编辑
+                        </button>
+                        {% endif %}
+                        {% if file.ext in ['.mp4', '.webm', '.mkv'] %}
+                        <button onclick="previewVideo('{{ file.name }}')" 
+                                class="opacity-0 group-hover:opacity-100 px-2 py-1 text-xs bg-purple-100 text-purple-700 rounded hover:bg-purple-200">
+                            播放
+                        </button>
+                        {% endif %}
+                        {% if file.ext in ['.mp3', '.wav', '.m4a'] %}
+                        <button onclick="previewAudio('{{ file.name }}')" 
+                                class="opacity-0 group-hover:opacity-100 px-2 py-1 text-xs bg-orange-100 text-orange-700 rounded hover:bg-orange-200">
+                            播放
+                        </button>
+                        {% endif %}
+                        <a href="/api/files/download/{{ video.id }}/{{ file.name }}" 
+                           class="opacity-0 group-hover:opacity-100 px-2 py-1 text-xs bg-gray-100 text-gray-700 rounded hover:bg-gray-200">
+                            下载
+                        </a>
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+        {% endif %}
+        
+        <!-- 文件查看/编辑模态框 -->
+        <div id="file-modal" class="fixed inset-0 bg-black bg-opacity-50 hidden z-50 flex items-center justify-center">
+            <div class="bg-white rounded-lg shadow-xl w-full max-w-4xl max-h-[90vh] flex flex-col m-4">
+                <div class="flex justify-between items-center px-6 py-4 border-b">
+                    <h3 id="modal-title" class="text-lg font-semibold">文件内容</h3>
+                    <button onclick="closeModal()" class="text-gray-500 hover:text-gray-700 text-2xl">&times;</button>
+                </div>
+                <div class="flex-1 overflow-auto p-6">
+                    <pre id="file-content" class="text-sm font-mono whitespace-pre-wrap bg-gray-50 p-4 rounded"></pre>
+                    <textarea id="file-editor" class="hidden w-full h-96 font-mono text-sm p-4 border rounded"></textarea>
+                </div>
+                <div id="modal-actions" class="px-6 py-4 border-t flex justify-end space-x-2">
+                    <button onclick="closeModal()" class="px-4 py-2 bg-gray-200 text-gray-700 rounded hover:bg-gray-300">关闭</button>
+                    <button id="save-btn" onclick="saveFile()" class="hidden px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700">保存</button>
+                </div>
+            </div>
+        </div>
+        
+        <!-- 媒体预览模态框 -->
+        <div id="media-modal" class="fixed inset-0 bg-black bg-opacity-75 hidden z-50 flex items-center justify-center">
+            <div class="bg-white rounded-lg shadow-xl w-full max-w-5xl max-h-[90vh] flex flex-col m-4">
+                <div class="flex justify-between items-center px-6 py-4 border-b">
+                    <h3 id="media-title" class="text-lg font-semibold">媒体预览</h3>
+                    <button onclick="closeMediaModal()" class="text-gray-500 hover:text-gray-700 text-2xl">&times;</button>
+                </div>
+                <div class="flex-1 overflow-auto p-6 flex items-center justify-center bg-black">
+                    <video id="video-player" class="hidden max-w-full max-h-[70vh]" controls></video>
+                    <audio id="audio-player" class="hidden w-full" controls></audio>
+                </div>
+            </div>
+        </div>
+        
+        <script>
+        const videoId = '{{ video.id }}';
+        let currentFilename = '';
+        let isEditMode = false;
+        
+        async function viewFile(filename) {
+            currentFilename = filename;
+            isEditMode = false;
+            
+            try {
+                const response = await fetch(`/api/files/view/${videoId}/${filename}`);
+                if (!response.ok) throw new Error('加载失败');
+                
+                const data = await response.json();
+                
+                document.getElementById('modal-title').textContent = filename;
+                document.getElementById('file-content').textContent = data.content;
+                document.getElementById('file-content').classList.remove('hidden');
+                document.getElementById('file-editor').classList.add('hidden');
+                document.getElementById('save-btn').classList.add('hidden');
+                document.getElementById('file-modal').classList.remove('hidden');
+            } catch (e) {
+                showToast('加载文件失败: ' + e.message, 'error');
+            }
+        }
+        
+        async function editFile(filename) {
+            currentFilename = filename;
+            isEditMode = true;
+            
+            try {
+                const response = await fetch(`/api/files/view/${videoId}/${filename}`);
+                if (!response.ok) throw new Error('加载失败');
+                
+                const data = await response.json();
+                
+                document.getElementById('modal-title').textContent = '编辑: ' + filename;
+                document.getElementById('file-content').classList.add('hidden');
+                document.getElementById('file-editor').value = data.content;
+                document.getElementById('file-editor').classList.remove('hidden');
+                document.getElementById('save-btn').classList.remove('hidden');
+                document.getElementById('file-modal').classList.remove('hidden');
+            } catch (e) {
+                showToast('加载文件失败: ' + e.message, 'error');
+            }
+        }
+        
+        async function saveFile() {
+            const content = document.getElementById('file-editor').value;
+            
+            try {
+                const response = await fetch(`/api/files/save/${videoId}/${currentFilename}`, {
+                    method: 'PUT',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({content: content})
+                });
+                
+                if (!response.ok) {
+                    const error = await response.json();
+                    throw new Error(error.detail || '保存失败');
+                }
+                
+                const result = await response.json();
+                showToast(`保存成功！已备份为 ${result.backup}`, 'success');
+                closeModal();
+            } catch (e) {
+                showToast('保存失败: ' + e.message, 'error');
+            }
+        }
+        
+        function closeModal() {
+            document.getElementById('file-modal').classList.add('hidden');
+        }
+        
+        // ESC 关闭模态框
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') {
+                closeModal();
+                closeMediaModal();
+            }
+        });
+        
+        // 视频预览
+        function previewVideo(filename) {
+            document.getElementById('media-title').textContent = '视频预览: ' + filename;
+            const video = document.getElementById('video-player');
+            const audio = document.getElementById('audio-player');
+            
+            video.src = `/api/files/view/${videoId}/${filename}`;
+            video.classList.remove('hidden');
+            audio.classList.add('hidden');
+            audio.pause();
+            
+            document.getElementById('media-modal').classList.remove('hidden');
+        }
+        
+        // 音频预览
+        function previewAudio(filename) {
+            document.getElementById('media-title').textContent = '音频预览: ' + filename;
+            const video = document.getElementById('video-player');
+            const audio = document.getElementById('audio-player');
+            
+            audio.src = `/api/files/view/${videoId}/${filename}`;
+            audio.classList.remove('hidden');
+            video.classList.add('hidden');
+            video.pause();
+            
+            document.getElementById('media-modal').classList.remove('hidden');
+        }
+        
+        // 关闭媒体模态框
+        function closeMediaModal() {
+            document.getElementById('media-modal').classList.add('hidden');
+            document.getElementById('video-player').pause();
+            document.getElementById('audio-player').pause();
+        }
+        </script>
+    </div>
+    
+    <!-- 右侧：元数据 -->
+    <div class="space-y-6">
+        <!-- ID 和时间 -->
+        <div class="bg-white rounded-lg shadow p-6">
+            <h3 class="text-sm font-semibold text-gray-500 uppercase mb-3">系统信息</h3>
+            <div class="space-y-2 text-sm">
+                <div>
+                    <span class="text-gray-500">视频 ID:</span>
+                    <span class="font-mono text-gray-900">{{ video.id }}</span>
+                </div>
+                <div>
+                    <span class="text-gray-500">创建时间:</span>
+                    <span class="text-gray-900">{{ video.created_at | format_datetime }}</span>
+                </div>
+                <div>
+                    <span class="text-gray-500">更新时间:</span>
+                    <span class="text-gray-900">{{ video.updated_at | format_datetime }}</span>
+                </div>
+                {% if video.output_dir %}
+                <div>
+                    <span class="text-gray-500">输出目录:</span>
+                    <span class="font-mono text-xs text-gray-900 break-all">{{ video.output_dir }}</span>
+                </div>
+                {% endif %}
+            </div>
+        </div>
+        
+        <!-- 原始元数据 -->
+        {% if metadata %}
+        <div class="bg-white rounded-lg shadow p-6">
+            <h3 class="text-sm font-semibold text-gray-500 uppercase mb-3">原始元数据</h3>
+            <div class="space-y-2 text-sm">
+                {% if metadata.channel %}
+                <div><span class="text-gray-500">频道:</span> {{ metadata.channel }}</div>
+                {% endif %}
+                {% if metadata.upload_date %}
+                <div><span class="text-gray-500">上传日期:</span> {{ metadata.upload_date }}</div>
+                {% endif %}
+                {% if metadata.duration %}
+                <div><span class="text-gray-500">时长:</span> {{ metadata.duration | format_duration }}</div>
+                {% endif %}
+                {% if metadata.view_count %}
+                <div><span class="text-gray-500">播放量:</span> {{ metadata.view_count }}</div>
+                {% endif %}
+            </div>
+        </div>
+        {% endif %}
+        
+        <!-- 操作按钮 -->
+        <div class="bg-white rounded-lg shadow p-6">
+            <h3 class="text-sm font-semibold text-gray-500 uppercase mb-3">操作</h3>
+            <div class="space-y-2">
+                <a href="/tasks/new?video={{ video.id }}{% if playlist_id %}&playlist={{ playlist_id }}{% endif %}" 
+                   class="block w-full px-4 py-2 bg-blue-600 text-white text-center rounded hover:bg-blue-700">
+                    处理此视频
+                </a>
+                <button onclick="reprocessVideo('{{ video.id }}')" 
+                        class="w-full px-4 py-2 bg-yellow-500 text-white rounded hover:bg-yellow-600">
+                    强制重新处理
+                </button>
+            </div>
+        </div>
+        
+        <script>
+        const taskTimeline = {{ task_timeline | tojson }};
+        
+        async function reprocessVideo(videoId) {
+            if (!confirm('确定要强制重新处理此视频？这将重新执行所有阶段。')) return;
+            
+            try {
+                const response = await fetch('/api/tasks/execute', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        video_ids: [videoId],
+                        steps: ['download', 'whisper', 'split', 'optimize', 'translate', 'embed', 'upload'],
+                        gpu_device: 'auto',
+                        force: true
+                    })
+                });
+                
+                if (response.ok) {
+                    const result = await response.json();
+                    location.href = `/tasks/${result.task_id}`;
+                } else {
+                    const error = await response.json();
+                    showToast('提交失败: ' + (error.detail || '未知错误'), 'error');
+                }
+            } catch (e) {
+                showToast('请求失败: ' + e.message, 'error');
+            }
+        }
+        
+        async function runStep(step, force) {
+            const action = force ? '强制重新执行' : '执行';
+            if (!confirm(`确定要${action}阶段: ${step}？`)) return;
+            
+            try {
+                const response = await fetch('/api/tasks/execute', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        video_ids: [videoId],
+                        steps: [step],
+                        gpu_device: 'auto',
+                        force: force
+                    })
+                });
+                
+                if (response.ok) {
+                    const result = await response.json();
+                    location.href = `/tasks/${result.task_id}`;
+                } else {
+                    const error = await response.json();
+                    showToast('提交失败: ' + (error.detail || '未知错误'), 'error');
+                }
+            } catch (e) {
+                showToast('请求失败: ' + e.message, 'error');
+            }
+        }
+        
+        function runNextStep() {
+            const pendingSteps = taskTimeline.filter(t => t.status === 'pending' || t.status === 'failed');
+            if (pendingSteps.length === 0) {
+                showToast('所有阶段已完成！', 'success');
+                return;
+            }
+            runStep(pendingSteps[0].step, false);
+        }
+        
+        function showStepSelector() {
+            let url = `/tasks/new?video=${videoId}`;
+            {% if playlist_id %}url += '&playlist={{ playlist_id }}';{% endif %}
+            location.href = url;
+        }
+        
+        function generateCLI() {
+            const pendingSteps = taskTimeline.filter(t => t.status !== 'completed').map(t => t.step);
+            let cmd = `vat process -v ${videoId}`;
+            if (pendingSteps.length > 0) {
+                cmd += ` -s ${pendingSteps.join(',')}`;
+            }
+            document.getElementById('cli-output').textContent = cmd;
+            document.getElementById('cli-output').classList.remove('hidden');
+        }
+        
+        function deleteVideo() {
+            document.getElementById('delete-video-modal').classList.remove('hidden');
+            document.getElementById('delete-video-modal').classList.add('flex');
+        }
+        
+        function closeDeleteModal() {
+            document.getElementById('delete-video-modal').classList.add('hidden');
+            document.getElementById('delete-video-modal').classList.remove('flex');
+        }
+        
+        async function confirmDeleteVideo() {
+            const deleteAllFiles = document.getElementById('delete-all-files').checked;
+            
+            try {
+                const response = await fetch(`/api/videos/${videoId}?delete_all_files=${deleteAllFiles}`, {method: 'DELETE'});
+                if (response.ok) {
+                    showToast('删除成功', 'success');
+                    setTimeout(() => location.href = '/', 1000);
+                } else {
+                    const error = await response.json();
+                    showToast('删除失败: ' + (error.detail || '未知错误'), 'error');
+                }
+            } catch (e) {
+                showToast('请求失败: ' + e.message, 'error');
+            }
+            closeDeleteModal();
+        }
+        
+        // ESC 关闭模态框
+        document.addEventListener('keydown', function(e) {
+            if (e.key === 'Escape') {
+                closeDeleteModal();
+                closeModal();
+                closeMediaModal();
+            }
+        });
+        
+        // 点击模态框外部关闭
+        document.addEventListener('DOMContentLoaded', function() {
+            setupModalClickOutside('delete-video-modal', closeDeleteModal);
+            setupModalClickOutside('file-modal', closeModal);
+            setupModalClickOutside('media-modal', closeMediaModal);
+        });
+        </script>
+    </div>
+</div>
+
+<!-- 删除视频确认弹窗 -->
+<div id="delete-video-modal" class="fixed inset-0 bg-black bg-opacity-50 hidden items-center justify-center z-50">
+    <div class="bg-white rounded-lg shadow-xl p-6 w-full max-w-md mx-4">
+        <h3 class="text-lg font-bold mb-4 text-red-600">删除视频</h3>
+        <p class="text-gray-600 mb-4">确定要删除此视频吗？此操作将删除数据库记录和相关任务。</p>
+        
+        <div class="bg-gray-50 rounded p-3 mb-4">
+            <label class="flex items-start space-x-2 cursor-pointer">
+                <input type="checkbox" id="delete-all-files" class="mt-1 rounded">
+                <div>
+                    <span class="text-sm font-medium text-gray-700">同时删除所有文件</span>
+                    <p class="text-xs text-gray-500">勾选后将删除整个输出目录，包括原始下载的视频、音频和字幕文件</p>
+                </div>
+            </label>
+        </div>
+        
+        <p class="text-xs text-gray-500 mb-4">
+            默认只删除处理产物（翻译字幕、嵌入视频等），保留原始下载文件。
+        </p>
+        
+        <div class="flex justify-end space-x-2">
+            <button onclick="closeDeleteModal()" class="px-4 py-2 text-gray-600 hover:bg-gray-100 rounded-lg">取消</button>
+            <button onclick="confirmDeleteVideo()" class="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700">确认删除</button>
+        </div>
+    </div>
+</div>
+{% endblock %}

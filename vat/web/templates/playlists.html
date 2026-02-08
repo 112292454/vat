@@ -1,0 +1,269 @@
+{% extends "base.html" %}
+
+{% block title %}Playlists - VAT Manager{% endblock %}
+
+{% block content %}
+<div class="space-y-6">
+    <!-- 页面标题和操作 -->
+    <div class="flex justify-between items-center">
+        <h1 class="text-2xl font-bold text-gray-800">Playlist 管理</h1>
+        <button onclick="showAddPlaylistModal()" 
+                class="bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 transition">
+            + 添加 Playlist
+        </button>
+    </div>
+
+    <!-- Playlist 列表 -->
+    <div class="bg-white rounded-lg shadow overflow-hidden">
+        <table class="min-w-full divide-y divide-gray-200">
+            <thead class="bg-gray-50">
+                <tr>
+                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">标题</th>
+                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">频道</th>
+                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">视频数</th>
+                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">进度</th>
+                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">最后同步</th>
+                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">操作</th>
+                </tr>
+            </thead>
+            <tbody class="bg-white divide-y divide-gray-200" id="playlist-list">
+                {% for pl in playlists %}
+                <tr class="hover:bg-gray-50" data-playlist-id="{{ pl.id }}">
+                    <td class="px-6 py-4">
+                        <a href="/playlists/{{ pl.id }}" class="text-blue-600 hover:underline font-medium">
+                            {{ pl.title or pl.id }}
+                        </a>
+                    </td>
+                    <td class="px-6 py-4 text-sm text-gray-600">{{ pl.channel or '-' }}</td>
+                    <td class="px-6 py-4 text-sm">{{ pl.video_count or 0 }}</td>
+                    <td class="px-6 py-4">
+                        <div class="flex items-center">
+                            <div class="w-24 bg-gray-200 rounded-full h-2 mr-2">
+                                <div class="bg-green-500 h-2 rounded-full" style="width: {{ pl.progress_percent }}%"></div>
+                            </div>
+                            <span class="text-sm text-gray-600">{{ pl.completed }}/{{ pl.video_count }}</span>
+                        </div>
+                    </td>
+                    <td class="px-6 py-4 text-sm text-gray-600 sync-status">{{ pl.last_synced_at|format_datetime }}</td>
+                    <td class="px-6 py-4 text-sm">
+                        <div class="flex space-x-2">
+                            <button onclick="syncPlaylist('{{ pl.id }}')" 
+                                    class="text-blue-600 hover:text-blue-800">同步</button>
+                            <button onclick="processPlaylist('{{ pl.id }}')" 
+                                    class="text-green-600 hover:text-green-800">处理</button>
+                            <button onclick="deletePlaylist('{{ pl.id }}', '{{ pl.title|e }}')" 
+                                    class="text-red-600 hover:text-red-800">删除</button>
+                        </div>
+                    </td>
+                </tr>
+                {% else %}
+                <tr>
+                    <td colspan="6" class="px-6 py-8 text-center text-gray-500">
+                        没有 Playlist，点击上方按钮添加
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<!-- 添加 Playlist 模态框 -->
+<div id="add-playlist-modal" class="fixed inset-0 bg-black bg-opacity-50 hidden flex items-center justify-center z-50">
+    <div class="bg-white rounded-lg shadow-xl w-full max-w-md p-6">
+        <h2 class="text-xl font-bold mb-4">添加 Playlist</h2>
+        <form id="add-playlist-form" onsubmit="addPlaylist(event)">
+            <div class="mb-4">
+                <label class="block text-sm font-medium text-gray-700 mb-1">YouTube Playlist URL</label>
+                <input type="url" name="url" required
+                       placeholder="https://www.youtube.com/playlist?list=..."
+                       class="w-full border rounded-lg px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
+            </div>
+            <div class="mb-4">
+                <label class="flex items-center">
+                    <input type="checkbox" name="auto_sync" checked class="mr-2">
+                    <span class="text-sm text-gray-700">自动同步视频列表</span>
+                </label>
+            </div>
+            <div class="mb-4">
+                <label class="flex items-center">
+                    <input type="checkbox" name="fetch_upload_dates" checked class="mr-2">
+                    <span class="text-sm text-gray-700">获取发布日期（用于按时间排序，后台执行）</span>
+                </label>
+                <p class="text-xs text-gray-500 mt-1 ml-5">每个视频需单独请求，将在后台异步执行</p>
+            </div>
+            <div class="flex justify-end space-x-3">
+                <button type="button" onclick="hideAddPlaylistModal()" 
+                        class="px-4 py-2 text-gray-600 hover:text-gray-800">取消</button>
+                <button type="submit" 
+                        class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700">添加</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<script>
+function showAddPlaylistModal() {
+    document.getElementById('add-playlist-modal').classList.remove('hidden');
+}
+
+function hideAddPlaylistModal() {
+    document.getElementById('add-playlist-modal').classList.add('hidden');
+}
+
+async function addPlaylist(event) {
+    event.preventDefault();
+    const form = event.target;
+    const url = form.querySelector('[name="url"]').value;
+    const autoSync = form.querySelector('[name="auto_sync"]').checked;
+    const fetchDates = form.querySelector('[name="fetch_upload_dates"]').checked;
+    const submitBtn = form.querySelector('button[type="submit"]');
+    
+    submitBtn.disabled = true;
+    submitBtn.textContent = '正在获取信息...';
+    
+    try {
+        const response = await fetch('/api/playlists', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({url: url, auto_sync: autoSync, fetch_upload_dates: fetchDates})
+        });
+        
+        if (response.ok) {
+            const result = await response.json();
+            hideAddPlaylistModal();
+            showToast('已启动后台同步，可在列表中查看进度', 'info');
+            setTimeout(() => location.reload(), 1000);
+        } else {
+            const error = await response.json();
+            showToast('添加失败: ' + (error.detail || '未知错误'), 'error');
+            submitBtn.disabled = false;
+            submitBtn.textContent = '添加';
+        }
+    } catch (e) {
+        showToast('请求失败: ' + e.message, 'error');
+        submitBtn.disabled = false;
+        submitBtn.textContent = '添加';
+    }
+}
+
+async function syncPlaylist(playlistId) {
+    if (!confirm('确定要同步此 Playlist?')) return;
+    
+    try {
+        const response = await fetch(`/api/playlists/${playlistId}/sync`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({fetch_upload_dates: true})
+        });
+        if (response.ok) {
+            showToast('已启动后台同步', 'info');
+            setTimeout(() => location.reload(), 1000);
+        } else {
+            const error = await response.json();
+            showToast('同步失败: ' + (error.detail || '未知错误'), 'error');
+        }
+    } catch (e) {
+        showToast('请求失败: ' + e.message, 'error');
+    }
+}
+
+// 检查同步状态并更新 UI
+async function checkSyncStatus(playlistId, statusCell, originalContent) {
+    try {
+        const response = await fetch(`/api/playlists/${playlistId}/sync-status`);
+        if (response.ok) {
+            const status = await response.json();
+            if (status.status === 'syncing') {
+                statusCell.innerHTML = `<span class="text-blue-600">🔄 ${status.message}</span>`;
+                setTimeout(() => checkSyncStatus(playlistId, statusCell, originalContent), 2000);
+            } else if (status.status === 'completed') {
+                statusCell.innerHTML = `<span class="text-green-600">✓ ${status.message}</span>`;
+                // 完成后不再轮询，3秒后恢复原始内容
+                setTimeout(() => { statusCell.innerHTML = originalContent; }, 3000);
+            } else if (status.status === 'failed') {
+                statusCell.innerHTML = `<span class="text-red-600">✗ ${status.message}</span>`;
+                // 失败后不再轮询
+            }
+            // idle 状态不做任何处理，不再轮询
+        }
+    } catch (e) {
+        console.error('检查同步状态失败:', e);
+    }
+}
+
+// 页面加载时检查所有 playlist 的同步状态
+document.addEventListener('DOMContentLoaded', function() {
+    document.querySelectorAll('[data-playlist-id]').forEach(row => {
+        const playlistId = row.dataset.playlistId;
+        const statusCell = row.querySelector('.sync-status');
+        if (statusCell) {
+            const originalContent = statusCell.innerHTML;
+            // 先检查一次，只有 syncing 状态才会继续轮询
+            checkSyncStatus(playlistId, statusCell, originalContent);
+        }
+    });
+});
+
+function processPlaylist(playlistId) {
+    location.href = `/tasks/new?playlist=${playlistId}`;
+}
+
+async function deletePlaylist(playlistId, title) {
+    // 显示删除确认对话框
+    showDeleteDialog(playlistId, title);
+}
+
+function showDeleteDialog(playlistId, title) {
+    // 创建模态框
+    const modal = document.createElement('div');
+    modal.id = 'delete-modal';
+    modal.className = 'fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50';
+    modal.innerHTML = `
+        <div class="bg-white rounded-lg p-6 max-w-md w-full mx-4">
+            <h3 class="text-lg font-bold mb-4">删除 Playlist</h3>
+            <p class="mb-4">确定要删除 "<span class="font-medium">${title}</span>"？</p>
+            <label class="flex items-center mb-4 cursor-pointer">
+                <input type="checkbox" id="delete-videos-checkbox" class="mr-2 w-4 h-4">
+                <span class="text-red-600">同时删除所有关联的视频</span>
+            </label>
+            <p class="text-sm text-gray-500 mb-4">⚠️ 勾选后将永久删除视频及其所有处理文件</p>
+            <div class="flex justify-end gap-2">
+                <button onclick="closeDeleteDialog()" class="px-4 py-2 bg-gray-300 rounded hover:bg-gray-400">取消</button>
+                <button onclick="confirmDelete('${playlistId}')" class="px-4 py-2 bg-red-600 text-white rounded hover:bg-red-700">删除</button>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(modal);
+}
+
+function closeDeleteDialog() {
+    const modal = document.getElementById('delete-modal');
+    if (modal) modal.remove();
+}
+
+async function confirmDelete(playlistId) {
+    const deleteVideos = document.getElementById('delete-videos-checkbox')?.checked || false;
+    closeDeleteDialog();
+    
+    try {
+        const url = `/api/playlists/${playlistId}?delete_videos=${deleteVideos}`;
+        const response = await fetch(url, {method: 'DELETE'});
+        if (response.ok) {
+            const result = await response.json();
+            if (deleteVideos && result.deleted_videos > 0) {
+                showToast(`删除成功，共删除 ${result.deleted_videos} 个视频`, 'success');
+            } else {
+                showToast('删除成功', 'success');
+            }
+            setTimeout(() => location.reload(), 1000);
+        } else {
+            const error = await response.json();
+            showToast('删除失败: ' + (error.detail || '未知错误'), 'error');
+        }
+    } catch (e) {
+        showToast('请求失败: ' + e.message, 'error');
+    }
+}
+</script>
+{% endblock %}

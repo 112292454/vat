@@ -10,17 +10,15 @@
         <div class="text-sm text-gray-500">视频总数</div>
     </div>
     <a href="?status=completed" class="bg-white rounded-lg shadow p-4 hover:bg-green-50 transition">
-        <div class="text-2xl font-bold text-green-600">
-            {{ videos | selectattr('progress', 'eq', 100) | list | length if not status_filter else (videos | length if status_filter == 'completed' else '-') }}
-        </div>
+        <div class="text-2xl font-bold text-green-600">{{ stats.completed_videos }}</div>
         <div class="text-sm text-gray-500">已完成</div>
     </a>
     <a href="?status=running" class="bg-white rounded-lg shadow p-4 hover:bg-blue-50 transition">
-        <div class="text-2xl font-bold text-blue-600">-</div>
+        <div class="text-2xl font-bold text-blue-600">{{ stats.running_videos }}</div>
         <div class="text-sm text-gray-500">进行中</div>
     </a>
     <a href="?status=failed" class="bg-white rounded-lg shadow p-4 hover:bg-red-50 transition">
-        <div class="text-2xl font-bold text-red-600">-</div>
+        <div class="text-2xl font-bold text-red-600">{{ stats.failed_videos }}</div>
         <div class="text-sm text-gray-500">失败</div>
     </a>
 </div>

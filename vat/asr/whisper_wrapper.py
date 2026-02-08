@@ -236,7 +236,7 @@ class WhisperASR:
                 batch_size=self.pipeline_batch_size,
                 hf_token=self.hf_token
             )
-            print("Pipeline模型加载完成")
+            logger.info("Pipeline模型加载完成")
 
     def _load_faster_whisper_model(self):
         """加载faster-whisper模型（原有逻辑）"""
@@ -261,9 +261,9 @@ class WhisperASR:
                     self.model = self._model_cache[cache_key]
                     return
             
-            print(f"正在加载Whisper模型: {self.model_name} ({self.device}, {self.compute_type})")
+            logger.info(f"正在加载Whisper模型: {self.model_name} ({self.device}, {self.compute_type})")
             if self.download_root:
-                print(f"模型下载目录: {self.download_root}")
+                logger.info(f"模型下载目录: {self.download_root}")
             
             # 在模型下载时禁用 tqdm 以避免并发问题
             # 通过环境变量禁用 huggingface_hub 的 tqdm
@@ -291,7 +291,7 @@ class WhisperASR:
                     self._model_cache[cache_key] = model
                     self.model = model
                 
-                print("模型加载完成")
+                logger.info("模型加载完成")
             finally:
                 # 恢复环境变量
                 if original_hf_hub_disable_progress is None:

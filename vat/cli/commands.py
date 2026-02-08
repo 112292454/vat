@@ -563,8 +563,9 @@ def parse_stages(stages_str: str) -> List[TaskStep]:
               help='GPU 设备: auto（自动选择）, cpu, cuda:0, cuda:1 等')
 @click.option('--force', '-f', is_flag=True, help='强制重新处理（即使已完成）')
 @click.option('--dry-run', is_flag=True, help='仅显示将要执行的操作，不实际执行')
+@click.option('--concurrency', '-c', default=1, type=int, help='并发处理的视频数量（默认1，即串行）')
 @click.pass_context
-def process(ctx, video_id, process_all, playlist, stages, gpu, force, dry_run):
+def process(ctx, video_id, process_all, playlist, stages, gpu, force, dry_run, concurrency):
     """
     处理视频（支持细粒度阶段控制）
     
@@ -642,6 +643,7 @@ def process(ctx, video_id, process_all, playlist, stages, gpu, force, dry_run):
     click.echo(f"  执行阶段: {', '.join(s.value for s in target_steps)}")
     click.echo(f"  GPU 设备: {gpu}")
     click.echo(f"  强制模式: {'是' if force else '否'}")
+    click.echo(f"  并发数量: {concurrency}")
     
     if dry_run:
         click.echo(f"\n[DRY-RUN] 以下视频将被处理:")
@@ -661,45 +663,65 @@ def process(ctx, video_id, process_all, playlist, stages, gpu, force, dry_run):
     # 设置 GPU
     config.gpu.device = gpu
     
-    # 执行处理
-    click.echo(f"\n开始处理 {len(video_ids)} 个视频...")
+    # 解析 GPU 设备为 gpu_id
+    gpu_id = None
+    if gpu and gpu != 'auto' and gpu != 'cpu':
+        if gpu.startswith('cuda:'):
+            try:
+                gpu_id = int(gpu.split(':')[1])
+            except (IndexError, ValueError):
+                pass
     
-    for i, vid in enumerate(video_ids, 1):
+    step_names = [s.value for s in target_steps]
+    total = len(video_ids)
+    
+    def process_one_video(args):
+        """处理单个视频（可在线程池中并发调用）"""
+        idx, vid = args
         video = db.get_video(vid)
         if not video:
             logger.warning(f"视频不存在: {vid}")
-            continue
+            return vid, False, "视频不存在"
         
         title = video.title[:30] if video.title else vid
-        click.echo(f"\n[{i}/{len(video_ids)}] 处理: {title}")
+        click.echo(f"\n[{idx + 1}/{total}] 处理: {title}")
         
         try:
-            # 解析 GPU 设备为 gpu_id
-            gpu_id = None
-            if gpu and gpu != 'auto' and gpu != 'cpu':
-                # 解析 cuda:N 格式
-                if gpu.startswith('cuda:'):
-                    try:
-                        gpu_id = int(gpu.split(':')[1])
-                    except (IndexError, ValueError):
-                        pass
-            
-            # 创建 VideoProcessor
             processor = VideoProcessor(
                 video_id=vid,
                 config=config,
                 gpu_id=gpu_id,
-                force=force
+                force=force,
+                video_index=idx,
+                total_videos=total
             )
-            
-            # 执行处理（使用指定的步骤，转换为字符串列表）
-            step_names = [s.value for s in target_steps]
             processor.process(steps=step_names)
-            click.echo(f"  ✓ 完成")
-            
+            click.echo(f"  ✓ [{idx + 1}/{total}] 完成: {title}")
+            return vid, True, None
         except Exception as e:
             logger.error(f"处理失败: {vid} - {e}")
-            click.echo(f"  ✗ 失败: {e}")
+            click.echo(f"  ✗ [{idx + 1}/{total}] 失败: {title} - {e}")
+            return vid, False, str(e)
+    
+    # 执行处理
+    click.echo(f"\n开始处理 {total} 个视频（并发: {concurrency}）...")
+    
+    if concurrency <= 1:
+        # 串行处理
+        for idx, vid in enumerate(video_ids):
+            process_one_video((idx, vid))
+    else:
+        # 并发处理
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        with ThreadPoolExecutor(max_workers=concurrency) as executor:
+            futures = {executor.submit(process_one_video, (idx, vid)): vid 
+                      for idx, vid in enumerate(video_ids)}
+            for future in as_completed(futures):
+                try:
+                    future.result()
+                except Exception as e:
+                    vid = futures[future]
+                    logger.error(f"并发处理异常: {vid} - {e}")
     
     click.echo(f"\n处理完成")
 

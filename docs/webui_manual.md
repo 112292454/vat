@@ -1,7 +1,7 @@
 # VAT Web UI 使用手册
 
-> **版本**: v1.0  
-> **更新日期**: 2026-02-04  
+> **版本**: v1.1  
+> **更新日期**: 2026-02-11  
 > **状态**: 已实现
 
 ---
@@ -174,8 +174,9 @@ vat/web/
 - 显示所有已添加的视频
 - 每行显示：标题、来源、时长、任务状态、进度、创建时间
 - 任务状态以图标形式显示 7 个阶段的完成情况（✓ 完成 / · 待处理）
-- 支持按状态筛选：全部 / 已完成 / 进行中 / 失败
-- 分页显示，每页 20 条
+- 支持按状态筛选：全部 / 已完成 / 进行中 / 失败（SQL 层面过滤，不加载全量数据）
+- 支持搜索：按标题/频道/ID 搜索（SQL LIKE）
+- 分页显示，默认每页 50 条
 
 **操作**：
 - 点击行进入视频详情页
@@ -242,6 +243,7 @@ vat/web/
 
 **其他选项**：
 - **GPU 设置**：自动选择 / GPU 0 / GPU 1 / 仅 CPU
+- **并发数量**：设置同时并行处理的视频数（1-5，默认1=串行）。包含 GPU 步骤（whisper/embed）时建议不超过 2
 - **强制重新处理**：勾选后忽略已完成状态，强制重新执行
 
 **操作按钮**：
@@ -310,8 +312,9 @@ vat/web/
 
 **视频列表**：
 - 复选框选择视频
-- 显示：标题、上传日期、状态
-- 按上传日期排序（新 → 旧）
+- 显示：标题、上传日期、时长、状态（已完成/失败/进行中/待处理）
+- 按上传日期排序（旧 → 新）
+- 分页显示，默认每页 100 条（仅对当前页视频查询进度，避免全量加载）
 
 **操作按钮**：
 - **同步 Playlist**：增量同步
@@ -383,9 +386,12 @@ vat/web/
   "steps": ["download", "whisper", "split", "optimize", "translate", "embed"],
   "gpu_device": "auto",
   "force": false,
+  "concurrency": 1,
   "generate_cli": false
 }
 ```
+
+`concurrency`: 并发处理的视频数量，默认 1 表示串行。设置 > 1 时多个视频将并行处理。
 
 ### 5.4 文件管理 API
 
@@ -523,6 +529,9 @@ python -m vat process -v VIDEO1 -v VIDEO2 -s download,whisper,split -g cuda:0
 
 # 强制重新处理翻译阶段
 python -m vat process -v VIDEO_ID -s translate -f
+
+# 并行处理 3 个视频
+python -m vat process -v VIDEO1 -v VIDEO2 -v VIDEO3 -c 3
 ```
 
 ### B. 任务状态说明
@@ -531,8 +540,9 @@ python -m vat process -v VIDEO_ID -s translate -f
 |------|------|
 | pending | 任务已创建，等待执行 |
 | running | 任务正在执行 |
-| completed | 任务成功完成 |
-| failed | 任务执行失败 |
+| completed | 任务成功完成（所有视频均成功） |
+| partial_completed | 部分完成（批量任务中部分视频成功、部分失败） |
+| failed | 任务执行失败（所有视频均失败） |
 | cancelled | 任务被用户取消 |
 
 ### C. 处理阶段对应关系
@@ -545,4 +555,4 @@ python -m vat process -v VIDEO_ID -s translate -f
 | 提示词优化 | optimize | 字幕优化 |
 | 翻译 | translate | LLM 翻译 |
 | 嵌入字幕 | embed | FFmpeg 硬字幕嵌入 |
-| 上传 | upload | (待实现) |
+| 上传 | upload | 上传到 B 站 |

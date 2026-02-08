@@ -328,6 +328,131 @@ class Database:
                 cursor.execute(query, params)
                 return [self._row_to_video(row) for row in cursor.fetchall()]
     
+    def list_videos_paginated(
+        self,
+        page: int = 1,
+        per_page: int = 50,
+        status: Optional[str] = None,
+        search: Optional[str] = None,
+        playlist_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """分页列出视频（SQL 层面过滤，避免全量加载）
+        
+        Args:
+            page: 页码（1-based）
+            per_page: 每页数量
+            status: 状态过滤 ('completed', 'failed', 'running', None=全部)
+            search: 搜索关键词（匹配标题/频道/ID）
+            playlist_id: Playlist 过滤
+            
+        Returns:
+            {'videos': List[Video], 'total': int, 'page': int, 'total_pages': int}
+        """
+        total_steps = len(DEFAULT_STAGE_SEQUENCE)
+        
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            
+            # 基础查询：根据是否有 playlist_id 决定 JOIN
+            if playlist_id:
+                base_from = """
+                    FROM videos v
+                    INNER JOIN playlist_videos pv ON v.id = pv.video_id AND pv.playlist_id = ?
+                """
+                base_params = [playlist_id]
+                order_by = "ORDER BY pv.playlist_index ASC"
+            else:
+                base_from = "FROM videos v"
+                base_params = []
+                order_by = "ORDER BY v.created_at DESC"
+            
+            # 构建 WHERE 条件
+            where_clauses = []
+            where_params = []
+            
+            # 搜索过滤
+            if search:
+                where_clauses.append("""
+                    (v.title LIKE ? OR v.id LIKE ? OR 
+                     json_extract(v.metadata, '$.channel') LIKE ? OR
+                     json_extract(v.metadata, '$.translated.title_translated') LIKE ?)
+                """)
+                pattern = f"%{search}%"
+                where_params.extend([pattern, pattern, pattern, pattern])
+            
+            # 状态过滤（需要 JOIN tasks 表）
+            if status:
+                # 子查询：计算每个视频的状态
+                status_subquery = f"""
+                    v.id IN (
+                        SELECT vs.video_id FROM (
+                            SELECT 
+                                lt.video_id,
+                                SUM(CASE WHEN lt.status IN ('completed', 'skipped') THEN 1 ELSE 0 END) as completed_count,
+                                SUM(CASE WHEN lt.status = 'failed' THEN 1 ELSE 0 END) as failed_count,
+                                SUM(CASE WHEN lt.status = 'running' THEN 1 ELSE 0 END) as running_count
+                            FROM (
+                                SELECT video_id, step, status,
+                                       ROW_NUMBER() OVER (PARTITION BY video_id, step ORDER BY id DESC) as rn
+                                FROM tasks
+                            ) lt
+                            WHERE lt.rn = 1
+                            GROUP BY lt.video_id
+                        ) vs
+                        WHERE {
+                            f"vs.completed_count >= {total_steps}" if status == 'completed' else
+                            "vs.failed_count > 0" if status == 'failed' else
+                            "vs.running_count > 0" if status == 'running' else "1=1"
+                        }
+                    )
+                """
+                where_clauses.append(status_subquery)
+            
+            where_sql = ""
+            if where_clauses:
+                where_sql = "WHERE " + " AND ".join(where_clauses)
+            
+            all_params = base_params + where_params
+            
+            # 计算总数
+            count_sql = f"SELECT COUNT(*) as cnt {base_from} {where_sql}"
+            cursor.execute(count_sql, all_params)
+            total = cursor.fetchone()['cnt']
+            
+            total_pages = (total + per_page - 1) // per_page if total > 0 else 1
+            offset = (page - 1) * per_page
+            
+            # 查询当前页数据
+            if playlist_id:
+                select_sql = f"""
+                    SELECT v.*, pv.playlist_index as pv_index, pv.upload_order_index as pv_order_index
+                    {base_from} {where_sql} {order_by}
+                    LIMIT ? OFFSET ?
+                """
+            else:
+                select_sql = f"""
+                    SELECT v.*
+                    {base_from} {where_sql} {order_by}
+                    LIMIT ? OFFSET ?
+                """
+            
+            cursor.execute(select_sql, all_params + [per_page, offset])
+            
+            videos = []
+            for row in cursor.fetchall():
+                video = self._row_to_video(row)
+                if playlist_id and row.get('pv_index') is not None:
+                    video.playlist_index = row['pv_index']
+                videos.append(video)
+            
+            return {
+                'videos': videos,
+                'total': total,
+                'page': page,
+                'per_page': per_page,
+                'total_pages': total_pages
+            }
+    
     def add_task(self, task: Task) -> int:
         """添加任务记录"""
         with self.get_connection() as conn:
@@ -621,13 +746,53 @@ class Database:
             return result
     
     def get_statistics(self) -> Dict[str, Any]:
-        """获取统计信息"""
+        """获取统计信息（包含视频级别的状态统计）
+        
+        Returns:
+            dict with keys:
+                total_videos: 视频总数
+                completed_videos: 所有7步都完成的视频数
+                failed_videos: 有任意步骤失败的视频数
+                running_videos: 有任意步骤正在运行的视频数
+                tasks_by_status: 各步骤状态统计
+        """
+        total_steps = len(DEFAULT_STAGE_SEQUENCE)
+        
         with self.get_connection() as conn:
             cursor = conn.cursor()
             
             # 视频总数
             cursor.execute("SELECT COUNT(*) as count FROM videos")
             total_videos = cursor.fetchone()['count']
+            
+            # 视频级别状态统计（基于 tasks 表，每个 video+step 取最新记录）
+            # 使用子查询取每个 video_id+step 的最新状态
+            cursor.execute(f"""
+                WITH latest_tasks AS (
+                    SELECT video_id, step, status,
+                           ROW_NUMBER() OVER (PARTITION BY video_id, step ORDER BY id DESC) as rn
+                    FROM tasks
+                ),
+                video_stats AS (
+                    SELECT 
+                        video_id,
+                        SUM(CASE WHEN status IN ('completed', 'skipped') THEN 1 ELSE 0 END) as completed_count,
+                        SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed_count,
+                        SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END) as running_count
+                    FROM latest_tasks
+                    WHERE rn = 1
+                    GROUP BY video_id
+                )
+                SELECT 
+                    SUM(CASE WHEN completed_count >= {total_steps} THEN 1 ELSE 0 END) as completed_videos,
+                    SUM(CASE WHEN failed_count > 0 THEN 1 ELSE 0 END) as failed_videos,
+                    SUM(CASE WHEN running_count > 0 THEN 1 ELSE 0 END) as running_videos
+                FROM video_stats
+            """)
+            row = cursor.fetchone()
+            completed_videos = row['completed_videos'] or 0
+            failed_videos = row['failed_videos'] or 0
+            running_videos = row['running_videos'] or 0
             
             # 各步骤状态统计
             cursor.execute("""
@@ -638,6 +803,9 @@ class Database:
             
             stats = {
                 'total_videos': total_videos,
+                'completed_videos': completed_videos,
+                'failed_videos': failed_videos,
+                'running_videos': running_videos,
                 'tasks_by_status': {}
             }
             

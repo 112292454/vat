@@ -24,6 +24,7 @@ class JobStatus(Enum):
     PENDING = "pending"
     RUNNING = "running"
     COMPLETED = "completed"
+    PARTIAL_COMPLETED = "partial_completed"  # 部分视频失败，其余成功
     FAILED = "failed"
     CANCELLED = "cancelled"
 
@@ -110,7 +111,8 @@ class JobManager:
         video_ids: List[str],
         steps: List[str],
         gpu_device: str = "auto",
-        force: bool = False
+        force: bool = False,
+        concurrency: int = 1
     ) -> str:
         """
         提交任务并立即启动子进程执行
@@ -142,7 +144,7 @@ class JobManager:
             ))
         
         # 启动子进程
-        self._start_job_process(job_id, video_ids, steps, gpu_device, force, log_file)
+        self._start_job_process(job_id, video_ids, steps, gpu_device, force, log_file, concurrency)
         
         logger.info(f"任务已提交: {job_id}, 视频数: {len(video_ids)}, 步骤: {steps}")
         return job_id
@@ -154,7 +156,8 @@ class JobManager:
         steps: List[str],
         gpu_device: str,
         force: bool,
-        log_file: str
+        log_file: str,
+        concurrency: int = 1
     ):
         """启动子进程执行任务"""
         # 构建 CLI 命令
@@ -171,6 +174,9 @@ class JobManager:
         
         if force:
             cmd.append("-f")
+        
+        if concurrency > 1:
+            cmd.extend(["-c", str(concurrency)])
         
         # 打开日志文件
         log_fd = open(log_file, "w", buffering=1)  # 行缓冲
@@ -306,32 +312,8 @@ class JobManager:
                     """, (progress, job_id))
             return
         
-        # 进程已结束，检查日志确定状态
-        status = JobStatus.COMPLETED
-        error = None
-        progress = 1.0  # 完成时设为 100%
-        
-        if job.log_file and Path(job.log_file).exists():
-            log_content = Path(job.log_file).read_text()
-            lines = log_content.strip().split("\n")
-            
-            # 只检查 ERROR 级别的日志，忽略 WARNING
-            # 格式：时间 | ERROR | ... 或 时间 | INFO | ... | 步骤失败:
-            for line in reversed(lines):
-                # 检查是否是 ERROR 级别日志
-                if "| ERROR |" in line:
-                    status = JobStatus.FAILED
-                    error = line[:200]
-                    # 失败时保留当前进度，不设为100%
-                    progress = self._parse_progress_from_log(job.log_file)
-                    break
-                # 检查 pipeline 步骤失败（INFO 级别但表示真正失败）
-                if "步骤失败:" in line or "步骤异常:" in line:
-                    status = JobStatus.FAILED
-                    error = line[:200]
-                    # 失败时保留当前进度，不设为100%
-                    progress = self._parse_progress_from_log(job.log_file)
-                    break
+        # 进程已结束，基于数据库中视频任务的实际状态判定 job 状态
+        status, error, progress = self._determine_job_result(job)
         
         with self._get_connection() as conn:
             cursor = conn.cursor()
@@ -341,6 +323,96 @@ class JobManager:
                 WHERE job_id = ?
             """, (status.value, error, progress, datetime.now(), job_id))
     
+    def _determine_job_result(self, job: WebJob) -> tuple:
+        """基于数据库中视频任务的实际状态判定 job 结果
+        
+        查询 tasks 表中每个视频的各步骤状态，而非扫描日志文件。
+        
+        Args:
+            job: WebJob 对象
+            
+        Returns:
+            (status: JobStatus, error: Optional[str], progress: float)
+        """
+        video_ids = job.video_ids
+        requested_steps = job.steps  # 请求执行的步骤名称列表
+        
+        if not video_ids or not requested_steps:
+            return JobStatus.COMPLETED, None, 1.0
+        
+        # 查询所有相关视频的任务状态
+        # 对每个视频，检查请求步骤中是否有 failed 状态的任务
+        failed_videos = []  # [(video_id, failed_step, error_message)]
+        completed_videos = []
+        
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            
+            for vid in video_ids:
+                # 获取该视频各步骤的最新状态
+                placeholders = ','.join('?' * len(requested_steps))
+                cursor.execute(f"""
+                    SELECT step, status, error_message,
+                           ROW_NUMBER() OVER (PARTITION BY step ORDER BY id DESC) as rn
+                    FROM tasks
+                    WHERE video_id = ? AND step IN ({placeholders})
+                """, [vid] + requested_steps)
+                
+                rows = cursor.fetchall()
+                
+                # 只取每个 step 的最新记录 (rn=1)
+                step_statuses = {}
+                for row in rows:
+                    if row['rn'] == 1:
+                        step_statuses[row['step']] = {
+                            'status': row['status'],
+                            'error': row['error_message']
+                        }
+                
+                # 判断该视频的状态
+                has_failed = False
+                for step_name in requested_steps:
+                    info = step_statuses.get(step_name, {})
+                    if info.get('status') == 'failed':
+                        has_failed = True
+                        failed_videos.append((vid, step_name, info.get('error', '')))
+                        break
+                
+                if not has_failed:
+                    completed_videos.append(vid)
+        
+        total = len(video_ids)
+        failed_count = len(failed_videos)
+        completed_count = len(completed_videos)
+        
+        # 判定 job 状态
+        if failed_count == 0:
+            # 全部成功
+            return JobStatus.COMPLETED, None, 1.0
+        elif completed_count > 0:
+            # 部分成功、部分失败
+            progress = completed_count / total
+            # 构建错误摘要
+            error_parts = [f"{failed_count}/{total} 个视频处理失败:"]
+            for vid, step, err in failed_videos[:5]:  # 最多显示 5 个
+                short_err = err[:80] if err else '未知错误'
+                error_parts.append(f"  {vid} [{step}]: {short_err}")
+            if failed_count > 5:
+                error_parts.append(f"  ... 还有 {failed_count - 5} 个失败")
+            error_msg = "\n".join(error_parts)
+            return JobStatus.PARTIAL_COMPLETED, error_msg, progress
+        else:
+            # 全部失败
+            progress = self._parse_progress_from_log(job.log_file)
+            error_parts = [f"全部 {total} 个视频处理失败:"]
+            for vid, step, err in failed_videos[:5]:
+                short_err = err[:80] if err else '未知错误'
+                error_parts.append(f"  {vid} [{step}]: {short_err}")
+            if failed_count > 5:
+                error_parts.append(f"  ... 还有 {failed_count - 5} 个失败")
+            error_msg = "\n".join(error_parts)
+            return JobStatus.FAILED, error_msg, progress
+
     def get_log_content(self, job_id: str, tail_lines: int = 100) -> List[str]:
         """获取任务日志（最后 N 行）"""
         job = self.get_job(job_id)

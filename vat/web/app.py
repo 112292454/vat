@@ -18,6 +18,7 @@ from vat.database import Database
 from vat.config import load_config
 from vat.models import TaskStep, TaskStatus, DEFAULT_STAGE_SEQUENCE
 from vat.web.deps import get_db
+from vat.web.jobs import JobStatus
 
 # 导入路由
 from vat.web.routes import videos_router, playlists_router, tasks_router, files_router, prompts_router, bilibili_router
@@ -81,22 +82,32 @@ async def index(
     q: Optional[str] = None,  # 搜索关键词
     playlist_id: Optional[str] = None  # Playlist 过滤
 ):
-    """首页 - 视频列表"""
+    """首页 - 视频列表（SQL 层面分页+过滤，避免全量加载）"""
     db = get_db()
     
-    # 获取所有视频
-    videos = db.list_videos(playlist_id=playlist_id) if playlist_id else db.list_videos()
+    # SQL 层面分页+过滤
+    result = db.list_videos_paginated(
+        page=page,
+        per_page=per_page,
+        status=status,
+        search=q,
+        playlist_id=playlist_id
+    )
+    
+    page_videos = result['videos']
+    total = result['total']
+    total_pages = result['total_pages']
     
     # 获取所有 playlist 供过滤选择
     playlists = db.list_playlists()
     
-    # 批量获取所有视频的任务进度（单次 SQL，消除 N+1 查询）
-    video_ids = [v.id for v in videos]
-    progress_map = db.batch_get_video_progress(video_ids) if video_ids else {}
+    # 仅对当前页视频查询进度（性能关键优化）
+    page_video_ids = [v.id for v in page_videos]
+    progress_map = db.batch_get_video_progress(page_video_ids) if page_video_ids else {}
     
-    # 构建视频列表
+    # 构建视频列表（仅当前页）
     video_list = []
-    for video in videos:
+    for video in page_videos:
         vp = progress_map.get(video.id, {
             "progress": 0, "task_status": {s.value: {"status": "pending", "error": None} for s in DEFAULT_STAGE_SEQUENCE},
             "has_failed": False, "has_running": False
@@ -122,34 +133,7 @@ async def index(
             "progress": vp["progress"]
         })
     
-    # 按状态过滤
-    if status:
-        if status == "completed":
-            video_list = [v for v in video_list if v["progress"] == 100]
-        elif status == "failed":
-            video_list = [v for v in video_list 
-                         if any(t["status"] == "failed" for t in v["task_status"].values())]
-        elif status == "running":
-            video_list = [v for v in video_list 
-                         if any(t["status"] == "running" for t in v["task_status"].values())]
-    
-    # 搜索过滤（标题/翻译标题/频道）
-    if q:
-        q_lower = q.lower()
-        video_list = [v for v in video_list if 
-                     q_lower in (v["title"] or "").lower() or
-                     q_lower in (v["translated_title"] or "").lower() or
-                     q_lower in (v["channel"] or "").lower() or
-                     q_lower in v["id"].lower()]
-    
-    # 分页
-    total = len(video_list)
-    total_pages = (total + per_page - 1) // per_page if total > 0 else 1
-    start = (page - 1) * per_page
-    end = start + per_page
-    video_list = video_list[start:end]
-    
-    # 统计信息
+    # 统计信息（SQL 层面计算，不依赖当前页数据）
     stats = db.get_statistics()
     
     return templates.TemplateResponse("index.html", {
@@ -168,7 +152,7 @@ async def index(
 
 
 @app.get("/video/{video_id}", response_class=HTMLResponse)
-async def video_detail(request: Request, video_id: str, from_playlist: bool = False):
+async def video_detail(request: Request, video_id: str, from_playlist: Optional[str] = None):
     """视频详情页"""
     db = get_db()
     
@@ -236,8 +220,8 @@ async def video_detail(request: Request, video_id: str, from_playlist: bool = Fa
         "task_timeline": task_timeline,
         "metadata": video.metadata,
         "files": files_list,
-        "playlist_id": video.playlist_id,
-        "from_playlist": from_playlist
+        "playlist_id": from_playlist or video.playlist_id,
+        "from_playlist": bool(from_playlist)
     })
 
 
@@ -273,8 +257,13 @@ async def playlists_page(request: Request):
 
 
 @app.get("/playlists/{playlist_id}", response_class=HTMLResponse)
-async def playlist_detail_page(request: Request, playlist_id: str):
-    """Playlist 详情页"""
+async def playlist_detail_page(
+    request: Request, 
+    playlist_id: str,
+    page: int = Query(1, ge=1),
+    per_page: int = Query(100, ge=1, le=500)
+):
+    """Playlist 详情页（分页）"""
     db = get_db()
     from vat.services import PlaylistService
     
@@ -284,26 +273,50 @@ async def playlist_detail_page(request: Request, playlist_id: str):
     if not pl:
         return HTMLResponse("<h1>Playlist 不存在</h1>", status_code=404)
     
-    videos = playlist_service.get_playlist_videos(playlist_id)
+    # 获取全量视频列表（轻量：仅模型对象，不含进度）
+    all_videos = playlist_service.get_playlist_videos(playlist_id)
     progress = playlist_service.get_playlist_progress(playlist_id)
     
-    # 批量获取进度（消除 N+1）
-    video_ids = [v.id for v in videos]
-    progress_map = db.batch_get_video_progress(video_ids) if video_ids else {}
+    # 全量 ID 列表（供 JS 批量操作使用）
+    all_video_ids = [v.id for v in all_videos]
+    
+    # 分页
+    total = len(all_videos)
+    total_pages = (total + per_page - 1) // per_page if total > 0 else 1
+    start = (page - 1) * per_page
+    end = start + per_page
+    page_videos = all_videos[start:end]
+    
+    # 仅对当前页视频查询进度（性能关键优化）
+    page_video_ids = [v.id for v in page_videos]
+    progress_map = db.batch_get_video_progress(page_video_ids) if page_video_ids else {}
     
     video_list = []
-    for v in videos:
-        vp = progress_map.get(v.id, {"completed": 0, "total": 7, "progress": 0})
+    for idx, v in enumerate(page_videos):
+        vp = progress_map.get(v.id, {"completed": 0, "total": 7, "progress": 0, "has_failed": False, "has_running": False})
         pending_count = vp["total"] - vp["completed"]
         metadata = v.metadata or {}
         duration = metadata.get("duration", 0)
         duration_formatted = format_duration(duration) if duration else ""
+        
+        # 状态判定：failed > running > completed > pending
+        if vp.get("has_failed"):
+            status = "failed"
+        elif vp.get("has_running"):
+            status = "running"
+        elif pending_count == 0:
+            status = "completed"
+        else:
+            status = "pending"
+        
         video_list.append({
             "id": v.id,
             "title": v.title,
             "playlist_index": v.playlist_index,
+            "global_index": start + idx + 1,
             "pending_count": pending_count,
-            "status": "completed" if pending_count == 0 else "pending",
+            "status": status,
+            "progress": vp["progress"],
             "upload_date": metadata.get("upload_date", ""),
             "upload_date_interpolated": metadata.get("upload_date_interpolated", False),
             "unavailable": metadata.get("unavailable", False),
@@ -315,7 +328,12 @@ async def playlist_detail_page(request: Request, playlist_id: str):
         "request": request,
         "playlist": pl,
         "videos": video_list,
-        "progress": progress
+        "all_video_ids": all_video_ids,
+        "progress": progress,
+        "current_page": page,
+        "per_page": per_page,
+        "total": total,
+        "total_pages": total_pages
     })
 
 
@@ -332,6 +350,12 @@ async def tasks_page(request: Request):
     log_dir = Path(config.storage.database_path).parent / "job_logs"
     job_manager = JobManager(config.storage.database_path, str(log_dir))
     
+    # 先更新所有 running 状态任务的实际状态
+    jobs = job_manager.list_jobs(limit=50)
+    for j in jobs:
+        if j.status == JobStatus.RUNNING:
+            job_manager.update_job_status(j.job_id)
+    # 重新获取更新后的列表
     jobs = job_manager.list_jobs(limit=50)
     task_list = [j.to_dict() for j in jobs]
     

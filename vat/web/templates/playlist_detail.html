@@ -168,9 +168,9 @@
                                @change="toggleVideo('{{ video.id }}')"
                                class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
                     </td>
-                    <td class="px-4 py-4 text-sm text-gray-500">{{ loop.index }}</td>
+                    <td class="px-4 py-4 text-sm text-gray-500">{{ video.global_index }}</td>
                     <td class="px-6 py-4">
-                        <a href="/video/{{ video.id }}?from_playlist=true" class="text-blue-600 hover:underline">
+                        <a href="/video/{{ video.id }}?from_playlist={{ playlist.id }}" class="text-blue-600 hover:underline">
                             {{ video.title or video.id }}
                         </a>
                         {% if video.unavailable %}
@@ -195,10 +195,14 @@
                         {% endif %}
                     </td>
                     <td class="px-6 py-4">
-                        {% if video.status == 'completed' %}
-                        <span class="px-2 py-1 text-xs bg-green-100 text-green-800 rounded-full">已完成</span>
-                        {% elif video.unavailable %}
+                        {% if video.unavailable %}
                         <span class="px-2 py-1 text-xs bg-gray-100 text-gray-600 rounded-full">不可用</span>
+                        {% elif video.status == 'completed' %}
+                        <span class="px-2 py-1 text-xs bg-green-100 text-green-800 rounded-full">已完成</span>
+                        {% elif video.status == 'failed' %}
+                        <span class="px-2 py-1 text-xs bg-red-100 text-red-800 rounded-full">失败</span>
+                        {% elif video.status == 'running' %}
+                        <span class="px-2 py-1 text-xs bg-blue-100 text-blue-800 rounded-full">进行中</span>
                         {% else %}
                         <span class="px-2 py-1 text-xs bg-yellow-100 text-yellow-800 rounded-full">
                             待处理 ({{ video.pending_count }} 阶段)
@@ -206,7 +210,7 @@
                         {% endif %}
                     </td>
                     <td class="px-6 py-4 text-sm">
-                        <a href="/video/{{ video.id }}?from_playlist=true" class="text-blue-600 hover:text-blue-800">查看</a>
+                        <a href="/video/{{ video.id }}?from_playlist={{ playlist.id }}" class="text-blue-600 hover:text-blue-800">查看</a>
                     </td>
                 </tr>
                 {% else %}
@@ -223,6 +227,31 @@
         <div class="px-6 py-3 bg-gray-50 border-t text-sm text-gray-500">
             💡 勾选视频后可批量处理。全选/取消全选可用表头复选框。
         </div>
+        
+        <!-- 分页控件 -->
+        {% if total_pages > 1 %}
+        <div class="px-6 py-3 border-t flex items-center justify-between">
+            <div class="text-sm text-gray-600">
+                共 {{ total }} 个视频，第 {{ current_page }}/{{ total_pages }} 页
+            </div>
+            <div class="flex items-center space-x-2">
+                {% if current_page > 1 %}
+                <a href="?page={{ current_page - 1 }}&per_page={{ per_page }}" 
+                   class="px-3 py-1 bg-gray-200 rounded hover:bg-gray-300 text-sm">上一页</a>
+                {% endif %}
+                <span class="px-3 py-1 text-sm">
+                    <input type="number" value="{{ current_page }}" min="1" max="{{ total_pages }}"
+                           class="w-16 border rounded px-2 py-1 text-center text-sm"
+                           onchange="location.href='?page='+this.value+'&per_page={{ per_page }}'">
+                    / {{ total_pages }}
+                </span>
+                {% if current_page < total_pages %}
+                <a href="?page={{ current_page + 1 }}&per_page={{ per_page }}" 
+                   class="px-3 py-1 bg-gray-200 rounded hover:bg-gray-300 text-sm">下一页</a>
+                {% endif %}
+            </div>
+        </div>
+        {% endif %}
     </div>
 </div>
 
@@ -277,7 +306,7 @@
 
 <script>
 const playlistId = '{{ playlist.id }}';
-const allVideoIds = [{% for video in videos %}'{{ video.id }}'{% if not loop.last %}, {% endif %}{% endfor %}];
+const allVideoIds = {{ all_video_ids | tojson }};
 
 // Alpine.js 组件：Playlist 批量管理
 function playlistManager() {
@@ -476,6 +505,7 @@ const videoData = [
     {id: '{{ video.id }}', pending: {{ 'true' if video.status != 'completed' and not video.unavailable else 'false' }}, unavailable: {{ 'true' if video.unavailable else 'false' }}}{% if not loop.last %},{% endif %}
     {% endfor %}
 ];
+const allVideoData = allVideoIds;
 
 function showRangeDialog() {
     document.getElementById('range-dialog').classList.remove('hidden');

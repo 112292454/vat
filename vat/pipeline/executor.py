@@ -2,6 +2,7 @@
 单视频处理执行器
 """
 import os
+import re
 import json
 import logging
 import hashlib
@@ -738,8 +739,16 @@ class VideoProcessor:
             else:
                 self._progress_with_tracker(f"运行 Whisper 语音识别... (音频: {asr_audio_file.name})")
                 
-                # Whisper 进度回调
+                # Whisper 进度回调（解析 chunk 完成消息以更新进度条）
                 def whisper_progress(msg):
+                    # 解析 chunked_asr 的 "已完成 X/Y 块" 消息
+                    m = re.search(r'已完成 (\d+)/(\d+) 块', msg)
+                    if m and self._progress_tracker:
+                        completed, total = int(m.group(1)), int(m.group(2))
+                        stage_prog = self._progress_tracker._stage_progress.get('whisper')
+                        if stage_prog:
+                            stage_prog.total_items = total
+                            stage_prog.completed_items = completed
                     self._progress_with_tracker(msg)
                 
                 # 确保音频文件存在
@@ -788,8 +797,9 @@ class VideoProcessor:
                 
                 # ====== 崩溃检测与静默警告 ======
                 from vat.utils.output_validator import validate_asr_segments
+                # ASRDataSeg 的 start_time/end_time 是毫秒，validate_asr_segments 期望秒
                 segments_for_validation = [
-                    {'text': seg.text, 'start': seg.start_time, 'end': seg.end_time}
+                    {'text': seg.text, 'start': seg.start_time / 1000.0, 'end': seg.end_time / 1000.0}
                     for seg in asr_data.segments
                 ]
                 validated_segments, warnings = validate_asr_segments(
@@ -804,8 +814,9 @@ class VideoProcessor:
                 if len(validated_segments) < len(asr_data.segments):
                     removed_count = len(asr_data.segments) - len(validated_segments)
                     self._progress_with_tracker(f"移除 {removed_count} 个崩溃片段")
+                    # validated_segments 中时间戳是秒，转回毫秒给 ASRDataSeg
                     new_segments = [
-                        ASRDataSeg(text=s['text'], start_time=s['start'], end_time=s['end'])
+                        ASRDataSeg(text=s['text'], start_time=int(s['start'] * 1000), end_time=int(s['end'] * 1000))
                         for s in validated_segments
                     ]
                     asr_data = ASRData(segments=new_segments)

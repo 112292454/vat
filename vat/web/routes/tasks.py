@@ -36,6 +36,7 @@ class ExecuteRequest(BaseModel):
     steps: List[str]  # TaskStep 名称列表或阶段组
     gpu_device: str = "auto"  # "auto", "cuda:0", "cpu"
     force: bool = False
+    concurrency: int = 1  # 并发处理的视频数量（默认1=串行）
     
     # 可选：生成等价 CLI 命令
     generate_cli: bool = False
@@ -144,7 +145,8 @@ async def execute_task(
         video_ids=request.video_ids,
         steps=steps,
         gpu_device=request.gpu_device,
-        force=request.force
+        force=request.force,
+        concurrency=request.concurrency
     )
     
     # 生成等价 CLI 命令（可选）
@@ -331,7 +333,7 @@ async def stream_logs(
                     yield f"data: [读取日志失败: {e}]\n\n"
             
             # 检查任务状态
-            if current_job and current_job.status in (JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED):
+            if current_job and current_job.status in (JobStatus.COMPLETED, JobStatus.PARTIAL_COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED):
                 yield f"event: complete\ndata: {current_job.status.value}\n\n"
                 break
             

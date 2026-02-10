@@ -134,25 +134,18 @@ class ChunkMerger:
         )
 
         if not left_overlap or not right_overlap:
-            # 无重叠，直接拼接
-            logger.info("未检测到重叠区域，直接拼接")
-            return left + right
+            # 无重叠区域（可能是首个 segment 跨度超过 overlap_duration）
+            # 仍需使用时间边界安全切分，避免 left 尾部与 right 头部时间戳倒退
+            logger.info("未检测到重叠区域，使用时间边界安全切分")
+            return self._safe_time_boundary_split(left, right)
 
         # 滑动窗口找最佳对齐位置
         best_match = self._find_best_alignment(left_overlap, right_overlap)
 
         if best_match is None:
-            # 未找到有效匹配，使用时间边界切分
-            logger.warning("未找到有效文本匹配，使用时间边界切分")
-            # 找到 left 中最后一个在 right[0].start_time 之前结束的 segment
-            split_idx = left_len
-            right_start = right[0].start_time
-            for i in range(left_len - 1, -1, -1):
-                if left[i].end_time <= right_start:
-                    split_idx = i + 1
-                    break
-            logger.info(f"时间边界切分: left[:{split_idx}] + right")
-            return left[:split_idx] + right
+            # 未找到有效匹配，使用时间边界安全切分
+            logger.warning("未找到有效文本匹配，使用时间边界安全切分")
+            return self._safe_time_boundary_split(left, right)
 
         # 使用最佳匹配结果
         left_start_idx, left_end_idx, right_start_idx, right_end_idx, matches = (
@@ -292,6 +285,40 @@ class ChunkMerger:
                 best_result = (left_start, left_end, right_start, right_end, matches)
 
         return best_result
+
+    def _safe_time_boundary_split(
+        self,
+        left: List[ASRDataSeg],
+        right: List[ASRDataSeg],
+    ) -> List[ASRDataSeg]:
+        """时间边界安全切分：保证拼接后 start_time 单调递增
+
+        从后往前搜索 left，找到最后一个 start_time <= right[0].start_time 的段，
+        在该段之后切分。这确保 left 切分后的所有段 start_time 都 <= right 的第一个段。
+
+        Args:
+            left: 左侧序列
+            right: 右侧序列
+
+        Returns:
+            安全拼接后的 segment 列表
+        """
+        if not left:
+            return right
+        if not right:
+            return left
+
+        right_start = right[0].start_time
+
+        # 从后往前找 left 中最后一个 start_time <= right[0].start_time 的段
+        split_idx = 0  # 默认：丢弃所有与 right 时间重叠的 left 段
+        for i in range(len(left) - 1, -1, -1):
+            if left[i].start_time <= right_start:
+                split_idx = i + 1
+                break
+
+        logger.info(f"时间边界安全切分: left[:{split_idx}] + right (丢弃 {len(left) - split_idx} 个重叠段)")
+        return left[:split_idx] + right
 
     def _adjust_timestamps(
         self, segments: List[ASRDataSeg], offset: int

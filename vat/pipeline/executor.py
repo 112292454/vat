@@ -293,6 +293,15 @@ class VideoProcessor:
         # 设置当前上下文的 video_id
         set_video_id(self.video_id)
         
+        # 检查视频是否为不可用（如会员限定），若是则直接标记所有阶段完成并跳过
+        video_metadata = self.video.metadata or {}
+        if video_metadata.get('unavailable', False):
+            self.progress_callback(f"视频不可用（会员限定等），跳过处理，标记所有阶段为完成")
+            for step in DEFAULT_STAGE_SEQUENCE:
+                if not self.db.is_step_completed(self.video_id, step):
+                    self.db.update_task_status(self.video_id, step, TaskStatus.COMPLETED)
+            return True
+        
         # 初始化直通阶段集合
         self._passthrough_stages = set()
         self._config_backup = None

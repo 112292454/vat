@@ -49,20 +49,33 @@
                         </a>
                     </td>
                     <td class="px-6 py-4 text-sm">{{ task.video_ids|length }}</td>
-                    <td class="px-6 py-4 text-sm text-gray-600">{{ task.steps|join(', ') }}</td>
+                    <td class="px-6 py-4 text-sm text-gray-600" title="{{ task.steps|join(', ') }}">
+                        {{ task.steps|length }} 个阶段
+                    </td>
                     <td class="px-6 py-4">
                         <span class="px-2 py-1 text-xs rounded-full 
                             {% if task.status == 'completed' %}bg-green-100 text-green-800
+                            {% elif task.status == 'partial_completed' %}bg-orange-100 text-orange-800
                             {% elif task.status == 'running' %}bg-blue-100 text-blue-800
                             {% elif task.status == 'failed' %}bg-red-100 text-red-800
                             {% elif task.status == 'cancelled' %}bg-gray-100 text-gray-800
                             {% else %}bg-yellow-100 text-yellow-800{% endif %}">
-                            {{ task.status }}
+                            {% if task.status == 'completed' %}已完成
+                            {% elif task.status == 'partial_completed' %}部分完成
+                            {% elif task.status == 'running' %}运行中
+                            {% elif task.status == 'failed' %}失败
+                            {% elif task.status == 'cancelled' %}已取消
+                            {% else %}{{ task.status }}{% endif %}
                         </span>
                     </td>
                     <td class="px-6 py-4">
-                        <div class="w-24 bg-gray-200 rounded-full h-2">
-                            <div class="bg-blue-500 h-2 rounded-full" style="width: {{ (task.progress * 100)|int }}%"></div>
+                        {% set pct = (task.progress * 100)|int %}
+                        {% if task.status == 'completed' %}{% set pct = 100 %}{% endif %}
+                        <div class="flex items-center space-x-2">
+                            <div class="w-20 bg-gray-200 rounded-full h-2">
+                                <div class="h-2 rounded-full {% if task.status == 'failed' %}bg-red-500{% elif task.status == 'completed' %}bg-green-500{% else %}bg-blue-500{% endif %}" style="width: {{ pct }}%"></div>
+                            </div>
+                            <span class="text-xs text-gray-500 w-8">{{ pct }}%</span>
                         </div>
                     </td>
                     <td class="px-6 py-4 text-sm text-gray-600">{{ task.created_at[:16] }}</td>

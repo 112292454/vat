@@ -4,6 +4,7 @@
 任务通过子进程执行 CLI 命令，与 Web UI 完全解耦
 """
 import asyncio
+import re
 from typing import Optional, List
 from pathlib import Path
 from fastapi import APIRouter, HTTPException, Depends
@@ -288,7 +289,7 @@ async def get_log_content(
         from pathlib import Path
         log_path = Path(job.log_file)
         if log_path.exists():
-            content = log_path.read_text()
+            content = re.sub(r'\x1b\[[0-9;]*m', '', log_path.read_text())
     
     return {"task_id": task_id, "content": content}
 
@@ -328,7 +329,9 @@ async def stream_logs(
                             
                             for line in new_content.splitlines():
                                 if line.strip():
-                                    yield f"data: {line}\n\n"
+                                    # 过滤 ANSI 转义序列
+                                    clean_line = re.sub(r'\x1b\[[0-9;]*m', '', line)
+                                    yield f"data: {clean_line}\n\n"
                 except Exception as e:
                     yield f"data: [读取日志失败: {e}]\n\n"
             

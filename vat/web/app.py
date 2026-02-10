@@ -395,12 +395,26 @@ async def task_new_page(
             videos_in_playlist = playlist_service.get_playlist_videos(playlist_id)
             playlist_video_count = len(videos_in_playlist)
     
-    # 获取所有视频
-    all_videos = db.list_videos(playlist_id=playlist_id) if playlist_id else db.list_videos()
+    # 获取视频列表（优化：避免加载全部视频到 DOM）
+    MAX_VIDEOS_NO_PLAYLIST = 200
+    truncated = False
+    
+    if playlist_id:
+        # 有 playlist：加载该 playlist 的全部视频
+        all_videos = db.list_videos(playlist_id=playlist_id)
+    elif selected_video_ids:
+        # 有明确选中的视频：只加载选中的视频
+        all_videos = [v for vid in selected_video_ids if (v := db.get_video(vid))]
+    else:
+        # 无过滤条件（直接访问 /tasks/new）：限制加载数量
+        all_videos = db.list_videos()
+        if len(all_videos) > MAX_VIDEOS_NO_PLAYLIST:
+            truncated = True
+            all_videos = all_videos[:MAX_VIDEOS_NO_PLAYLIST]
     
     # 批量获取进度（消除 N+1）
-    all_video_ids = [v.id for v in all_videos]
-    progress_map = db.batch_get_video_progress(all_video_ids) if all_video_ids else {}
+    all_video_ids_list = [v.id for v in all_videos]
+    progress_map = db.batch_get_video_progress(all_video_ids_list) if all_video_ids_list else {}
     
     video_list = []
     for v in all_videos:
@@ -431,7 +445,8 @@ async def task_new_page(
         "playlist_id": playlist_id,
         "playlist_title": playlist_title,
         "playlist_video_count": playlist_video_count,
-        "back_url": back_url
+        "back_url": back_url,
+        "truncated": truncated
     })
 
 

@@ -21,11 +21,17 @@
             </div>
             <span class="px-3 py-1 text-sm rounded-full 
                 {% if task.status == 'completed' %}bg-green-100 text-green-800
+                {% elif task.status == 'partial_completed' %}bg-orange-100 text-orange-800
                 {% elif task.status == 'running' %}bg-blue-100 text-blue-800
                 {% elif task.status == 'failed' %}bg-red-100 text-red-800
                 {% elif task.status == 'cancelled' %}bg-gray-100 text-gray-800
                 {% else %}bg-yellow-100 text-yellow-800{% endif %}">
-                {{ task.status }}
+                {% if task.status == 'completed' %}已完成
+                {% elif task.status == 'partial_completed' %}部分完成
+                {% elif task.status == 'running' %}运行中
+                {% elif task.status == 'failed' %}失败
+                {% elif task.status == 'cancelled' %}已取消
+                {% else %}{{ task.status }}{% endif %}
             </span>
         </div>
         
@@ -207,7 +213,8 @@ function startLogStream() {
     };
     
     eventSource.addEventListener('complete', (event) => {
-        appendLog(`\n=== 任务${event.data === 'completed' ? '完成' : event.data} ===`);
+        const statusText = event.data === 'completed' ? '完成' : event.data === 'partial_completed' ? '部分完成' : event.data;
+        appendLog(`\n=== 任务${statusText} ===`);
         eventSource.close();
         // 更新页面状态
         updateTaskStatus(event.data);
@@ -232,7 +239,8 @@ async function checkTaskStatus() {
             
             if (data.status !== 'running') {
                 stopProgressPolling();
-                appendLog(`\n=== 任务${data.status === 'completed' ? '完成' : data.status} ===`);
+                const st = data.status === 'completed' ? '完成' : data.status === 'partial_completed' ? '部分完成' : data.status;
+                appendLog(`\n=== 任务${st} ===`);
                 updateTaskStatus(data.status);
                 setTimeout(() => location.reload(), 1000);
             } else {
@@ -278,9 +286,11 @@ function updateTaskStatus(status) {
         statusBadge.textContent = status;
         statusBadge.className = 'px-3 py-1 text-sm rounded-full ' + 
             (status === 'completed' ? 'bg-green-100 text-green-800' :
+             status === 'partial_completed' ? 'bg-orange-100 text-orange-800' :
              status === 'failed' ? 'bg-red-100 text-red-800' :
              status === 'cancelled' ? 'bg-gray-100 text-gray-800' :
              'bg-blue-100 text-blue-800');
+        statusBadge.textContent = status === 'partial_completed' ? '部分完成' : status;
     }
 }
 

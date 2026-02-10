@@ -22,6 +22,12 @@
                 </div>
                 {% endif %}
                 
+                {% if truncated %}
+                <div class="bg-yellow-50 border border-yellow-200 rounded-lg p-3 mb-3 text-sm text-yellow-800">
+                    ⚠️ 视频数量过多，仅显示前 {{ videos|length }} 个。建议从<a href="/playlists" class="text-blue-600 hover:underline">Playlist 页面</a>或<a href="/" class="text-blue-600 hover:underline">首页</a>选择视频后进入此页面。
+                </div>
+                {% endif %}
+                
                 <!-- 搜索框 -->
                 <div class="mb-2">
                     <input type="text" id="video-search" placeholder="搜索视频标题..." 

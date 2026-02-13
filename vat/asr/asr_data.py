@@ -383,11 +383,27 @@ class ASRData:
             "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
         )
 
-        # Layer 控制碰撞检测：
-        # Layer 1 = 参与自动排开（原文、译文主层）
-        # Layer 0 = 不参与碰撞检测（译文描边底层）
-        dialogue_layer1 = "Dialogue: 0,{},{},{},,0,0,0,,{}\n"  # 参与碰撞检测
-        dialogue_layer0 = "Dialogue: 1,{},{},{},,0,0,0,,{}\n"  # 不参与碰撞检测
+        # ASS Layer 碰撞检测机制：
+        # - 同一 Layer 内的事件互相参与碰撞检测（自动排开避免重叠）
+        # - 不同 Layer 之间不参与碰撞检测
+        #
+        # 双层字幕策略（发光+本体）：
+        # - Layer 0 = 发光底层（_Base 样式 + \blur，与主样式相同 Outline/Shadow 以保证 bounding box 一致）
+        # - Layer 1 = 主文字层（主样式，清晰文字）
+        # 两层使用相同的事件顺序和数量，确保碰撞检测对称 → 发光层和本体始终重合
+        #
+        # 对话行顺序（同一片段内）：译文在前、原文在后
+        # → 碰撞时译文保持原位，原文被推开（因为 ASS 中先出现的事件有碰撞优先权）
+        # _Base 样式与主样式的 Outline/Shadow 完全一致（保证碰撞 bounding box 相同），
+        # 发光效果通过 \blur 内联标签实现（后处理特效，不影响碰撞检测布局）
+        dlg_base = "Dialogue: 0,{},{},{},,0,0,0,,{{\\blur3}}{}\n"  # Layer 0（发光底层）
+        dlg_main = "Dialogue: 1,{},{},{},,0,0,0,,{}\n"             # Layer 1（主文字层）
+        
+        # 检测样式表中已有的 _Base 样式，用于决定 base 层使用哪个样式名
+        # 如果 X_Base 不存在，base 层使用 X 本身（仍能保证碰撞检测对称）
+        style_str_for_check = style_str or ""
+        def _base_style(name: str) -> str:
+            return f"{name}_Base" if f"Style: {name}_Base," in style_str_for_check else name
         
         for seg in self.segments:
             start_time, end_time = seg.to_ass_ts()
@@ -406,21 +422,26 @@ class ASRData:
 
             # 固定布局：原文在上，译文在下（双语字幕）
             if has_translation:
-                # 原文（Layer 0，参与排开）
-                ass_content += dialogue_layer0.format(
-                    start_time, end_time, style_name_original, original
+                # 译文先写（碰撞优先权：译文保持原位，原文被推开）
+                ass_content += dlg_base.format(
+                    start_time, end_time, _base_style(style_name_translated), translated
                 )
-                # 译文描边底层（Layer 1，不参与碰撞检测，与译文主层重叠）
-                ass_content += dialogue_layer1.format(
-                    start_time, end_time, style_name_translated + "_Base", translated
-                )
-                # 译文主层（Layer 0，参与排开）
-                ass_content += dialogue_layer0.format(
+                ass_content += dlg_main.format(
                     start_time, end_time, style_name_translated, translated
                 )
+                # 原文后写
+                ass_content += dlg_base.format(
+                    start_time, end_time, _base_style(style_name_original), original
+                )
+                ass_content += dlg_main.format(
+                    start_time, end_time, style_name_original, original
+                )
             else:
-                # 无译文时只显示原文（Layer 0）
-                ass_content += dialogue_layer0.format(
+                # 无译文时只显示原文（仍然两层以保持碰撞检测一致性）
+                ass_content += dlg_base.format(
+                    start_time, end_time, _base_style(style_name_original), original
+                )
+                ass_content += dlg_main.format(
                     start_time, end_time, style_name_original, original
                 )
 
@@ -451,12 +472,21 @@ class ASRData:
         
         for i, speaker_id in enumerate(sorted(list(speakers))):
             color = colors[i % len(colors)]
-            # 原文样式（上方，较大字体）
+            # 原文样式（上方，较大字体）— 发光底层 + 主层
+            # _Base 与主样式 Outline/Shadow 完全一致，仅 OutlineColour 不同（发光效果由 \blur 实现）
+            styles.append(
+                f"Style: Speaker_{speaker_id}_Base,Arial,20,{color},&H000000FF,&H00FFFFFF,&H00000000,"
+                f"-1,0,0,0,100,100,0,0,1,2,0,2,10,10,15,1\n"
+            )
             styles.append(
                 f"Style: Speaker_{speaker_id},Arial,20,{color},&H000000FF,&H00000000,&H00000000,"
                 f"-1,0,0,0,100,100,0,0,1,2,0,2,10,10,15,1\n"
             )
-            # 译文样式（下方，较小字体，同颜色）
+            # 译文样式（下方，较小字体，同颜色）— 发光底层 + 主层
+            styles.append(
+                f"Style: Speaker_{speaker_id}_Secondary_Base,Arial,40,{color},&H000000FF,&H00FFFFFF,&H00000000,"
+                f"-1,0,0,0,100,100,0,0,1,2,0,2,10,10,15,1\n"
+            )
             styles.append(
                 f"Style: Speaker_{speaker_id}_Secondary,Arial,40,{color},&H000000FF,&H00000000,&H00000000,"
                 f"-1,0,0,0,100,100,0,0,1,2,0,2,10,10,15,1\n"
@@ -547,8 +577,11 @@ class ASRData:
                 mid_time = (
                     current_seg.end_time + next_seg.start_time
                 ) // 2 + time_gap // 4
-                current_seg.end_time = mid_time
-                next_seg.start_time = mid_time
+                # 防御性检查：仅在公式结果对两端都合法时才应用
+                # 正常（非重叠）输入下此条件恒成立；上游重叠应由 _realign_timestamps 消除
+                if mid_time > current_seg.start_time and mid_time < next_seg.end_time:
+                    current_seg.end_time = mid_time
+                    next_seg.start_time = mid_time
 
         return self
 

@@ -180,7 +180,8 @@ metadata['available_auto_subtitles'] = ['ja', 'en', ...]  # 自动生成
 ### 5.1 场景识别（SceneIdentifier）
 - 触发条件：下载器返回了 `title`。
 - 调用：@`vat/llm/scene_identifier.py` `SceneIdentifier.detect_scene()`
-- 使用的 LLM 模型：**复用了** `config.asr.split.model`（注意这点，容易误解）。
+- 配置：`config.downloader.scene_identify`（model/api_key/base_url，留空继承全局 `llm` 配置）
+- model fallback 链：`downloader.scene_identify.model` → `llm.model`
 - 结果写入：
   - `metadata['scene']`
   - `metadata['scene_name']`
@@ -193,7 +194,8 @@ metadata['available_auto_subtitles'] = ['ja', 'en', ...]  # 自动生成
 ### 5.2 视频信息翻译（VideoInfoTranslator，用于上传阶段）
 - 触发条件：`config.llm.is_available()` 为真 **且** 没有已有翻译结果。
 - 调用：@`vat/llm/video_info_translator.py` `VideoInfoTranslator.translate()`
-- 使用的模型：`config.translator.llm.model`
+- 配置：`config.downloader.video_info_translate`（model/api_key/base_url，留空继承全局 `llm` 配置）
+- model fallback 链：`downloader.video_info_translate.model` → `llm.model`
 - 结果写入：`metadata['translated'] = translated_info.to_dict()`
 
 **翻译复用机制**：

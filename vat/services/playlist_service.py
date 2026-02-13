@@ -478,7 +478,12 @@ class PlaylistService:
                 
                 # 执行翻译
                 from vat.llm.video_info_translator import VideoInfoTranslator
-                translator = VideoInfoTranslator(model=config.translator.llm.model)
+                vit_cfg = config.downloader.video_info_translate
+                translator = VideoInfoTranslator(
+                    model=vit_cfg.model or config.llm.model,
+                    api_key=vit_cfg.api_key,
+                    base_url=vit_cfg.base_url,
+                )
                 
                 title = video_info.get('title', '')
                 description = video_info.get('description', '')

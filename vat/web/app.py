@@ -78,12 +78,30 @@ async def index(
     request: Request,
     status: Optional[str] = None,
     page: int = Query(1, ge=1),
-    per_page: int = Query(50, ge=1, le=200),
+    per_page: int = Query(50, ge=0),  # 0=显示全部
     q: Optional[str] = None,  # 搜索关键词
-    playlist_id: Optional[str] = None  # Playlist 过滤
+    playlist_id: Optional[str] = None,  # Playlist 过滤
+    # 阶段级筛选（sf_STEP=STATUS，如 sf_download=failed&sf_whisper=pending）
+    sf_download: Optional[str] = None,
+    sf_whisper: Optional[str] = None,
+    sf_split: Optional[str] = None,
+    sf_optimize: Optional[str] = None,
+    sf_translate: Optional[str] = None,
+    sf_embed: Optional[str] = None,
+    sf_upload: Optional[str] = None,
 ):
     """首页 - 视频列表（SQL 层面分页+过滤，避免全量加载）"""
     db = get_db()
+    
+    # 构建阶段级过滤字典
+    stage_filters = {}
+    for step_name, step_val in [
+        ("download", sf_download), ("whisper", sf_whisper), ("split", sf_split),
+        ("optimize", sf_optimize), ("translate", sf_translate),
+        ("embed", sf_embed), ("upload", sf_upload),
+    ]:
+        if step_val and step_val in ("pending", "completed", "failed"):
+            stage_filters[step_name] = step_val
     
     # SQL 层面分页+过滤
     result = db.list_videos_paginated(
@@ -91,7 +109,8 @@ async def index(
         per_page=per_page,
         status=status,
         search=q,
-        playlist_id=playlist_id
+        playlist_id=playlist_id,
+        stage_filters=stage_filters or None,
     )
     
     page_videos = result['videos']
@@ -147,7 +166,8 @@ async def index(
         "status_filter": status,
         "search_query": q or "",
         "playlist_filter": playlist_id or "",
-        "playlists": [{"id": p.id, "title": p.title} for p in playlists]
+        "playlists": [{"id": p.id, "title": p.title} for p in playlists],
+        "stage_filters": stage_filters,
     })
 
 
@@ -197,6 +217,22 @@ async def video_detail(request: Request, video_id: str, from_playlist: Optional[
             "error_message": task.error_message if task else None,
         })
     
+    # 查找正在处理该视频的活跃 job
+    active_job_id = None
+    try:
+        from vat.web.jobs import JobManager
+        from vat.config import load_config
+        config = load_config()
+        job_mgr = JobManager(
+            db_path=str(Path(config.storage.work_dir) / "web_jobs.db"),
+            log_dir=str(Path(config.storage.work_dir) / "logs" / "jobs"),
+        )
+        active_job = job_mgr.get_running_job_for_video(video_id)
+        if active_job:
+            active_job_id = active_job.job_id
+    except Exception:
+        pass  # job 查询失败不影响页面渲染
+    
     # 获取相关文件列表
     files_list = []
     if video.output_dir:
@@ -221,7 +257,8 @@ async def video_detail(request: Request, video_id: str, from_playlist: Optional[
         "metadata": video.metadata,
         "files": files_list,
         "playlist_id": from_playlist or video.playlist_id,
-        "from_playlist": bool(from_playlist)
+        "from_playlist": bool(from_playlist),
+        "active_job_id": active_job_id,
     })
 
 
@@ -379,7 +416,7 @@ async def tasks_page(request: Request):
 async def task_new_page(
     request: Request, 
     playlist: Optional[str] = None, 
-    video: Optional[str] = None,
+    video: Optional[List[str]] = Query(None),  # 支持多个 ?video=id1&video=id2
     videos: Optional[str] = None  # 逗号分隔的多个视频 ID
 ):
     """新建任务页"""
@@ -392,7 +429,7 @@ async def task_new_page(
     # 解析选中的视频 ID 列表
     selected_video_ids = set()
     if video:
-        selected_video_ids.add(video)
+        selected_video_ids.update(video)
     if videos:
         selected_video_ids.update(videos.split(','))
     

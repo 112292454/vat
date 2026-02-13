@@ -15,7 +15,7 @@ from contextlib import contextmanager
 
 from .models import (
     Video, Task, Playlist, SourceType, TaskStep, TaskStatus,
-    DEFAULT_STAGE_SEQUENCE
+    DEFAULT_STAGE_SEQUENCE, STAGE_DEPENDENCIES
 )
 from .utils.logger import setup_logger
 
@@ -334,7 +334,8 @@ class Database:
         per_page: int = 50,
         status: Optional[str] = None,
         search: Optional[str] = None,
-        playlist_id: Optional[str] = None
+        playlist_id: Optional[str] = None,
+        stage_filters: Optional[Dict[str, str]] = None
     ) -> Dict[str, Any]:
         """分页列出视频（SQL 层面过滤，避免全量加载）
         
@@ -344,6 +345,8 @@ class Database:
             status: 状态过滤 ('completed', 'failed', 'running', None=全部)
             search: 搜索关键词（匹配标题/频道/ID）
             playlist_id: Playlist 过滤
+            stage_filters: 阶段级过滤（AND 逻辑），如 {"download": "failed", "whisper": "pending"}
+                           支持的状态值: 'pending'（就绪待运行）, 'completed', 'failed'
             
         Returns:
             {'videos': List[Video], 'total': int, 'page': int, 'total_pages': int}
@@ -408,6 +411,66 @@ class Database:
                 """
                 where_clauses.append(status_subquery)
             
+            # 阶段级过滤（AND 逻辑）
+            if stage_filters:
+                for step_name, step_status in stage_filters.items():
+                    if step_status == 'completed':
+                        # 该阶段最新任务为 completed/skipped
+                        where_clauses.append("""
+                            v.id IN (
+                                SELECT t_sf.video_id FROM (
+                                    SELECT video_id, status,
+                                           ROW_NUMBER() OVER (PARTITION BY video_id ORDER BY id DESC) as rn
+                                    FROM tasks WHERE step = ?
+                                ) t_sf WHERE t_sf.rn = 1 AND t_sf.status IN ('completed', 'skipped')
+                            )
+                        """)
+                        where_params.append(step_name)
+                    elif step_status == 'failed':
+                        # 该阶段最新任务为 failed
+                        where_clauses.append("""
+                            v.id IN (
+                                SELECT t_sf.video_id FROM (
+                                    SELECT video_id, status,
+                                           ROW_NUMBER() OVER (PARTITION BY video_id ORDER BY id DESC) as rn
+                                    FROM tasks WHERE step = ?
+                                ) t_sf WHERE t_sf.rn = 1 AND t_sf.status = 'failed'
+                            )
+                        """)
+                        where_params.append(step_name)
+                    elif step_status == 'pending':
+                        # "pending" = 该阶段未完成/未失败 AND 所有前置阶段已完成
+                        # 1) 该阶段没有 completed/skipped/failed/running 的最新记录
+                        where_clauses.append("""
+                            v.id NOT IN (
+                                SELECT t_sf.video_id FROM (
+                                    SELECT video_id, status,
+                                           ROW_NUMBER() OVER (PARTITION BY video_id ORDER BY id DESC) as rn
+                                    FROM tasks WHERE step = ?
+                                ) t_sf WHERE t_sf.rn = 1
+                                    AND t_sf.status IN ('completed', 'skipped', 'failed', 'running')
+                            )
+                        """)
+                        where_params.append(step_name)
+                        # 2) 所有前置阶段已完成（线性依赖链）
+                        try:
+                            step_enum = TaskStep(step_name)
+                            prereqs = STAGE_DEPENDENCIES.get(step_enum, [])
+                            for prereq in prereqs:
+                                where_clauses.append("""
+                                    v.id IN (
+                                        SELECT t_sf.video_id FROM (
+                                            SELECT video_id, status,
+                                                   ROW_NUMBER() OVER (PARTITION BY video_id ORDER BY id DESC) as rn
+                                            FROM tasks WHERE step = ?
+                                        ) t_sf WHERE t_sf.rn = 1
+                                            AND t_sf.status IN ('completed', 'skipped')
+                                    )
+                                """)
+                                where_params.append(prereq.value)
+                        except ValueError:
+                            pass  # 未知阶段名，忽略前置条件
+            
             where_sql = ""
             if where_clauses:
                 where_sql = "WHERE " + " AND ".join(where_clauses)
@@ -419,8 +482,14 @@ class Database:
             cursor.execute(count_sql, all_params)
             total = cursor.fetchone()['cnt']
             
-            total_pages = (total + per_page - 1) // per_page if total > 0 else 1
-            offset = (page - 1) * per_page
+            # per_page=0 表示显示全部
+            if per_page <= 0:
+                per_page = total if total > 0 else 1
+                total_pages = 1
+                offset = 0
+            else:
+                total_pages = (total + per_page - 1) // per_page if total > 0 else 1
+                offset = (page - 1) * per_page
             
             # 查询当前页数据
             if playlist_id:
@@ -539,8 +608,8 @@ class Database:
                 updates['started_at'] = datetime.now()
             if status == TaskStatus.COMPLETED and 'completed_at' not in kwargs:
                 updates['completed_at'] = datetime.now()
-            # 任务成功完成时清除旧的错误信息
-            if status in (TaskStatus.COMPLETED, TaskStatus.SKIPPED) and 'error_message' not in kwargs:
+            # 任务开始运行或成功完成时清除旧的错误信息
+            if status in (TaskStatus.RUNNING, TaskStatus.COMPLETED, TaskStatus.SKIPPED) and 'error_message' not in kwargs:
                 updates['error_message'] = None
             
             updates.update(kwargs)
@@ -719,6 +788,7 @@ class Database:
                 completed_count = 0
                 has_failed = False
                 has_running = False
+                has_preceding_failure = False
                 for step in DEFAULT_STAGE_SEQUENCE:
                     step_val = step.value
                     if step_val in tasks:
@@ -728,10 +798,13 @@ class Database:
                             completed_count += 1
                         if t["status"] == "failed":
                             has_failed = True
+                            has_preceding_failure = True
                         if t["status"] == "running":
                             has_running = True
                     else:
-                        task_status[step_val] = {"status": "pending", "error": None}
+                        # 前置阶段 failed → 后续未执行的阶段标记为 blocked 而非 pending
+                        status = "blocked" if has_preceding_failure else "pending"
+                        task_status[step_val] = {"status": status, "error": None}
                 
                 progress = int(completed_count / total_steps * 100)
                 result[vid] = {

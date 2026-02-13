@@ -547,7 +547,12 @@ class VideoProcessor:
                     try:
                         from vat.llm.scene_identifier import SceneIdentifier
                         
-                        identifier = SceneIdentifier(model=self.config.asr.split.model)
+                        si_cfg = self.config.downloader.scene_identify
+                        identifier = SceneIdentifier(
+                            model=si_cfg.model or self.config.llm.model,
+                            api_key=si_cfg.api_key,
+                            base_url=si_cfg.base_url,
+                        )
                         description = metadata.get('description', '')
                         scene_info = identifier.detect_scene(title, description)
                         
@@ -594,7 +599,7 @@ class VideoProcessor:
                     # 检查是否已有翻译结果（可能在 sync 阶段异步翻译完成）
                     existing_translated = self.video.metadata.get('translated') if self.video.metadata else None
                     
-                    if existing_translated:
+                    if existing_translated and not self.force:
                         self.progress_callback("复用已有的视频信息翻译结果")
                         metadata['translated'] = existing_translated
                     elif self.config.llm.is_available():
@@ -602,8 +607,11 @@ class VideoProcessor:
                         try:
                             from vat.llm.video_info_translator import VideoInfoTranslator
                             
+                            vit_cfg = self.config.downloader.video_info_translate
                             translator = VideoInfoTranslator(
-                                model=self.config.translator.llm.model
+                                model=vit_cfg.model or self.config.llm.model,
+                                api_key=vit_cfg.api_key,
+                                base_url=vit_cfg.base_url,
                             )
                             description = metadata.get('description', '')
                             tags = metadata.get('tags', [])

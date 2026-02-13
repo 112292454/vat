@@ -115,6 +115,16 @@ async def execute_task(
     if not request.video_ids:
         raise HTTPException(400, "No video_ids provided")
     
+    # 单任务约束：同一视频同时只能有一个 running job（阶段顺序依赖，多 task 无意义）
+    running_vids = job_manager.get_running_video_ids()
+    conflict_vids = [vid for vid in request.video_ids if vid in running_vids]
+    if conflict_vids:
+        raise HTTPException(
+            409,
+            f"以下视频正在处理中，请等待完成或取消后重试: {', '.join(conflict_vids[:5])}"
+            + (f" ...等 {len(conflict_vids)} 个" if len(conflict_vids) > 5 else "")
+        )
+    
     # 如果强制重新处理，重置后续阶段的任务状态
     if request.force and steps:
         from vat.web.deps import get_db as _get_db

@@ -47,26 +47,23 @@
         </select>
     </div>
     
-    <!-- 阶段筛选 -->
-    <div class="flex items-center space-x-2">
-        <span class="text-gray-600 text-sm">阶段:</span>
-        <select id="stage-filter" onchange="filterByStage(this.value)" class="px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500">
-            <option value="">全部</option>
-            <option value="download-pending">download 待处理</option>
-            <option value="whisper-pending">whisper 待处理</option>
-            <option value="split-pending">split 待处理</option>
-            <option value="optimize-pending">optimize 待处理</option>
-            <option value="translate-pending">translate 待处理</option>
-            <option value="embed-pending">embed 待处理</option>
-            <option value="upload-pending">upload 待处理</option>
-            <option value="download-failed">download 失败</option>
-            <option value="whisper-failed">whisper 失败</option>
-            <option value="split-failed">split 失败</option>
-            <option value="optimize-failed">optimize 失败</option>
-            <option value="translate-failed">translate 失败</option>
-            <option value="embed-failed">embed 失败</option>
-            <option value="upload-failed">upload 失败</option>
-        </select>
+    <!-- 阶段筛选（服务端，点击圆点循环切换：无筛选→待处理→已完成→失败→无筛选，多阶段 AND 逻辑） -->
+    <div class="flex items-center space-x-1" id="stage-filter">
+        <span class="text-gray-600 text-sm mr-1">阶段:</span>
+        {% for step_name, step_label in [('download','DL'),('whisper','WH'),('split','SP'),('optimize','OP'),('translate','TR'),('embed','EM'),('upload','UP')] %}
+        {% set sf_state = stage_filters.get(step_name, '') %}
+        <button class="stage-dot w-8 h-8 rounded-full border-2 text-xs font-bold flex items-center justify-center cursor-pointer hover:opacity-80 transition-all
+                {% if sf_state == 'pending' %}border-yellow-400 bg-yellow-50 text-yellow-600
+                {% elif sf_state == 'completed' %}border-green-500 bg-green-50 text-green-600
+                {% elif sf_state == 'failed' %}border-red-500 bg-red-50 text-red-600
+                {% else %}border-gray-300 bg-gray-100 text-gray-400{% endif %}"
+                data-stage="{{ step_name }}" data-filter-state="{{ sf_state }}"
+                title="{{ step_name }}: {% if sf_state == 'pending' %}待处理{% elif sf_state == 'completed' %}已完成{% elif sf_state == 'failed' %}失败{% else %}任意{% endif %}"
+                onclick="cycleStageFilter(this)">
+            {{ step_label }}
+        </button>
+        {% endfor %}
+        <button onclick="resetStageFilter()" class="ml-1 text-xs text-gray-400 hover:text-gray-600" title="重置筛选">✕</button>
     </div>
 </div>
 
@@ -74,13 +71,15 @@
 <div class="flex items-center justify-between mb-4">
     <div class="flex items-center space-x-2">
         <span class="text-gray-600 text-sm">状态:</span>
-        <a href="/?{% if search_query %}q={{ search_query }}&{% endif %}{% if playlist_filter %}playlist_id={{ playlist_filter }}{% endif %}" 
+        {# 状态筛选链接需要保留 search/playlist/stage_filters 参数 #}
+        {% set sf_params %}{% for k, v in stage_filters.items() %}&sf_{{ k }}={{ v }}{% endfor %}{% endset %}
+        <a href="/?{% if search_query %}q={{ search_query }}&{% endif %}{% if playlist_filter %}playlist_id={{ playlist_filter }}{% endif %}{{ sf_params }}" 
            class="px-3 py-1 rounded-full text-sm {% if not status_filter %}bg-gray-800 text-white{% else %}bg-gray-200 text-gray-700 hover:bg-gray-300{% endif %}">全部</a>
-        <a href="/?status=completed{% if search_query %}&q={{ search_query }}{% endif %}{% if playlist_filter %}&playlist_id={{ playlist_filter }}{% endif %}" 
+        <a href="/?status=completed{% if search_query %}&q={{ search_query }}{% endif %}{% if playlist_filter %}&playlist_id={{ playlist_filter }}{% endif %}{{ sf_params }}" 
            class="px-3 py-1 rounded-full text-sm {% if status_filter == 'completed' %}bg-green-600 text-white{% else %}bg-gray-200 text-gray-700 hover:bg-gray-300{% endif %}">已完成</a>
-        <a href="/?status=running{% if search_query %}&q={{ search_query }}{% endif %}{% if playlist_filter %}&playlist_id={{ playlist_filter }}{% endif %}" 
+        <a href="/?status=running{% if search_query %}&q={{ search_query }}{% endif %}{% if playlist_filter %}&playlist_id={{ playlist_filter }}{% endif %}{{ sf_params }}" 
            class="px-3 py-1 rounded-full text-sm {% if status_filter == 'running' %}bg-blue-600 text-white{% else %}bg-gray-200 text-gray-700 hover:bg-gray-300{% endif %}">进行中</a>
-        <a href="/?status=failed{% if search_query %}&q={{ search_query }}{% endif %}{% if playlist_filter %}&playlist_id={{ playlist_filter }}{% endif %}" 
+        <a href="/?status=failed{% if search_query %}&q={{ search_query }}{% endif %}{% if playlist_filter %}&playlist_id={{ playlist_filter }}{% endif %}{{ sf_params }}" 
            class="px-3 py-1 rounded-full text-sm {% if status_filter == 'failed' %}bg-red-600 text-white{% else %}bg-gray-200 text-gray-700 hover:bg-gray-300{% endif %}">失败</a>
         <span class="text-gray-400 mx-2">|</span>
         <span class="text-sm text-gray-600">共 {{ total }} 个视频</span>
@@ -195,10 +194,25 @@
 </div>
 
 <!-- 分页 -->
-{% if total_pages > 1 %}
 <div class="flex justify-center items-center mt-4 space-x-2">
+    <!-- 每页条数 -->
+    <div class="flex items-center space-x-1 text-sm text-gray-600">
+        <span>每页</span>
+        <select onchange="changePerPage(this.value)" class="border rounded px-1 py-0.5 text-sm">
+            {% for n in [20, 50, 100, 200] %}
+            <option value="{{ n }}" {% if per_page == n %}selected{% endif %}>{{ n }}</option>
+            {% endfor %}
+            <option value="0" {% if per_page >= total and total > 0 %}selected{% endif %}>全部</option>
+        </select>
+        <span>条</span>
+    </div>
+    
+    {% if total_pages > 1 %}
+    <span class="text-gray-300">|</span>
+    {# 构建通用筛选参数后缀（status + search + playlist + stage filters） #}
+    {% set filter_params %}{% if status_filter %}&status={{ status_filter }}{% endif %}{% if search_query %}&q={{ search_query }}{% endif %}{% if playlist_filter %}&playlist_id={{ playlist_filter }}{% endif %}{% for k, v in stage_filters.items() %}&sf_{{ k }}={{ v }}{% endfor %}{% endset %}
     {% if current_page > 1 %}
-    <a href="?page={{ current_page - 1 }}{% if status_filter %}&status={{ status_filter }}{% endif %}{% if search_query %}&q={{ search_query }}{% endif %}{% if playlist_filter %}&playlist_id={{ playlist_filter }}{% endif %}" 
+    <a href="?page={{ current_page - 1 }}&per_page={{ per_page }}{{ filter_params }}" 
        class="px-3 py-1 bg-white border rounded hover:bg-gray-50">上一页</a>
     {% endif %}
     
@@ -211,11 +225,11 @@
     </div>
     
     {% if current_page < total_pages %}
-    <a href="?page={{ current_page + 1 }}{% if status_filter %}&status={{ status_filter }}{% endif %}{% if search_query %}&q={{ search_query }}{% endif %}{% if playlist_filter %}&playlist_id={{ playlist_filter }}{% endif %}"
+    <a href="?page={{ current_page + 1 }}&per_page={{ per_page }}{{ filter_params }}"
        class="px-3 py-1 bg-white border rounded hover:bg-gray-50">下一页</a>
     {% endif %}
+    {% endif %}
 </div>
-{% endif %}
 
 <!-- 添加视频弹窗 -->
 <div id="add-video-modal" class="fixed inset-0 bg-black bg-opacity-50 hidden items-center justify-center z-50">
@@ -367,17 +381,36 @@ async function addVideo() {
     }
 }
 
-// 阶段筛选（客户端，当前页内）
-function filterByStage(value) {
-    const table = document.getElementById('video-table');
-    if (!value) {
-        filterTableRows(table, () => true);
-        return;
+// 阶段筛选（服务端）：圆点循环切换，通过 URL 参数 sf_STEP=STATUS 触发服务端过滤
+const STAGE_FILTER_STATES = ['', 'pending', 'completed', 'failed'];
+
+function cycleStageFilter(btn) {
+    const cur = btn.dataset.filterState || '';
+    const next = STAGE_FILTER_STATES[(STAGE_FILTER_STATES.indexOf(cur) + 1) % STAGE_FILTER_STATES.length];
+    // 更新 URL 参数并导航（服务端过滤）
+    const params = new URLSearchParams(window.location.search);
+    params.delete('page');  // 切换筛选回到第一页
+    const paramKey = 'sf_' + btn.dataset.stage;
+    if (next) {
+        params.set(paramKey, next);
+    } else {
+        params.delete(paramKey);
     }
-    filterTableRows(table, row => {
-        const stages = row.dataset.stages || '';
-        return stages.includes(value);
-    });
+    window.location.href = '/?' + params.toString();
+}
+
+function resetStageFilter() {
+    const params = new URLSearchParams(window.location.search);
+    params.delete('page');
+    ['download','whisper','split','optimize','translate','embed','upload'].forEach(s => params.delete('sf_' + s));
+    window.location.href = '/?' + params.toString();
+}
+
+function changePerPage(value) {
+    const params = new URLSearchParams(window.location.search);
+    params.set('per_page', value);
+    params.delete('page');
+    window.location.href = '/?' + params.toString();
 }
 
 // 初始化表格排序

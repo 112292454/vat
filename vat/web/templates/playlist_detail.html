@@ -245,11 +245,19 @@
         </div>
         
         <!-- 分页控件 -->
-        {% if total_pages > 1 %}
         <div class="px-6 py-3 border-t flex items-center justify-between">
-            <div class="text-sm text-gray-600">
-                共 {{ total }} 个视频，第 {{ current_page }}/{{ total_pages }} 页
+            <div class="flex items-center space-x-2 text-sm text-gray-600">
+                <span>共 {{ total }} 个视频</span>
+                <span class="text-gray-300">|</span>
+                <span>每页</span>
+                <select onchange="location.href='?per_page='+this.value" class="border rounded px-1 py-0.5 text-sm">
+                    {% for n in [50, 100, 200, 500] %}
+                    <option value="{{ n }}" {% if per_page == n %}selected{% endif %}>{{ n }}</option>
+                    {% endfor %}
+                </select>
+                <span>条</span>
             </div>
+            {% if total_pages > 1 %}
             <div class="flex items-center space-x-2">
                 {% if current_page > 1 %}
                 <a href="?page={{ current_page - 1 }}&per_page={{ per_page }}" 
@@ -266,8 +274,8 @@
                    class="px-3 py-1 bg-gray-200 rounded hover:bg-gray-300 text-sm">下一页</a>
                 {% endif %}
             </div>
+            {% endif %}
         </div>
-        {% endif %}
     </div>
 </div>
 

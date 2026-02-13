@@ -72,9 +72,41 @@ class YouTubeDownloaderConfig:
 
 
 @dataclass
+class VideoInfoTranslateConfig:
+    """视频信息翻译 LLM 配置（下载/同步时翻译标题、描述等）
+    
+    model/api_key/base_url 留空则继承全局 llm 配置。
+    """
+    model: str = ""           # 使用的模型（空=使用全局 llm.model）
+    api_key: str = ""         # 覆写 API Key（支持 ${VAR_NAME}）
+    base_url: str = ""        # 覆写 Base URL
+    
+    def __post_init__(self):
+        self.api_key = _resolve_env_var(self.api_key) if self.api_key else ""
+        self.base_url = _resolve_env_var(self.base_url) if self.base_url else ""
+
+
+@dataclass
+class SceneIdentifyConfig:
+    """场景识别 LLM 配置（下载时根据标题/简介判断视频场景）
+    
+    model/api_key/base_url 留空则继承全局 llm 配置。
+    """
+    model: str = ""           # 使用的模型（空=使用全局 llm.model）
+    api_key: str = ""         # 覆写 API Key（支持 ${VAR_NAME}）
+    base_url: str = ""        # 覆写 Base URL
+    
+    def __post_init__(self):
+        self.api_key = _resolve_env_var(self.api_key) if self.api_key else ""
+        self.base_url = _resolve_env_var(self.base_url) if self.base_url else ""
+
+
+@dataclass
 class DownloaderConfig:
     """下载器配置"""
     youtube: YouTubeDownloaderConfig
+    video_info_translate: VideoInfoTranslateConfig = field(default_factory=VideoInfoTranslateConfig)
+    scene_identify: SceneIdentifyConfig = field(default_factory=SceneIdentifyConfig)
 
 
 @dataclass
@@ -316,6 +348,7 @@ class LLMConfig:
     """
     api_key: str
     base_url: str
+    model: str = ""  # 全局默认模型（各阶段未指定 model 时的 fallback）
     
     _initialized: bool = field(default=False, repr=False)
     
@@ -517,7 +550,19 @@ class Config:
         # 下载器配置
         downloader_data = data['downloader']
         youtube = YouTubeDownloaderConfig(**downloader_data['youtube'])
-        downloader = DownloaderConfig(youtube=youtube)
+        vit_data = downloader_data.get('video_info_translate', {})
+        vit_config = VideoInfoTranslateConfig(
+            model=vit_data.get('model', ''),
+            api_key=vit_data.get('api_key', ''),
+            base_url=vit_data.get('base_url', ''),
+        )
+        si_data = downloader_data.get('scene_identify', {})
+        si_config = SceneIdentifyConfig(
+            model=si_data.get('model', ''),
+            api_key=si_data.get('api_key', ''),
+            base_url=si_data.get('base_url', ''),
+        )
+        downloader = DownloaderConfig(youtube=youtube, video_info_translate=vit_config, scene_identify=si_config)
         
         # 语音识别配置（含嵌套的 split、postprocessing、vocal_separation 配置）
         asr_data = data['asr']
@@ -637,7 +682,8 @@ class Config:
         llm_data = data.get('llm', {})
         llm = LLMConfig(
             api_key=llm_data.get('api_key', ''),
-            base_url=llm_data.get('base_url', '')
+            base_url=llm_data.get('base_url', ''),
+            model=llm_data.get('model', ''),
         )
         
         # 代理配置（全局统一管理，自动设置环境变量）

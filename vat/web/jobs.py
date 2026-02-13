@@ -417,6 +417,33 @@ class JobManager:
             error_msg = "\n".join(error_parts)
             return JobStatus.FAILED, error_msg, progress
 
+    def get_running_job_for_video(self, video_id: str) -> Optional[WebJob]:
+        """查找正在处理指定视频的 running job（假设同一视频同时只有一个 running job）"""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT * FROM web_jobs 
+                WHERE status = 'running'
+                ORDER BY created_at DESC
+            """)
+            for row in cursor.fetchall():
+                job = self._row_to_job(row)
+                if video_id in job.video_ids:
+                    return job
+        return None
+    
+    def get_running_video_ids(self) -> set:
+        """获取所有正在 running job 中的 video_id 集合"""
+        result = set()
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT video_ids FROM web_jobs WHERE status = 'running'
+            """)
+            for row in cursor.fetchall():
+                result.update(json.loads(row['video_ids']))
+        return result
+    
     def get_log_content(self, job_id: str, tail_lines: int = 100) -> List[str]:
         """获取任务日志（最后 N 行）"""
         job = self.get_job(job_id)

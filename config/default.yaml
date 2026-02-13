@@ -28,6 +28,20 @@ downloader:
     subtitle_languages: ["ja", "zh"]  # 字幕语言优先级（按顺序尝试）
                                             # 常用语言代码: ja=日语, zh=中文, en=英语, ko=韩语
     subtitle_format: "vtt"                  # 字幕格式: vtt/srt/ass
+  
+  # 场景识别（下载时根据标题/简介判断视频场景，极简单的分类任务）
+  # 留空则继承全局 llm 配置
+  scene_identify:
+    model: "gpt-4o-mini"                            # 留空=使用全局 llm.model
+    api_key: "${VAT_RESELLER_APIKEY}"               # 留空=使用全局 llm 配置
+    base_url: "https://api.videocaptioner.cn"       # 留空=使用全局 llm 配置
+  
+  # 视频信息翻译（下载/同步时翻译标题、描述、标签，推荐B站分区，需要一定润色能力）
+  # 留空则继承全局 llm 配置
+  # video_info_translate:
+  #   model: "gpt-4o-mini"                      # 若需要润色能力，可用稍好的模型
+  #   api_key: "${VAT_RESELLER_APIKEY}"         # 中转站 API Key
+  #   base_url: "https://api.videocaptioner.cn" # 中转站 Base URL
 
 # =============================================================================
 # 语音识别配置
@@ -242,8 +256,9 @@ logging:
 # LLM配置（统一管理，用于断句、翻译、视频信息翻译等所有LLM调用）
 # =============================================================================
 llm:
-  api_key: "${VAT_GOOGLE_APIKEY}"            # Google API Key（全局默认，翻译阶段使用）
+  api_key: "${VAT_GOOGLE_APIKEY}"            # Google API Key（全局默认）
   base_url: "https://generativelanguage.googleapis.com/v1beta/openai"  # Google API Base URL
+  model: "gemini-3-flash-preview"                  # 全局默认模型（各阶段未指定 model 时的 fallback）
 
 # =============================================================================
 # 代理配置（全局统一管理）

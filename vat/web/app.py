@@ -246,6 +246,7 @@ async def playlists_page(request: Request):
             "channel": pl.channel,
             "video_count": pl.video_count or 0,
             "completed": progress.get('completed', 0),
+            "failed": progress.get('failed', 0),
             "progress_percent": int(progress.get('completed', 0) / max(progress.get('total', 1), 1) * 100),
             "last_synced_at": pl.last_synced_at
         })
@@ -280,6 +281,18 @@ async def playlist_detail_page(
     # 全量 ID 列表（供 JS 批量操作使用）
     all_video_ids = [v.id for v in all_videos]
     
+    # 全量进度查询（单次SQL，供分页渲染 + JS 范围选择共用）
+    all_progress_map = db.batch_get_video_progress(all_video_ids) if all_video_ids else {}
+    
+    # 构建全量视频基础数据（供 JS 范围选择使用，仅含 id/pending/unavailable）
+    all_video_data = []
+    for v in all_videos:
+        vp = all_progress_map.get(v.id, {"completed": 0, "total": 7})
+        metadata = v.metadata or {}
+        unavailable = metadata.get("unavailable", False)
+        pending = (vp["total"] - vp["completed"]) > 0 and not unavailable
+        all_video_data.append({"id": v.id, "pending": pending, "unavailable": unavailable})
+    
     # 分页
     total = len(all_videos)
     total_pages = (total + per_page - 1) // per_page if total > 0 else 1
@@ -287,13 +300,9 @@ async def playlist_detail_page(
     end = start + per_page
     page_videos = all_videos[start:end]
     
-    # 仅对当前页视频查询进度（性能关键优化）
-    page_video_ids = [v.id for v in page_videos]
-    progress_map = db.batch_get_video_progress(page_video_ids) if page_video_ids else {}
-    
     video_list = []
     for idx, v in enumerate(page_videos):
-        vp = progress_map.get(v.id, {"completed": 0, "total": 7, "progress": 0, "has_failed": False, "has_running": False})
+        vp = all_progress_map.get(v.id, {"completed": 0, "total": 7, "progress": 0, "has_failed": False, "has_running": False})
         pending_count = vp["total"] - vp["completed"]
         metadata = v.metadata or {}
         duration = metadata.get("duration", 0)
@@ -329,6 +338,7 @@ async def playlist_detail_page(
         "playlist": pl,
         "videos": video_list,
         "all_video_ids": all_video_ids,
+        "all_video_data": all_video_data,
         "progress": progress,
         "current_page": page,
         "per_page": per_page,
@@ -535,11 +545,81 @@ async def prompts_page(request: Request):
     return templates.TemplateResponse("prompts.html", {"request": request})
 
 
+# ==================== 启动自动同步 ====================
+
+def _auto_sync_stale_playlists():
+    """检查并自动同步超过 7 天未更新的 playlist（后台线程）"""
+    import threading
+    from datetime import timedelta
+    from vat.services import PlaylistService
+    from vat.downloaders import YouTubeDownloader
+    
+    config = load_config()
+    db = Database(config.storage.database_path)
+    playlists = db.list_playlists()
+    
+    if not playlists:
+        return
+    
+    now = datetime.now()
+    stale_threshold = timedelta(days=7)
+    stale_playlists = []
+    
+    for pl in playlists:
+        if not pl.last_synced_at or (now - pl.last_synced_at) > stale_threshold:
+            stale_playlists.append(pl)
+    
+    if not stale_playlists:
+        return
+    
+    import logging
+    logger = logging.getLogger("vat.web.auto_sync")
+    logger.info(f"发现 {len(stale_playlists)} 个超过 7 天未同步的 Playlist，启动后台同步...")
+    
+    def sync_one(pl):
+        try:
+            sync_db = Database(config.storage.database_path)
+            downloader = YouTubeDownloader(
+                proxy=config.proxy.get_proxy(),
+                video_format=config.downloader.youtube.format
+            )
+            service = PlaylistService(sync_db, downloader)
+            result = service.sync_playlist(
+                pl.source_url,
+                auto_add_videos=True,
+                fetch_upload_dates=True,
+                progress_callback=lambda msg: logger.info(f"[{pl.title}] {msg}")
+            )
+            logger.info(f"[{pl.title}] 同步完成: 新增 {result.new_count}, 已存在 {result.existing_count}")
+        except Exception as e:
+            logger.error(f"[{pl.title}] 自动同步失败: {e}")
+    
+    for pl in stale_playlists:
+        t = threading.Thread(target=sync_one, args=(pl,), daemon=True, name=f"auto-sync-{pl.id}")
+        t.start()
+
+
+@app.on_event("startup")
+async def on_startup():
+    """应用启动时执行的任务"""
+    import threading
+    # 在后台线程中执行，不阻塞启动
+    threading.Thread(target=_auto_sync_stale_playlists, daemon=True, name="auto-sync-check").start()
+
+
 # ==================== 启动入口 ====================
 
-def run_server(host: str = "0.0.0.0", port: int = 8080):
-    """启动服务器"""
+def run_server(host: str | None = None, port: int | None = None):
+    """启动服务器
+    
+    Args:
+        host: 监听地址，None 时从配置文件读取
+        port: 监听端口，None 时从配置文件读取
+    """
     import uvicorn
+    config = load_config()
+    host = host or config.web.host
+    port = port or config.web.port
     uvicorn.run(app, host=host, port=port)
 
 

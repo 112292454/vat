@@ -10,6 +10,29 @@ from typing import Dict, Any, Optional, List, Union
 from dataclasses import dataclass, field, asdict
 
 
+def _resolve_env_var(value: Optional[str]) -> str:
+    """Resolve ${VAR_NAME} environment variable placeholders.
+    
+    Args:
+        value: String that may contain ${VAR_NAME} placeholder, or None/empty
+        
+    Returns:
+        Resolved value, or empty string if env var not set or value is None/empty
+    """
+    if not value:
+        return ""
+    match = re.match(r'^\$\{(.*)\}$', value)
+    if match:
+        env_var = match.group(1)
+        env_val = os.environ.get(env_var)
+        if env_val:
+            return env_val
+        else:
+            logging.getLogger("vat.config").warning(f"环境变量 {env_var} 未设置")
+            return ""
+    return value
+
+
 @dataclass
 class StorageConfig:
     """存储配置"""
@@ -88,11 +111,23 @@ class SplitConfig:
     recommend_words_cjk: int = 18     # 理想的每句字符数
     recommend_words_english: int = 10  # 理想的每句单词数
     
+    # 模型升级链：断句失败时自动尝试更强模型
+    allow_model_upgrade: bool = False         # 是否允许模型升级（默认关闭）
+    model_upgrade_chain: List[str] = field(default_factory=list)  # 模型升级顺序
+    
     # 分块配置
     enable_chunking: bool = True              # 是否启用分块（短视频可关闭）
     chunk_size_sentences: int = 50            # 每块句子数（按原始ASR片段计数）
     chunk_overlap_sentences: int = 5          # 块之间重叠句子数
     chunk_min_threshold: int = 30             # 小于此句子数不分块，直接全文处理
+    
+    # LLM 连接覆写（可选，留空则使用全局 llm 配置）
+    api_key: str = ""    # 覆写 API Key（支持 ${VAR_NAME} 环境变量）
+    base_url: str = ""   # 覆写 Base URL
+    
+    def __post_init__(self):
+        self.api_key = _resolve_env_var(self.api_key) if self.api_key else ""
+        self.base_url = _resolve_env_var(self.base_url) if self.base_url else ""
 
 
 @dataclass
@@ -164,13 +199,27 @@ class LocalTranslatorConfig:
 
 @dataclass
 class OptimizeConfig:
-    """字幕优化配置（归属 Translator）"""
+    """字幕优化配置（归属 Translator）
+    
+    model, thread_num, batch_size 默认继承自父级 LLMTranslatorConfig，可在此覆写。
+    api_key, base_url 默认继承自父级 → 全局 llm，可在此覆写。
+    """
     enable: bool
     custom_prompt: str  # 文件名（相对于 vat/llm/prompts/custom/），空字符串表示不使用
-    # model, thread_num, batch_size 继承自父级 LLMTranslatorConfig
+    
+    # 可选覆写（留空继承父级 translator.llm → 全局 llm）
+    model: str = ""          # 覆写模型
+    api_key: str = ""        # 覆写 API Key（支持 ${VAR_NAME}）
+    base_url: str = ""       # 覆写 Base URL
+    batch_size: int = 0      # 覆写批大小（0=继承父级）
+    thread_num: int = 0      # 覆写线程数（0=继承父级）
     
     def __post_init__(self):
         """读取自定义提示词文件"""
+        # 解析环境变量
+        self.api_key = _resolve_env_var(self.api_key) if self.api_key else ""
+        self.base_url = _resolve_env_var(self.base_url) if self.base_url else ""
+        
         if not self.custom_prompt:
             # 空字符串表示不使用自定义提示词
             return
@@ -212,8 +261,15 @@ class LLMTranslatorConfig:
     # 上下文配置（新增）
     enable_context: bool = True  # 是否启用前文上下文
     
+    # LLM 连接覆写（可选，留空则使用全局 llm 配置）
+    api_key: str = ""    # 覆写 API Key（支持 ${VAR_NAME} 环境变量）
+    base_url: str = ""   # 覆写 Base URL
+    
     def __post_init__(self):
-        """读取自定义提示词文件"""
+        """解析环境变量 + 读取自定义提示词文件"""
+        self.api_key = _resolve_env_var(self.api_key) if self.api_key else ""
+        self.base_url = _resolve_env_var(self.base_url) if self.base_url else ""
+        
         if not self.custom_prompt:
             # 空字符串表示不使用自定义提示词
             return
@@ -270,29 +326,9 @@ class LLMConfig:
             
         logger = logging.getLogger("vat.config")
         
-        # 处理 api_key 环境变量占位符
-        if self.api_key:
-            match = re.match(r'^\$\{(.*)\}$', self.api_key)
-            if match:
-                env_var = match.group(1)
-                env_val = os.environ.get(env_var)
-                if env_val:
-                    self.api_key = env_val
-                else:
-                    logger.warning(f"环境变量 {env_var} 未设置，LLM API Key 可能无效")
-                    self.api_key = ""
-        
-        # 处理 base_url 环境变量占位符
-        if self.base_url:
-            match = re.match(r'^\$\{(.*)\}$', self.base_url)
-            if match:
-                env_var = match.group(1)
-                env_val = os.environ.get(env_var)
-                if env_val:
-                    self.base_url = env_val
-                else:
-                    logger.warning(f"环境变量 {env_var} 未设置，LLM Base URL 可能无效")
-                    self.base_url = ""
+        # 解析环境变量占位符
+        self.api_key = _resolve_env_var(self.api_key)
+        self.base_url = _resolve_env_var(self.base_url)
         
         # 统一设置环境变量（所有LLM调用都从环境变量读取）
         if self.api_key and not self.api_key.startswith("${"):
@@ -440,6 +476,13 @@ class ProxyConfig:
 
 
 @dataclass
+class WebConfig:
+    """Web UI 配置"""
+    host: str = "0.0.0.0"    # 监听地址
+    port: int = 8080          # 监听端口
+
+
+@dataclass
 class Config:
     """主配置类"""
     storage: StorageConfig
@@ -453,6 +496,7 @@ class Config:
     logging: LoggingConfig
     llm: LLMConfig  # 统一的LLM配置（在配置加载时自动设置环境变量）
     proxy: ProxyConfig  # 全局代理配置
+    web: WebConfig  # Web UI 配置
     
     @classmethod
     def from_yaml(cls, yaml_path: str) -> 'Config':
@@ -543,29 +587,34 @@ class Config:
         )
         
         # 上传器配置
+        # 连接设置来自 default.yaml，内容设置来自 config/upload.yaml（支持 Web UI 在线编辑）
         uploader_data = data['uploader']
-        bilibili_data = uploader_data['bilibili']
+        bilibili_conn = uploader_data['bilibili']
         
-        # 解析模板配置
-        templates_data = bilibili_data.pop('templates', None)
-        templates = None
-        if templates_data:
-            templates = BilibiliUploadTemplates(
-                title=templates_data.get('title', '${translated_title}'),
-                description=templates_data.get('description', '${translated_desc}'),
-                custom_vars=templates_data.get('custom_vars', {}),
-            )
+        # 从 config/upload.yaml 加载内容设置（投稿参数、模板等）
+        from vat.uploaders.upload_config import UploadConfigManager
+        upload_mgr = UploadConfigManager()
+        upload_content = upload_mgr.load().bilibili
+        
+        # 合并模板
+        templates = BilibiliUploadTemplates(
+            title=upload_content.templates.title,
+            description=upload_content.templates.description,
+            custom_vars=upload_content.templates.custom_vars,
+        )
         
         bilibili = BilibiliUploaderConfig(
-            cookies_file=bilibili_data.get('cookies_file', 'cookies/bilibili/account.json'),
-            line=bilibili_data.get('line', 'AUTO'),
-            threads=bilibili_data.get('threads', 3),
-            copyright=bilibili_data.get('copyright', 2),
-            default_tid=bilibili_data.get('default_tid', 21),
-            default_tags=bilibili_data.get('default_tags', ['VTuber', '日本']),
-            auto_cover=bilibili_data.get('auto_cover', True),
-            cover_source=bilibili_data.get('cover_source', 'thumbnail'),
-            season_id=bilibili_data.get('season_id'),
+            # 连接设置（default.yaml）
+            cookies_file=bilibili_conn.get('cookies_file', 'cookies/bilibili/account.json'),
+            line=bilibili_conn.get('line', 'AUTO'),
+            threads=bilibili_conn.get('threads', 3),
+            # 内容设置（config/upload.yaml）
+            copyright=upload_content.copyright,
+            default_tid=upload_content.default_tid,
+            default_tags=upload_content.default_tags,
+            auto_cover=upload_content.auto_cover,
+            cover_source=upload_content.cover_source,
+            season_id=upload_content.season_id,
             templates=templates,
         )
         uploader = UploaderConfig(bilibili=bilibili)
@@ -597,6 +646,13 @@ class Config:
             http_proxy=proxy_data.get('http_proxy', '')
         )
         
+        # Web UI 配置（可选，有默认值）
+        web_data = data.get('web', {})
+        web = WebConfig(
+            host=web_data.get('host', '0.0.0.0'),
+            port=web_data.get('port', 8080),
+        )
+        
         return cls(
             storage=storage,
             downloader=downloader,
@@ -608,7 +664,8 @@ class Config:
             concurrency=concurrency,
             logging=logging,
             llm=llm,
-            proxy=proxy
+            proxy=proxy,
+            web=web,
         )
     
     def to_dict(self) -> Dict[str, Any]:
@@ -650,6 +707,65 @@ class Config:
     def get_translator_model_path(self) -> str:
         """获取翻译模型文件的完整路径"""
         return str(Path(self.storage.models_dir) / self.translator.local.model_filename)
+    
+    def get_stage_llm_credentials(self, stage: str) -> Dict[str, str]:
+        """获取指定阶段的有效 LLM 凭据（api_key, base_url, model）
+        
+        Resolve 优先级：
+        - split:     asr.split        → global llm
+        - translate:  translator.llm    → global llm
+        - optimize:   translator.llm.optimize → translator.llm → global llm
+        
+        Args:
+            stage: 阶段名称 ("split" | "translate" | "optimize")
+            
+        Returns:
+            {"api_key": str, "base_url": str, "model": str}
+            api_key/base_url 为空字符串表示使用全局配置（由 call_llm 的 get_or_create_client 处理）
+        """
+        global_key = self.llm.api_key
+        global_url = self.llm.base_url
+        
+        if stage == "split":
+            return {
+                "api_key": self.asr.split.api_key or global_key,
+                "base_url": self.asr.split.base_url or global_url,
+                "model": self.asr.split.model,
+            }
+        elif stage == "translate":
+            return {
+                "api_key": self.translator.llm.api_key or global_key,
+                "base_url": self.translator.llm.base_url or global_url,
+                "model": self.translator.llm.model,
+            }
+        elif stage == "optimize":
+            # optimize → translator.llm → global
+            trans_key = self.translator.llm.api_key or global_key
+            trans_url = self.translator.llm.base_url or global_url
+            opt = self.translator.llm.optimize
+            return {
+                "api_key": opt.api_key or trans_key,
+                "base_url": opt.base_url or trans_url,
+                "model": opt.model or self.translator.llm.model,
+            }
+        else:
+            raise ValueError(f"未知的阶段: {stage}，支持: split, translate, optimize")
+    
+    def get_optimize_effective_config(self) -> Dict[str, Any]:
+        """获取 optimize 阶段的完整有效配置（含继承的 batch_size, thread_num 等）
+        
+        Returns:
+            {"model": str, "api_key": str, "base_url": str,
+             "batch_size": int, "thread_num": int}
+        """
+        creds = self.get_stage_llm_credentials("optimize")
+        opt = self.translator.llm.optimize
+        parent = self.translator.llm
+        return {
+            **creds,
+            "batch_size": opt.batch_size if opt.batch_size > 0 else parent.batch_size,
+            "thread_num": opt.thread_num if opt.thread_num > 0 else parent.thread_num,
+        }
 
 
 def load_config(config_path: Optional[str] = None) -> Config:

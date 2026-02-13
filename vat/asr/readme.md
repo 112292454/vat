@@ -585,3 +585,21 @@ asr:
 | 改幻觉检测规则 | `vat/asr/postprocessing.py` `JAPANESE_HALLUCINATION_EXACT` |
 | 改重复清理模式 | `vat/asr/postprocessing.py` `REPETITION_PATTERNS` |
 | 改人声分离参数 | `vat/asr/vocal_separation.py` `VocalSeparator` |
+
+---
+
+## 13. 已修复的历史问题
+
+以下问题已修复，记录于此供开发者参考。
+
+### 13.1 时间戳对齐算法（chunked_split.py `_realign_timestamps`）
+
+旧算法使用原始 ASR segment 的整体边界时间分配给断句后的段落，导致同一 segment 内拆分出的多个段落时间完全重叠。已改为基于 `difflib.SequenceMatcher` 的 diff 容错对齐：匹配字符直接取原始字符级时间戳，小范围增删改（≤3 字符）自动容错。安全检查确保段落时间不超出其字符所属原始 segment 的范围。
+
+### 13.2 分块合并文本丢失（chunked_split.py `_trim_overlap`）
+
+旧逻辑在合并相邻 chunk 时按固定段数跳过 overlap 部分，但 LLM 可能将 overlap segment 的文本与后续文本合并为一个段落，导致跳过时连带丢失后续文本。已改为基于字符计数的精确 overlap 移除，支持跨边界段落拆分。
+
+### 13.3 时间戳倒挂（`_realign_timestamps` + `optimize_timing`）
+
+`_realign_timestamps` 按行分组生成段落时，相邻行可能映射到同一原始 ASR segment，产出重叠段（`seg[i].end_time > seg[i+1].start_time`）。`optimize_timing` 对重叠输入计算 `mid_time` 时可能超过后段 `end_time`，导致 `start_time >= end_time`。修复方式：在 `_realign_timestamps` 生成段落后增加重叠消除步骤（裁剪前段 end_time 至后段 start_time）；`optimize_timing` 保留防御性检查（公式结果越界时跳过该对）。

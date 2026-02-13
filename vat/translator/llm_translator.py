@@ -35,7 +35,13 @@ class LLMTranslator(BaseTranslator):
         enable_optimize: bool = False,
         custom_optimize_prompt: str = "",
         enable_context: bool = True,
+        api_key: str = "",
+        base_url: str = "",
+        optimize_model: str = "",
+        optimize_api_key: str = "",
+        optimize_base_url: str = "",
         update_callback: Optional[Callable] = None,
+        progress_callback: Optional[Callable] = None,
     ):
         """
         初始化 LLM 翻译器
@@ -51,7 +57,8 @@ class LLMTranslator(BaseTranslator):
             enable_optimize: 是否启用字幕优化（前置步骤）
             custom_optimize_prompt: 优化自定义提示词
             enable_context: 是否启用前文上下文
-            update_callback: 进度回调
+            update_callback: 数据回调（每批翻译结果）
+            progress_callback: 进度消息回调
         """
         super().__init__(
             thread_num=thread_num,
@@ -59,6 +66,7 @@ class LLMTranslator(BaseTranslator):
             target_language=target_language,
             output_dir=output_dir,
             update_callback=update_callback,
+            progress_callback=progress_callback,
         )
 
         self.model = model
@@ -67,6 +75,12 @@ class LLMTranslator(BaseTranslator):
         self.enable_optimize = enable_optimize
         self.optimize_prompt = custom_optimize_prompt
         self.enable_context = enable_context
+        self.api_key = api_key
+        self.base_url = base_url
+        # optimize 可独立覆写，留空则使用 translate 的凭据
+        self.optimize_model = optimize_model or model
+        self.optimize_api_key = optimize_api_key if optimize_api_key else api_key
+        self.optimize_base_url = optimize_base_url if optimize_base_url else base_url
         
         # 存储前一个 batch 的翻译结果（用于上下文）
         self._previous_batch_result: Optional[Dict[str, str]] = None
@@ -111,6 +125,7 @@ class LLMTranslator(BaseTranslator):
         # 并行优化（复用线程池）
         optimized_dict: Dict[str, str] = {}
         futures = []
+        total_chunks = len(chunks)
         
         if not self.executor:
             raise ValueError("线程池未初始化")
@@ -120,7 +135,7 @@ class LLMTranslator(BaseTranslator):
             futures.append((future, chunk))
 
         # 收集结果
-        for future, chunk in futures:
+        for idx, (future, chunk) in enumerate(futures, 1):
             if not self.is_running:
                 break
             try:
@@ -129,6 +144,12 @@ class LLMTranslator(BaseTranslator):
             except Exception as e:
                 logger.error(f"优化批次失败: {e}")
                 optimized_dict.update(chunk)  # 失败时保留原文
+            
+            msg = f"优化进度: {idx}/{total_chunks} 批次完成"
+            if idx % max(1, total_chunks // 10) == 0:
+                logger.info(msg)
+            if self.progress_callback:
+                self.progress_callback(msg)
 
         # 验证数量一致性
         assert len(optimized_dict) == len(subtitle_dict), \
@@ -186,7 +207,10 @@ class LLMTranslator(BaseTranslator):
         # Agent Loop
         for step in range(self.MAX_STEPS):
             try:
-                response = call_llm(messages=messages, model=self.model, temperature=0.2)
+                response = call_llm(
+                    messages=messages, model=self.optimize_model, temperature=0.2,
+                    api_key=self.optimize_api_key, base_url=self.optimize_base_url,
+                )
                 
                 result_text = response.choices[0].message.content
                 if not result_text:
@@ -363,7 +387,10 @@ class LLMTranslator(BaseTranslator):
         last_response_dict = None
         
         for _ in range(self.MAX_STEPS):
-            response = call_llm(messages=messages, model=self.model)
+            response = call_llm(
+                messages=messages, model=self.model,
+                api_key=self.api_key, base_url=self.base_url,
+            )
             if not response or not response.choices:
                 raise RuntimeError("LLM 未返回有效响应")
             
@@ -460,6 +487,8 @@ class LLMTranslator(BaseTranslator):
                     ],
                     model=self.model,
                     temperature=0.7,
+                    api_key=self.api_key,
+                    base_url=self.base_url,
                 )
                 translated_text = response.choices[0].message.content.strip()
                 data.translated_text = translated_text

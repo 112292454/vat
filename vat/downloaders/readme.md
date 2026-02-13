@@ -234,7 +234,14 @@ metadata['available_auto_subtitles'] = ['ja', 'en', ...]  # 自动生成
 - 检查全局代理配置 `proxy.http_proxy`。
 - 直接运行 yt-dlp 可能更容易得到完整错误信息；VAT 内部会对部分日志降级。
 
-### 7.4 Debug Checklist（建议按顺序）
+### 7.4 YouTube 风控注意事项
+
+- **获取 playlist 视频列表**：基本无风控。
+- **逐个获取视频 info**：并发约 10 时偶尔触发验证，但 yt-dlp 最新版可自动处理，默认并发 10 即可。
+- **下载视频内容**：风控较明显，容易遇到 429/401 错误。建议下载阶段保持并发=1，将并发处理留给后续的 ASR/翻译等阶段。
+- **失败重试**：Pipeline 层面已实现"失败放队尾"重试机制（最多 2 轮），详见 `vat/pipeline/readme.md`。
+
+### 7.5 Debug Checklist（建议按顺序）
 1. **确认 DB 记录**：该 `video_id` 是否存在、`source_url/source_type` 是否正确。
 2. **确认输出目录**：`storage.output_dir/<内部video_id>/` 是否存在。
 3. **确认下载文件**：目录内是否有 `<youtube_id>.(mp4/webm/mkv)`。

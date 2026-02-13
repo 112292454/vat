@@ -181,13 +181,17 @@ class JobManager:
         # 打开日志文件
         log_fd = open(log_file, "w", buffering=1)  # 行缓冲
         
-        # 启动子进程
+        # 启动子进程（PYTHONUNBUFFERED=1 确保日志实时写入文件，不被缓冲）
+        env = os.environ.copy()
+        env["PYTHONUNBUFFERED"] = "1"
+        
         process = subprocess.Popen(
             cmd,
             stdout=log_fd,
             stderr=subprocess.STDOUT,
             start_new_session=True,  # 独立进程组，不受父进程影响
-            cwd=str(Path(__file__).parent.parent.parent)  # VAT 项目根目录
+            cwd=str(Path(__file__).parent.parent.parent),  # VAT 项目根目录
+            env=env,
         )
         
         # 更新数据库

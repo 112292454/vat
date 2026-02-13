@@ -255,9 +255,9 @@ class PlaylistService:
                         logger.warning(f"获取视频 {vid} 超时或异常: {e}")
                         date_results.append((vid, None, True))
             
-            # 对获取失败的视频进行时间插值
+            # 对获取失败的视频进行时间插值（传入 playlist_id 以利用已有视频日期作为上下文）
             callback("处理无法获取日期的视频...")
-            self._interpolate_missing_dates(date_results, callback)
+            self._interpolate_missing_dates(playlist_id, date_results, callback)
             
             callback("发布日期获取完成")
             
@@ -274,85 +274,112 @@ class PlaylistService:
     
     def _interpolate_missing_dates(
         self,
+        playlist_id: str,
         date_results: List[tuple],
         callback: callable
     ) -> None:
         """
         对获取失败的视频进行时间插值
         
+        利用 playlist 中已有视频的日期作为上下文：
+        - YouTube playlist 中 playlist_index=1 是最新视频，越大越旧
+        - 基于 playlist_index 顺序找到最近的已知日期进行插值
+        
         Args:
+            playlist_id: Playlist ID（用于查询已有视频日期上下文）
             date_results: [(video_id, upload_date or None, is_unavailable), ...]
             callback: 进度回调
         """
-        # 先收集所有有效日期
-        valid_dates = [(i, r[1]) for i, r in enumerate(date_results) if r[1]]
+        # 构建完整的日期上下文：playlist 中所有已知的（非插值的）日期
+        # key: video_id, value: upload_date
+        known_dates = {}
+        all_playlist_videos = self.db.list_videos(playlist_id=playlist_id)
+        for v in all_playlist_videos:
+            if v.metadata:
+                date = v.metadata.get('upload_date', '')
+                # 只使用非插值的可靠日期
+                if date and not v.metadata.get('upload_date_interpolated'):
+                    known_dates[v.id] = date
         
-        for i, (vid, upload_date, is_unavailable) in enumerate(date_results):
+        # 加入本轮成功获取的日期（这些是新鲜可靠的）
+        for vid, upload_date, is_unavailable in date_results:
             if upload_date:
-                # 已有日期，直接更新
-                video = self.db.get_video(vid)
-                if video:
-                    metadata = video.metadata or {}
-                    metadata['upload_date'] = upload_date
-                    self.db.update_video(vid, metadata=metadata)
-            elif is_unavailable:
-                # 需要插值
-                interpolated_date = self._calc_interpolated_date(i, valid_dates)
-                video = self.db.get_video(vid)
-                if video:
-                    metadata = video.metadata or {}
-                    metadata['upload_date'] = interpolated_date
-                    metadata['upload_date_interpolated'] = True  # 标记为插值
-                    metadata['unavailable'] = True  # 标记为不可用
-                    self.db.update_video(vid, metadata=metadata)
-                    callback(f"  视频 {vid}: 使用插值日期 {interpolated_date}（不可用）")
-    
-    def _calc_interpolated_date(self, index: int, valid_dates: List[tuple]) -> str:
-        """
-        计算插值日期
+                known_dates[vid] = upload_date
         
-        在前后有效日期之间取中间值
+        # 构建 playlist_index -> upload_date 的映射（用于基于位置的插值）
+        index_date_map = {}  # playlist_index -> upload_date
+        for v in all_playlist_videos:
+            idx = v.playlist_index or 0
+            if v.id in known_dates:
+                index_date_map[idx] = known_dates[v.id]
+        
+        for vid, upload_date, is_unavailable in date_results:
+            if upload_date:
+                # 已在 fetch_video_info 中更新，跳过
+                continue
+            if not is_unavailable:
+                continue
+            
+            video = self.db.get_video(vid)
+            if not video:
+                continue
+            
+            my_index = video.playlist_index or 0
+            interpolated_date = self._calc_interpolated_date(my_index, index_date_map)
+            
+            metadata = video.metadata or {}
+            metadata['upload_date'] = interpolated_date
+            metadata['upload_date_interpolated'] = True
+            metadata['unavailable'] = True
+            self.db.update_video(vid, metadata=metadata)
+            callback(f"  视频 {vid}: 使用插值日期 {interpolated_date}（不可用）")
+    
+    def _calc_interpolated_date(self, target_index: int, index_date_map: dict) -> str:
         """
-        if not valid_dates:
-            # 没有任何有效日期，使用当前日期
+        基于 playlist_index 位置计算插值日期
+        
+        playlist_index 规则：1=最新视频（最晚日期），越大越旧（越早日期）
+        
+        Args:
+            target_index: 需要插值的视频的 playlist_index
+            index_date_map: {playlist_index: upload_date} 已知日期映射
+        """
+        if not index_date_map:
             return datetime.now().strftime('%Y%m%d')
         
-        # 找前一个和后一个有效日期
-        prev_date = None
-        next_date = None
+        # 找最近的较新视频（index 更小 → 日期更晚）和较旧视频（index 更大 → 日期更早）
+        newer_date = None  # 来自 index < target 的视频（日期晚于目标）
+        older_date = None  # 来自 index > target 的视频（日期早于目标）
         
-        for idx, date_str in valid_dates:
-            if idx < index:
-                prev_date = date_str
-            elif idx > index and next_date is None:
-                next_date = date_str
+        for idx, date_str in sorted(index_date_map.items()):
+            if idx < target_index:
+                newer_date = date_str  # 不断更新，取最近的（index 最大的那个）
+            elif idx > target_index:
+                if older_date is None:
+                    older_date = date_str  # 取最近的（index 最小的那个）
                 break
         
-        # 计算插值
-        if prev_date and next_date:
-            # 取中间值
-            try:
-                d1 = datetime.strptime(prev_date, '%Y%m%d')
-                d2 = datetime.strptime(next_date, '%Y%m%d')
-                mid = d1 + (d2 - d1) / 2
+        try:
+            if newer_date and older_date:
+                d_newer = datetime.strptime(newer_date, '%Y%m%d')
+                d_older = datetime.strptime(older_date, '%Y%m%d')
+                mid = d_older + (d_newer - d_older) / 2
                 return mid.strftime('%Y%m%d')
-            except:
-                return prev_date
-        elif prev_date:
-            # 只有前一个，用前一个日期 +1 天
-            try:
-                d = datetime.strptime(prev_date, '%Y%m%d')
-                return (d + timedelta(days=1)).strftime('%Y%m%d')
-            except:
-                return prev_date
-        elif next_date:
-            # 只有后一个，用后一个日期 -1 天
-            try:
-                d = datetime.strptime(next_date, '%Y%m%d')
-                return (d - timedelta(days=1)).strftime('%Y%m%d')
-            except:
-                return next_date
-        else:
+            elif older_date:
+                # 目标是最新视频（没有比它更新的已知日期）
+                # 刚出现在 playlist 说明是近期发布，偏向今天
+                d_older = datetime.strptime(older_date, '%Y%m%d')
+                d_today = datetime.now()
+                gap_days = (d_today - d_older).days
+                offset = min(7, max(1, gap_days // 10))
+                return (d_today - timedelta(days=offset)).strftime('%Y%m%d')
+            elif newer_date:
+                # 目标是最旧视频（没有比它更旧的已知日期）
+                d_newer = datetime.strptime(newer_date, '%Y%m%d')
+                return (d_newer - timedelta(days=1)).strftime('%Y%m%d')
+            else:
+                return datetime.now().strftime('%Y%m%d')
+        except Exception:
             return datetime.now().strftime('%Y%m%d')
     
     def _assign_upload_order_index(

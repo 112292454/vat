@@ -46,6 +46,28 @@
             {% endfor %}
         </select>
     </div>
+    
+    <!-- 阶段筛选 -->
+    <div class="flex items-center space-x-2">
+        <span class="text-gray-600 text-sm">阶段:</span>
+        <select id="stage-filter" onchange="filterByStage(this.value)" class="px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500">
+            <option value="">全部</option>
+            <option value="download-pending">download 待处理</option>
+            <option value="whisper-pending">whisper 待处理</option>
+            <option value="split-pending">split 待处理</option>
+            <option value="optimize-pending">optimize 待处理</option>
+            <option value="translate-pending">translate 待处理</option>
+            <option value="embed-pending">embed 待处理</option>
+            <option value="upload-pending">upload 待处理</option>
+            <option value="download-failed">download 失败</option>
+            <option value="whisper-failed">whisper 失败</option>
+            <option value="split-failed">split 失败</option>
+            <option value="optimize-failed">optimize 失败</option>
+            <option value="translate-failed">translate 失败</option>
+            <option value="embed-failed">embed 失败</option>
+            <option value="upload-failed">upload 失败</option>
+        </select>
+    </div>
 </div>
 
 <!-- 状态筛选和操作栏 -->
@@ -67,6 +89,9 @@
         <button onclick="showAddVideoDialog()" class="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700">
             + 添加视频
         </button>
+        <button id="batch-process-btn" onclick="batchProcessVideos()" class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 hidden">
+            处理选中 (<span id="selected-process-count">0</span>)
+        </button>
         <button id="batch-delete-btn" onclick="batchDeleteVideos()" class="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 hidden">
             删除选中 (<span id="selected-count">0</span>)
         </button>
@@ -75,27 +100,27 @@
 
 <!-- 视频列表 -->
 <div class="bg-white rounded-lg shadow overflow-hidden">
-    <table class="w-full">
+    <table class="w-full" id="video-table">
         <thead class="bg-gray-50 border-b">
             <tr>
                 <th class="px-2 py-3 w-10">
                     <input type="checkbox" id="select-all" onchange="toggleSelectAll()" class="rounded">
                 </th>
-                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">视频</th>
-                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">来源</th>
-                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">时长</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase" data-sort="1" data-sort-type="text">视频</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase" data-sort="2" data-sort-type="text">来源</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase" data-sort="3" data-sort-type="number">时长</th>
                 <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">任务状态</th>
-                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">进度</th>
-                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">创建时间</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase" data-sort="5" data-sort-type="number">进度</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase" data-sort="6" data-sort-type="date">创建时间</th>
             </tr>
         </thead>
         <tbody class="divide-y divide-gray-200">
             {% for video in videos %}
-            <tr class="hover:bg-gray-50">
+            <tr class="hover:bg-gray-50" data-filter-status="{% if video.progress == 100 %}completed{% elif video.task_status.values()|selectattr('status','equalto','failed')|list %}failed{% elif video.task_status.values()|selectattr('status','equalto','running')|list %}running{% else %}pending{% endif %}" data-stages="{% for step, task in video.task_status.items() %}{{ step }}-{{ task.status }} {% endfor %}">
                 <td class="px-2 py-3" onclick="event.stopPropagation()">
                     <input type="checkbox" class="video-checkbox rounded" value="{{ video.id }}" onchange="updateSelectedCount()">
                 </td>
-                <td class="px-4 py-3 cursor-pointer" onclick="window.location='/video/{{ video.id }}'">
+                <td class="px-4 py-3 cursor-pointer" onclick="window.location='/video/{{ video.id }}'" data-sort-value="{{ video.title }}">
                     <div class="flex items-center space-x-3">
                         {% if video.thumbnail %}
                         <img src="{{ video.thumbnail }}" alt="" class="w-20 h-12 object-cover rounded">
@@ -127,7 +152,7 @@
                         {{ video.source_type }}
                     </span>
                 </td>
-                <td class="px-4 py-3 text-sm text-gray-600">
+                <td class="px-4 py-3 text-sm text-gray-600" data-sort-value="{{ video.duration or 0 }}">
                     {{ video.duration | format_duration }}
                 </td>
                 <td class="px-4 py-3">
@@ -145,7 +170,7 @@
                         {% endfor %}
                     </div>
                 </td>
-                <td class="px-4 py-3">
+                <td class="px-4 py-3" data-sort-value="{{ video.progress }}">
                     <div class="flex items-center space-x-2">
                         <div class="w-24 bg-gray-200 rounded-full h-2">
                             <div class="h-2 rounded-full {% if video.progress == 100 %}bg-green-500{% elif video.progress > 0 %}bg-blue-500{% else %}bg-gray-400{% endif %}"
@@ -154,7 +179,7 @@
                         <span class="text-xs text-gray-600">{{ video.progress }}%</span>
                     </div>
                 </td>
-                <td class="px-4 py-3 text-sm text-gray-600">
+                <td class="px-4 py-3 text-sm text-gray-600" data-sort-value="{{ video.created_at }}">
                     {{ video.created_at | format_datetime }}
                 </td>
             </tr>
@@ -246,7 +271,20 @@ function updateSelectedCount() {
     const checkboxes = document.querySelectorAll('.video-checkbox:checked');
     const count = checkboxes.length;
     document.getElementById('selected-count').textContent = count;
+    document.getElementById('selected-process-count').textContent = count;
     document.getElementById('batch-delete-btn').classList.toggle('hidden', count === 0);
+    document.getElementById('batch-process-btn').classList.toggle('hidden', count === 0);
+}
+
+// 批量处理：将选中视频发送到新建任务页
+function batchProcessVideos() {
+    const checkboxes = document.querySelectorAll('.video-checkbox:checked');
+    const ids = Array.from(checkboxes).map(cb => cb.value);
+    if (ids.length === 0) return;
+    
+    const params = new URLSearchParams();
+    ids.forEach(id => params.append('video', id));
+    window.location.href = `/tasks/new?${params.toString()}`;
 }
 
 // 批量删除
@@ -328,6 +366,24 @@ async function addVideo() {
         showToast('请求失败: ' + e.message, 'error');
     }
 }
+
+// 阶段筛选（客户端，当前页内）
+function filterByStage(value) {
+    const table = document.getElementById('video-table');
+    if (!value) {
+        filterTableRows(table, () => true);
+        return;
+    }
+    filterTableRows(table, row => {
+        const stages = row.dataset.stages || '';
+        return stages.includes(value);
+    });
+}
+
+// 初始化表格排序
+document.addEventListener('DOMContentLoaded', () => {
+    initSortableTable(document.getElementById('video-table'));
+});
 
 // ESC 关闭弹窗
 document.addEventListener('keydown', function(e) {

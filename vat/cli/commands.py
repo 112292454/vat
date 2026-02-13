@@ -692,38 +692,63 @@ def process(ctx, video_id, process_all, playlist, stages, gpu, force, dry_run, c
                 config=config,
                 gpu_id=gpu_id,
                 force=force,
+                progress_callback=lambda msg, v=vid: click.echo(f"  [{v}] {msg}"),
                 video_index=idx,
                 total_videos=total
             )
-            processor.process(steps=step_names)
-            click.echo(f"  ✓ [{idx + 1}/{total}] 完成: {title}")
-            return vid, True, None
+            success = processor.process(steps=step_names)
+            if success:
+                click.echo(f"  ✓ [{idx + 1}/{total}] 完成: {title}")
+                return vid, True, None
+            else:
+                click.echo(f"  ✗ [{idx + 1}/{total}] 失败: {title}")
+                return vid, False, "处理返回失败"
         except Exception as e:
             logger.error(f"处理失败: {vid} - {e}")
             click.echo(f"  ✗ [{idx + 1}/{total}] 失败: {title} - {e}")
             return vid, False, str(e)
     
-    # 执行处理
+    def _run_batch(video_list):
+        """执行一批视频处理，返回失败的视频ID列表"""
+        failed_vids = []
+        if concurrency <= 1:
+            for idx, vid in video_list:
+                _, success, _ = process_one_video((idx, vid))
+                if not success:
+                    failed_vids.append(vid)
+        else:
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            with ThreadPoolExecutor(max_workers=concurrency) as executor:
+                futures = {executor.submit(process_one_video, (idx, vid)): vid 
+                          for idx, vid in video_list}
+                for future in as_completed(futures):
+                    try:
+                        _, success, _ = future.result()
+                        if not success:
+                            failed_vids.append(futures[future])
+                    except Exception as e:
+                        vid = futures[future]
+                        logger.error(f"并发处理异常: {vid} - {e}")
+                        failed_vids.append(vid)
+        return failed_vids
+    
+    # 执行处理（失败的视频放到队尾重试，最多重试2轮）
+    max_retry_rounds = 2
     click.echo(f"\n开始处理 {total} 个视频（并发: {concurrency}）...")
     
-    if concurrency <= 1:
-        # 串行处理
-        for idx, vid in enumerate(video_ids):
-            process_one_video((idx, vid))
-    else:
-        # 并发处理
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-        with ThreadPoolExecutor(max_workers=concurrency) as executor:
-            futures = {executor.submit(process_one_video, (idx, vid)): vid 
-                      for idx, vid in enumerate(video_ids)}
-            for future in as_completed(futures):
-                try:
-                    future.result()
-                except Exception as e:
-                    vid = futures[future]
-                    logger.error(f"并发处理异常: {vid} - {e}")
+    failed_vids = _run_batch(list(enumerate(video_ids)))
     
-    click.echo(f"\n处理完成")
+    for retry_round in range(1, max_retry_rounds + 1):
+        if not failed_vids:
+            break
+        click.echo(f"\n--- 第 {retry_round} 轮重试: {len(failed_vids)} 个失败视频 ---")
+        retry_list = [(video_ids.index(vid), vid) for vid in failed_vids]
+        failed_vids = _run_batch(retry_list)
+    
+    if failed_vids:
+        click.echo(f"\n处理完成，{len(failed_vids)} 个视频最终失败: {', '.join(failed_vids[:5])}")
+    else:
+        click.echo(f"\n处理完成，全部成功")
 
 
 def _generate_process_cli(video_ids: List[str], stages: str, gpu: str, force: bool) -> str:

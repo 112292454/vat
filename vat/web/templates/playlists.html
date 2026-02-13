@@ -15,36 +15,44 @@
 
     <!-- Playlist 列表 -->
     <div class="bg-white rounded-lg shadow overflow-hidden">
-        <table class="min-w-full divide-y divide-gray-200">
+        <table class="min-w-full divide-y divide-gray-200" id="playlist-table">
             <thead class="bg-gray-50">
                 <tr>
-                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">标题</th>
-                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">频道</th>
-                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">视频数</th>
-                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">进度</th>
-                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">最后同步</th>
+                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase" data-sort="0" data-sort-type="text">标题</th>
+                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase" data-sort="1" data-sort-type="text">频道</th>
+                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase" data-sort="2" data-sort-type="number">视频数</th>
+                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase" data-sort="3" data-sort-type="number">进度</th>
+                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase" data-sort="4" data-sort-type="date">最后同步</th>
                     <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">操作</th>
                 </tr>
             </thead>
             <tbody class="bg-white divide-y divide-gray-200" id="playlist-list">
                 {% for pl in playlists %}
                 <tr class="hover:bg-gray-50" data-playlist-id="{{ pl.id }}">
-                    <td class="px-6 py-4">
+                    <td class="px-6 py-4" data-sort-value="{{ pl.title or pl.id }}">
                         <a href="/playlists/{{ pl.id }}" class="text-blue-600 hover:underline font-medium">
                             {{ pl.title or pl.id }}
                         </a>
                     </td>
                     <td class="px-6 py-4 text-sm text-gray-600">{{ pl.channel or '-' }}</td>
-                    <td class="px-6 py-4 text-sm">{{ pl.video_count or 0 }}</td>
-                    <td class="px-6 py-4">
-                        <div class="flex items-center">
-                            <div class="w-24 bg-gray-200 rounded-full h-2 mr-2">
+                    <td class="px-6 py-4 text-sm" data-sort-value="{{ pl.video_count or 0 }}">{{ pl.video_count or 0 }}</td>
+                    <td class="px-6 py-4" data-sort-value="{{ pl.progress_percent }}">
+                        <div class="flex items-center space-x-2">
+                            <div class="w-20 bg-gray-200 rounded-full h-2">
                                 <div class="bg-green-500 h-2 rounded-full" style="width: {{ pl.progress_percent }}%"></div>
                             </div>
-                            <span class="text-sm text-gray-600">{{ pl.completed }}/{{ pl.video_count }}</span>
+                            <div class="flex items-center space-x-1 text-sm">
+                                <a href="/?playlist_id={{ pl.id }}&status=completed" class="text-green-600 hover:underline" title="已完成">{{ pl.completed }}</a>
+                                <span class="text-gray-400">/</span>
+                                {% if pl.failed is defined and pl.failed > 0 %}
+                                <a href="/?playlist_id={{ pl.id }}&status=failed" class="text-red-600 hover:underline" title="失败">{{ pl.failed }}失败</a>
+                                <span class="text-gray-400">/</span>
+                                {% endif %}
+                                <a href="/?playlist_id={{ pl.id }}" class="text-gray-600 hover:underline" title="全部">{{ pl.video_count }}</a>
+                            </div>
                         </div>
                     </td>
-                    <td class="px-6 py-4 text-sm text-gray-600 sync-status">{{ pl.last_synced_at|format_datetime }}</td>
+                    <td class="px-6 py-4 text-sm text-gray-600 sync-status" data-sort-value="{{ pl.last_synced_at or '' }}">{{ pl.last_synced_at|format_datetime }}</td>
                     <td class="px-6 py-4 text-sm">
                         <div class="flex space-x-2">
                             <button onclick="syncPlaylist('{{ pl.id }}')" 
@@ -103,6 +111,11 @@
 </div>
 
 <script>
+// 初始化表格排序
+document.addEventListener('DOMContentLoaded', () => {
+    initSortableTable(document.getElementById('playlist-table'));
+});
+
 function showAddPlaylistModal() {
     document.getElementById('add-playlist-modal').classList.remove('hidden');
 }
@@ -157,8 +170,13 @@ async function syncPlaylist(playlistId) {
             body: JSON.stringify({fetch_upload_dates: true})
         });
         if (response.ok) {
-            showToast('已启动后台同步', 'info');
-            setTimeout(() => location.reload(), 1000);
+            showToast('同步已启动，等待完成...', 'info');
+            // 找到对应行的状态单元格，开始轮询
+            const row = document.querySelector(`[data-playlist-id="${playlistId}"]`);
+            const statusCell = row?.querySelector('.sync-status');
+            if (statusCell) {
+                checkSyncStatus(playlistId, statusCell, statusCell.innerHTML);
+            }
         } else {
             const error = await response.json();
             showToast('同步失败: ' + (error.detail || '未知错误'), 'error');

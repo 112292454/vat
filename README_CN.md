@@ -151,8 +151,11 @@ vim config/config.yaml
 | `asr.language` | 源语言（如 `ja`） |
 | `translator.llm.model` | 翻译使用的 LLM 模型 |
 | `translator.llm.enable_reflect` | 是否启用反思翻译 |
-| `llm.api_key` | LLM API Key（支持 `${ENV_VAR}` 格式） |
-| `llm.base_url` | LLM API 地址 |
+| `llm.api_key` | 全局 LLM API Key（支持 `${ENV_VAR}` 格式） |
+| `llm.base_url` | 全局 LLM API 地址 |
+| `asr.split.api_key/base_url` | 断句阶段可选覆写（留空继承全局） |
+| `translator.llm.api_key/base_url` | 翻译阶段可选覆写（留空继承全局） |
+| `translator.llm.optimize.*` | 优化阶段可选覆写 model/api_key/base_url/batch_size/thread_num（留空继承父级→全局） |
 | `proxy.http_proxy` | 代理设置 |
 
 完整配置说明参见 [`config/default.yaml`](config/default.yaml) 中的注释。

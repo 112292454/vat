@@ -60,6 +60,7 @@ class BilibiliUploader(BaseUploader):
         self.line = line
         self.threads = threads
         self.cookie_data = None
+        self._raw_cookie_data = None
         self._cookie_loaded = False
     
     def _load_cookie(self):
@@ -75,6 +76,9 @@ class BilibiliUploader(BaseUploader):
         
         with open(self.cookies_file, 'r', encoding='utf-8') as f:
             data = json.load(f)
+        
+        # 保留原始数据，供 biliup login_by_cookies 使用
+        self._raw_cookie_data = data
         
         # 提取关键 cookie（兼容 stream_gears 登录格式）
         keys_to_extract = ["SESSDATA", "bili_jct", "DedeUserID__ckMd5", "DedeUserID", "access_token"]
@@ -160,8 +164,8 @@ class BilibiliUploader(BaseUploader):
                 data.dynamic = dynamic
             
             with BiliBili(data) as bili:
-                # 登录
-                bili.login_by_cookies(self.cookie_data)
+                # 登录（biliup 要求原始 JSON 结构，含 cookie_info/token_info）
+                bili.login_by_cookies(self._raw_cookie_data)
                 if 'access_token' in self.cookie_data:
                     bili.access_token = self.cookie_data['access_token']
                 

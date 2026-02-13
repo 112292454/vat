@@ -104,7 +104,7 @@ class UploadConfigManager:
             )
             
             self._config = UploadConfig(bilibili=bilibili)
-            logger.info(f"上传配置已加载: {self.config_path}")
+            logger.debug(f"上传配置已加载: {self.config_path}")
             return self._config
             
         except Exception as e:

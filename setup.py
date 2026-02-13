@@ -30,6 +30,21 @@ setup(
     long_description_content_type="text/markdown",
     url="https://github.com/yourusername/VAT",
     packages=find_packages(),
+    package_data={
+        "vat": [
+            # Prompt 模板（.md）
+            "llm/prompts/**/*.md",
+            # 场景配置
+            "llm/*.yaml",
+            # 字体
+            "resources/fonts/*.ttf",
+            "resources/fonts/*.otf",
+            # 字幕样式模板
+            "resources/subtitle_style/*.txt",
+            # Web 模板
+            "web/templates/*.html",
+        ],
+    },
     classifiers=[
         "Development Status :: 3 - Alpha",
         "Intended Audience :: Developers",

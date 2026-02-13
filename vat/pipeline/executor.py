@@ -437,6 +437,11 @@ class VideoProcessor:
         
         return all_success
     
+    def _is_no_speech(self) -> bool:
+        """检查视频是否被标记为无人声（PV/纯音乐视频），供下游阶段跳过"""
+        video = self.db.get_video(self.video_id)
+        return bool((video.metadata or {}).get('no_speech', False))
+    
     def _execute_step(self, step: TaskStep) -> bool:
         """
         执行单个步骤（细粒度阶段）
@@ -488,7 +493,7 @@ class VideoProcessor:
                     sub_langs=sub_langs
                 )
                 
-                if not result or 'video_path' not in result:
+                if 'video_path' not in result:
                     raise DownloadError("下载器未返回视频路径")
                     
                 video_path = Path(result['video_path'])
@@ -773,7 +778,17 @@ class VideoProcessor:
                     asr_audio_file, 
                     progress_callback=whisper_progress
                 )
-                assert len(asr_data) > 0, "ASR 输出为空"
+                
+                # ASR 输出为空：PV/纯音乐视频可能没有人声
+                if len(asr_data) == 0:
+                    self.progress_callback("⚠ ASR 输出为空（视频可能无人声，如PV/音乐视频）")
+                    # 标记 metadata 供后续阶段检查
+                    video_metadata = self.video.metadata or {}
+                    video_metadata['no_speech'] = True
+                    self.db.update_video(self.video_id, metadata=video_metadata)
+                    # 保存空 SRT 文件（让后续阶段能正常检测到文件存在）
+                    raw_srt.write_text("", encoding="utf-8")
+                    return True
                 
                 # ====== ASR 后处理：过滤幻觉和重复 ======
                 postproc_config = self.config.asr.postprocessing
@@ -909,6 +924,11 @@ class VideoProcessor:
         输入：original_raw.srt
         输出：original.srt（语义完整的原文字幕）
         """
+        # 无人声视频跳过断句
+        if self._is_no_speech():
+            self.progress_callback("无人声视频，跳过断句")
+            return True
+        
         raw_srt = self.output_dir / "original_raw.srt"
         if not raw_srt.exists():
             raise ASRError(f"找不到 Whisper 输出: {raw_srt}")
@@ -956,10 +976,11 @@ class VideoProcessor:
                         self.progress_callback(f"启用分块断句 (共 {len(asr_data.segments)} 个片段)")
                         from vat.asr.chunked_split import ChunkedSplitter
                         
+                        split_creds = self.config.get_stage_llm_credentials("split")
                         splitter = ChunkedSplitter(
                             chunk_size_sentences=self.config.asr.split.chunk_size_sentences,
                             chunk_overlap_sentences=self.config.asr.split.chunk_overlap_sentences,
-                            model=self.config.asr.split.model,
+                            model=split_creds["model"],
                             max_word_count_cjk=self.config.asr.split.max_words_cjk,
                             max_word_count_english=self.config.asr.split.max_words_english,
                             min_word_count_cjk=self.config.asr.split.min_words_cjk,
@@ -968,6 +989,10 @@ class VideoProcessor:
                             recommend_word_count_english=self.config.asr.split.recommend_words_english,
                             scene_prompt=split_scene_prompt,
                             mode=self.config.asr.split.mode,
+                            allow_model_upgrade=self.config.asr.split.allow_model_upgrade,
+                            model_upgrade_chain=self.config.asr.split.model_upgrade_chain,
+                            api_key=split_creds["api_key"],
+                            base_url=split_creds["base_url"],
                         )
                         asr_data = splitter.split(asr_data, progress_callback=self.progress_callback)
                     else:
@@ -1028,32 +1053,44 @@ class VideoProcessor:
         is_reflect: bool = False,
         enable_optimize: bool = False,
         custom_optimize_prompt: str = "",
+        model_override: str = "",
+        thread_num_override: int = 0,
+        batch_num_override: int = 0,
+        api_key_override: str = "",
+        base_url_override: str = "",
+        optimize_model_override: str = "",
+        optimize_api_key_override: str = "",
+        optimize_base_url_override: str = "",
     ) -> 'LLMTranslator':
         """
         创建 LLMTranslator 实例（工厂方法）
         
         公共参数从 self.config 读取，差异参数通过参数传入。
-        
-        Args:
-            custom_translate_prompt: 翻译提示词（已合并场景提示词）
-            is_reflect: 是否启用反思翻译
-            enable_optimize: 是否启用字幕优化
-            custom_optimize_prompt: 优化提示词（已合并场景提示词）
+        *_override 参数优先于 config 中的值，留空/0 则使用 config 默认值。
         """
         from vat.translator.types import str_to_target_language
         target_lang = str_to_target_language(self.config.translator.target_language)
         
+        # resolve translate 凭据
+        trans_creds = self.config.get_stage_llm_credentials("translate")
+        
         return LLMTranslator(
-            thread_num=self.config.translator.llm.thread_num,
-            batch_num=self.config.translator.llm.batch_size,
+            thread_num=thread_num_override or self.config.translator.llm.thread_num,
+            batch_num=batch_num_override or self.config.translator.llm.batch_size,
             target_language=target_lang,
             output_dir=str(self.output_dir),
-            model=self.config.translator.llm.model,
+            model=model_override or trans_creds["model"],
             custom_translate_prompt=custom_translate_prompt,
             is_reflect=is_reflect,
             enable_optimize=enable_optimize,
             custom_optimize_prompt=custom_optimize_prompt,
             enable_context=self.config.translator.llm.enable_context,
+            api_key=api_key_override or trans_creds["api_key"],
+            base_url=base_url_override or trans_creds["base_url"],
+            optimize_model=optimize_model_override,
+            optimize_api_key=optimize_api_key_override,
+            optimize_base_url=optimize_base_url_override,
+            progress_callback=self.progress_callback,
         )
     
     def _run_optimize(self) -> bool:
@@ -1062,6 +1099,11 @@ class VideoProcessor:
         输入：original.srt
         输出：optimized.srt
         """
+        # 无人声视频跳过优化
+        if self._is_no_speech():
+            self.progress_callback("无人声视频，跳过字幕优化")
+            return True
+        
         original_srt = self.output_dir / "original.srt"
         if not original_srt.exists():
             raise TranslateError(f"找不到原文字幕: {original_srt}")
@@ -1089,11 +1131,19 @@ class VideoProcessor:
                 'optimize', self.config.translator.llm.optimize.custom_prompt or ""
             )
             
+            # resolve optimize 阶段的有效配置（含继承链）
+            opt_config = self.config.get_optimize_effective_config()
+            
             translator = self._create_translator(
                 custom_translate_prompt=self.config.translator.llm.custom_prompt or "",
                 is_reflect=False,  # 优化阶段不需要反思翻译
                 enable_optimize=True,
                 custom_optimize_prompt=optimize_prompt,
+                thread_num_override=opt_config["thread_num"],
+                batch_num_override=opt_config["batch_size"],
+                optimize_model_override=opt_config["model"],
+                optimize_api_key_override=opt_config["api_key"],
+                optimize_base_url_override=opt_config["base_url"],
             )
             
             # 调用内部优化方法（OPTIMIZE 阶段独立执行）
@@ -1121,6 +1171,10 @@ class VideoProcessor:
         输入：optimized.srt（或 original.srt 如果优化被跳过）
         输出：translated.srt
         """
+        # 无人声视频跳过翻译
+        if self._is_no_speech():
+            self.progress_callback("无人声视频，跳过翻译")
+            return True
         # 优先使用优化后的字幕
         optimized_srt = self.output_dir / "optimized.srt"
         original_srt = self.output_dir / "original.srt"
@@ -1320,12 +1374,14 @@ class VideoProcessor:
         # 检查是否有说话人信息
         has_speakers = any(seg.speaker_id is not None for seg in asr_data.segments)
         
+        split_creds = self.config.get_stage_llm_credentials("split")
+        
         if not has_speakers:
             # 无说话人信息，使用原有逻辑
             full_text = "".join(seg.text for seg in asr_data.segments)
             split_texts = split_by_llm(
                 full_text,
-                model=self.config.asr.split.model,
+                model=split_creds["model"],
                 max_word_count_cjk=self.config.asr.split.max_words_cjk,
                 max_word_count_english=self.config.asr.split.max_words_english,
                 min_word_count_cjk=self.config.asr.split.min_words_cjk,
@@ -1334,6 +1390,10 @@ class VideoProcessor:
                 recommend_word_count_english=self.config.asr.split.recommend_words_english,
                 scene_prompt=scene_prompt,
                 mode=self.config.asr.split.mode,
+                allow_model_upgrade=self.config.asr.split.allow_model_upgrade,
+                model_upgrade_chain=self.config.asr.split.model_upgrade_chain,
+                api_key=split_creds["api_key"],
+                base_url=split_creds["base_url"],
             )
             return self._realign_timestamps(asr_data, split_texts)
         
@@ -1348,7 +1408,7 @@ class VideoProcessor:
             # 对该说话人独立断句
             split_texts = split_by_llm(
                 speaker_text,
-                model=self.config.asr.split.model,
+                model=split_creds["model"],
                 max_word_count_cjk=self.config.asr.split.max_words_cjk,
                 max_word_count_english=self.config.asr.split.max_words_english,
                 min_word_count_cjk=self.config.asr.split.min_words_cjk,
@@ -1357,6 +1417,10 @@ class VideoProcessor:
                 recommend_word_count_english=self.config.asr.split.recommend_words_english,
                 scene_prompt=scene_prompt,
                 mode=self.config.asr.split.mode,
+                allow_model_upgrade=self.config.asr.split.allow_model_upgrade,
+                model_upgrade_chain=self.config.asr.split.model_upgrade_chain,
+                api_key=split_creds["api_key"],
+                base_url=split_creds["base_url"],
             )
             
             # 为该说话人的片段重新分配时间戳
@@ -1386,6 +1450,19 @@ class VideoProcessor:
 
     def _run_embed(self) -> bool:
         """嵌入字幕"""
+        # 无人声视频跳过嵌入
+        if self._is_no_speech():
+            self.progress_callback("无人声视频，跳过字幕嵌入")
+            # 直接复制原视频作为 final.mp4
+            video_file = self._find_video_file()
+            if video_file:
+                import shutil
+                final_video = self.output_dir / "final.mp4"
+                if not final_video.exists():
+                    shutil.copy2(video_file, final_video)
+                    self.progress_callback(f"已复制原视频为 {final_video.name}")
+            return True
+        
         # 查找视频和字幕文件
         video_file = self._find_video_file()
         if not video_file:
@@ -1538,13 +1615,11 @@ class VideoProcessor:
                 f"B站cookie文件不存在: {cookie_file}，请运行 vat bilibili login 获取cookie"
             )
         
-        # 加载上传配置（支持在线编辑的模板）
-        from vat.uploaders.upload_config import get_upload_config_manager
+        # 上传配置统一从 self.config.uploader.bilibili 获取
+        # （Config 加载阶段已合并 default.yaml 连接设置 + upload.yaml 内容设置）
         from vat.uploaders.template import render_upload_metadata
         
-        upload_mgr = get_upload_config_manager()
-        upload_config = upload_mgr.load()
-        bilibili_config = upload_config.bilibili
+        bilibili_config = self.config.uploader.bilibili
         
         # 构建模板配置
         templates = {

@@ -41,6 +41,10 @@ class ChunkedSplitter:
         recommend_word_count_english: int = 8,
         scene_prompt: str = "",
         mode: str = "sentence",
+        allow_model_upgrade: bool = False,
+        model_upgrade_chain: List[str] | None = None,
+        api_key: str = "",
+        base_url: str = "",
     ):
         """
         初始化分块断句器
@@ -57,6 +61,8 @@ class ChunkedSplitter:
             recommend_word_count_english: 英文推荐单词数（软性建议，理想长度）
             scene_prompt: 场景特定提示词（可选）
             mode: 断句模式，"sentence"（句子级）或 "semantic"（语义级）
+            allow_model_upgrade: 是否允许模型升级
+            model_upgrade_chain: 模型升级顺序列表
         """
         self.chunk_size = chunk_size_sentences
         self.overlap = chunk_overlap_sentences
@@ -69,6 +75,10 @@ class ChunkedSplitter:
         self.recommend_word_count_english = recommend_word_count_english
         self.scene_prompt = scene_prompt
         self.mode = mode
+        self.allow_model_upgrade = allow_model_upgrade
+        self.model_upgrade_chain = model_upgrade_chain
+        self.api_key = api_key
+        self.base_url = base_url
         
         # 验证参数合理性
         assert self.overlap < self.chunk_size, \
@@ -77,7 +87,7 @@ class ChunkedSplitter:
     
     def split(self, asr_data: ASRData, progress_callback=None) -> ASRData:
         """
-        分块断句
+        分块断句（并行处理各 chunk，按序合并）
         
         Args:
             asr_data: 原始 ASR 数据（Whisper输出的碎片）
@@ -86,24 +96,32 @@ class ChunkedSplitter:
         Returns:
             断句后的 ASRData
         """
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        import threading
+        
         segments = asr_data.segments
         total = len(segments)
         
         # 分块
         chunks = self._create_chunks(segments)
-        logger.info(f"将 {total} 个片段分为 {len(chunks)} 块处理")
+        num_chunks = len(chunks)
+        logger.info(f"将 {total} 个片段分为 {num_chunks} 块并行处理")
         
         def _normalize(s: str) -> str:
             return re.sub(r"\s+", "", s)
         
-        # 逐块断句（串行，因为需要前块结果）
-        all_split_segments = []
+        # 进度计数器（线程安全）
+        completed_count = 0
+        count_lock = threading.Lock()
         
-        for i, (chunk_segs, start_idx, end_idx) in enumerate(chunks, 1):
-            if progress_callback:
-                progress_callback(f"断句进度: {i}/{len(chunks)} 块")
+        def _process_chunk(chunk_idx: int, chunk_segs: List[ASRDataSeg], start_idx: int, end_idx: int) -> List[ASRDataSeg]:
+            """处理单个 chunk：LLM 断句 → 时间戳对齐
             
-            logger.info(f"处理第 {i}/{len(chunks)} 块 (片段 {start_idx}-{end_idx})")
+            仅做计算，不处理 overlap 裁剪（留给合并阶段统一处理）。
+            """
+            nonlocal completed_count
+            
+            logger.info(f"处理第 {chunk_idx + 1}/{num_chunks} 块 (片段 {start_idx}-{end_idx})")
             
             # 合并该块的文本
             chunk_text = "".join(seg.text for seg in chunk_segs)
@@ -120,24 +138,53 @@ class ChunkedSplitter:
                 recommend_word_count_english=self.recommend_word_count_english,
                 scene_prompt=self.scene_prompt,
                 mode=self.mode,
+                allow_model_upgrade=self.allow_model_upgrade,
+                model_upgrade_chain=self.model_upgrade_chain,
+                api_key=self.api_key,
+                base_url=self.base_url,
             )
             
             # 重新分配时间戳
             chunk_asr = ASRData(chunk_segs)
             split_asr = self._realign_timestamps(chunk_asr, split_texts)
             
-            # 合并结果（处理 overlap）
-            if i == 1:
+            with count_lock:
+                completed_count += 1
+                if progress_callback:
+                    progress_callback(f"断句进度: {completed_count}/{num_chunks} 块")
+            
+            return split_asr.segments
+        
+        # 并行处理所有 chunk（仅 LLM 断句 + 时间戳对齐）
+        chunk_results: List[List[ASRDataSeg] | None] = [None] * num_chunks
+        
+        with ThreadPoolExecutor(max_workers=num_chunks) as executor:
+            future_to_idx = {}
+            for idx, (chunk_segs, start_idx, end_idx) in enumerate(chunks):
+                future = executor.submit(_process_chunk, idx, chunk_segs, start_idx, end_idx)
+                future_to_idx[future] = idx
+            
+            for future in as_completed(future_to_idx):
+                idx = future_to_idx[future]
+                chunk_results[idx] = future.result()  # 异常会在此抛出
+        
+        # 按序合并：在主线程中统一处理 overlap 裁剪
+        all_split_segments = []
+        for idx in range(num_chunks):
+            result = chunk_results[idx]
+            assert result is not None, "逻辑错误: chunk 结果为 None"
+            
+            if idx == 0:
                 # 第一块，全部保留
-                all_split_segments.extend(split_asr.segments)
+                all_split_segments.extend(result)
             else:
                 # 后续块：基于字符计数跳过 overlap 部分
-                # 计算 overlap ASR segments 的非空白字符数
+                chunk_segs = chunks[idx][0]
                 overlap_segs = chunk_segs[:self.overlap]
                 overlap_nchars = sum(len(_normalize(seg.text)) for seg in overlap_segs)
                 
                 non_overlap_segments = self._trim_overlap(
-                    split_asr.segments, overlap_nchars, _normalize
+                    result, overlap_nchars, _normalize
                 )
                 all_split_segments.extend(non_overlap_segments)
         
@@ -440,6 +487,21 @@ class ChunkedSplitter:
                 start_time=start_time,
                 end_time=end_time,
             ))
+        
+        # === 6.5 解消相邻段时间重叠 ===
+        # _realign_timestamps 按行分组时，相邻行可能映射到同一原始 ASR segment，
+        # 导致 seg[i].end_time > seg[i+1].start_time（重叠）。
+        # 在此处裁剪前段的 end_time，消除重叠，保持后段的 start_time 不变。
+        for i in range(len(new_segments) - 1):
+            if new_segments[i].end_time > new_segments[i + 1].start_time:
+                # 裁剪前段 end_time 到后段 start_time
+                clipped_end = new_segments[i + 1].start_time
+                # 确保裁剪后前段仍有效（start < end）
+                if clipped_end > new_segments[i].start_time:
+                    new_segments[i].end_time = clipped_end
+                else:
+                    # 极端情况：前后段 start_time 相同，给前段最小 1ms
+                    new_segments[i].end_time = new_segments[i].start_time + 1
         
         # === 7. 安全检查 ===
         # 检查：每个段落的时间范围不超出其字符所属原始 segment 的时间范围

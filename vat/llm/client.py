@@ -2,7 +2,7 @@
 
 import os
 import threading
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse, urlunparse
 
 import openai
@@ -20,6 +20,10 @@ from vat.utils.logger import setup_logger
 
 _global_client: Optional[OpenAI] = None
 _client_lock = threading.Lock()
+
+# Per-config client registry: (normalized_base_url, api_key) -> OpenAI
+_client_registry: Dict[Tuple[str, str], OpenAI] = {}
+_registry_lock = threading.Lock()
 
 logger = setup_logger("llm_client")
 
@@ -100,6 +104,46 @@ def get_llm_client() -> OpenAI:
     return _global_client
 
 
+def get_or_create_client(api_key: str = "", base_url: str = "") -> OpenAI:
+    """Get or create an OpenAI client for specific credentials.
+    
+    If both api_key and base_url are empty, returns the global client.
+    For missing params, falls back to the corresponding environment variable.
+    
+    Args:
+        api_key: API key (empty string = use global)
+        base_url: Base URL (empty string = use global)
+    
+    Returns:
+        OpenAI client instance (cached per unique credentials)
+    """
+    if not api_key and not base_url:
+        return get_llm_client()
+    
+    # Fill missing with global env vars
+    effective_key = api_key or os.getenv("OPENAI_API_KEY", "").strip()
+    effective_url = base_url or os.getenv("OPENAI_BASE_URL", "").strip()
+    effective_url = normalize_base_url(effective_url)
+    
+    if not effective_key or not effective_url:
+        raise ValueError(
+            f"LLM 配置不完整: api_key={'设置' if effective_key else '缺失'}, "
+            f"base_url={'设置' if effective_url else '缺失'}"
+        )
+    
+    registry_key = (effective_url, effective_key)
+    
+    if registry_key not in _client_registry:
+        with _registry_lock:
+            if registry_key not in _client_registry:
+                _client_registry[registry_key] = OpenAI(
+                    base_url=effective_url, api_key=effective_key
+                )
+                logger.debug(f"Created LLM client for: {effective_url}")
+    
+    return _client_registry[registry_key]
+
+
 def before_sleep_log(retry_state: RetryCallState) -> None:
     logger.warning(
         "Rate Limit Error, sleeping and retrying... Please lower your thread concurrency or use better OpenAI API."
@@ -117,16 +161,18 @@ def call_llm(
     messages: List[dict],
     model: str,
     temperature: float = 1,
+    api_key: str = "",
+    base_url: str = "",
     **kwargs: Any,
 ) -> Any:
     """Call LLM API with automatic caching.
-
-    Uses global LLM client configured via environment variables.
 
     Args:
         messages: Chat messages list
         model: Model name
         temperature: Sampling temperature
+        api_key: Per-call API key override (empty = use global)
+        base_url: Per-call base URL override (empty = use global)
         **kwargs: Additional parameters for API call
 
     Returns:
@@ -135,7 +181,7 @@ def call_llm(
     Raises:
         ValueError: If response is invalid (empty choices or content)
     """
-    client = get_llm_client()
+    client = get_or_create_client(api_key, base_url)
     # logger.trace(f"Calling LLM API: {model}, {messages}, {temperature}, {kwargs}")
 
     response = client.chat.completions.create(

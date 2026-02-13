@@ -472,3 +472,15 @@ process() 捕获
 | 改依赖检查 | `_execute_step()` 中的依赖检查逻辑 |
 | 改 CLI 参数 | `vat/cli/commands.py` |
 | 添加新数据库字段 | `vat/database.py` + `vat/models.py` |
+
+---
+
+## 13. 已修复的历史问题
+
+### 13.1 下载失败重试机制
+
+CLI `process` 命令采用"失败放队尾"策略：首轮处理全部视频后，收集失败的视频在队尾重试（最多 2 轮）。利用 `get_pending_steps` 返回 FAILED 步骤的特性，重新调用 `process()` 会自然从失败步骤重试。相比内联重试（阻塞当前线程等待），该策略让其他视频先继续处理，减少整体等待时间。实现位置：`vat/cli/commands.py` `_run_batch()`。
+
+### 13.2 ASR 空输出处理（no_speech）
+
+PV/纯音乐等无人声视频，Whisper 输出为空时不再报错，而是在 `video.metadata` 中标记 `no_speech=True`，后续阶段（split/optimize/translate/embed）检测到该标记后自动跳过。embed 阶段会直接复制原视频作为 `final.mp4`。实现位置：`vat/pipeline/executor.py` `_is_no_speech()` 及各阶段方法开头的检查。

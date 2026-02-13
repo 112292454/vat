@@ -26,6 +26,15 @@
             from { transform: translateY(0); opacity: 1; }
             to { transform: translateY(-20px); opacity: 0; }
         }
+        /* 可排序表头 */
+        th[data-sort] { cursor: pointer; user-select: none; position: relative; }
+        th[data-sort]:hover { background-color: #f3f4f6; }
+        th[data-sort]::after { content: '⇅'; opacity: 0.3; margin-left: 4px; font-size: 0.75em; }
+        th[data-sort].sort-asc::after { content: '▲'; opacity: 0.8; }
+        th[data-sort].sort-desc::after { content: '▼'; opacity: 0.8; }
+        /* 筛选标签 */
+        .filter-tag { transition: all 0.15s; }
+        .filter-tag.active { font-weight: 600; }
     </style>
 </head>
 <body class="bg-gray-100 min-h-screen">
@@ -135,6 +144,97 @@
             });
         });
     });
+    
+    // ==================== 通用表格排序 ====================
+    // 用法：在 <th> 上加 data-sort="col-index" data-sort-type="text|number|date"
+    //       在 <td> 上加 data-sort-value="实际排序值"（可选，默认用 textContent）
+    function initSortableTable(tableEl) {
+        if (!tableEl) return;
+        const headers = tableEl.querySelectorAll('th[data-sort]');
+        headers.forEach(th => {
+            th.addEventListener('click', () => {
+                const colIdx = parseInt(th.dataset.sort);
+                const sortType = th.dataset.sortType || 'text';
+                const isAsc = th.classList.contains('sort-asc');
+                // 清除所有排序状态
+                headers.forEach(h => h.classList.remove('sort-asc', 'sort-desc'));
+                // 设置新状态
+                th.classList.add(isAsc ? 'sort-desc' : 'sort-asc');
+                const desc = isAsc;
+                
+                const tbody = tableEl.querySelector('tbody');
+                const rows = Array.from(tbody.querySelectorAll('tr:not(.no-sort)'));
+                
+                rows.sort((a, b) => {
+                    const aCell = a.cells[colIdx];
+                    const bCell = b.cells[colIdx];
+                    if (!aCell || !bCell) return 0;
+                    let aVal = aCell.dataset.sortValue ?? aCell.textContent.trim();
+                    let bVal = bCell.dataset.sortValue ?? bCell.textContent.trim();
+                    
+                    if (sortType === 'number') {
+                        aVal = parseFloat(aVal) || 0;
+                        bVal = parseFloat(bVal) || 0;
+                        return desc ? bVal - aVal : aVal - bVal;
+                    }
+                    if (sortType === 'date') {
+                        aVal = new Date(aVal || 0).getTime() || 0;
+                        bVal = new Date(bVal || 0).getTime() || 0;
+                        return desc ? bVal - aVal : aVal - bVal;
+                    }
+                    // text
+                    return desc ? bVal.localeCompare(aVal, 'zh') : aVal.localeCompare(bVal, 'zh');
+                });
+                
+                rows.forEach(row => tbody.appendChild(row));
+            });
+        });
+    }
+    
+    // ==================== 通用行筛选 ====================
+    // 用法：在 <tr> 上加 data-filter-xxx="value"，调用 filterTableRows 按条件显示/隐藏
+    function filterTableRows(tableEl, filterFn) {
+        if (!tableEl) return;
+        const rows = tableEl.querySelectorAll('tbody tr');
+        let visibleCount = 0;
+        rows.forEach(row => {
+            if (row.classList.contains('no-filter')) return; // 跳过"无数据"提示行
+            const show = filterFn(row);
+            row.style.display = show ? '' : 'none';
+            if (show) visibleCount++;
+        });
+        // 显示/隐藏"无匹配"提示
+        let emptyRow = tableEl.querySelector('.filter-empty-row');
+        if (visibleCount === 0) {
+            if (!emptyRow) {
+                emptyRow = document.createElement('tr');
+                emptyRow.className = 'filter-empty-row no-sort no-filter';
+                const cols = tableEl.querySelector('thead tr')?.cells.length || 6;
+                emptyRow.innerHTML = `<td colspan="${cols}" class="px-6 py-8 text-center text-gray-500">没有匹配的记录</td>`;
+                tableEl.querySelector('tbody').appendChild(emptyRow);
+            }
+            emptyRow.style.display = '';
+        } else if (emptyRow) {
+            emptyRow.style.display = 'none';
+        }
+        return visibleCount;
+    }
+    
+    // 更新筛选按钮的激活状态
+    function setActiveFilter(container, activeValue) {
+        container.querySelectorAll('.filter-tag').forEach(tag => {
+            const isActive = tag.dataset.filterValue === activeValue;
+            tag.classList.toggle('active', isActive);
+            // 样式切换
+            if (isActive) {
+                tag.classList.remove('bg-gray-200', 'text-gray-700');
+                tag.classList.add(tag.dataset.activeClass || 'bg-gray-800 text-white');
+            } else {
+                tag.classList.add('bg-gray-200', 'text-gray-700');
+                tag.classList.remove('bg-gray-800', 'text-white', 'bg-green-600', 'bg-blue-600', 'bg-red-600', 'bg-yellow-600', 'bg-orange-600');
+            }
+        });
+    }
     </script>
 </body>
 </html>

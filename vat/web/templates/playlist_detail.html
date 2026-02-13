@@ -12,6 +12,10 @@
             <div>
                 <h1 class="text-2xl font-bold text-gray-800">{{ playlist.title or playlist.id }}</h1>
                 <p class="text-gray-600">{{ playlist.channel or '-' }}</p>
+                <div class="mt-1 text-sm text-gray-500 space-y-0.5">
+                    <p>来源: <a href="{{ playlist.source_url }}" target="_blank" class="text-blue-500 hover:underline">{{ playlist.source_url }}</a></p>
+                    <p>上次同步: {{ playlist.last_synced_at|format_datetime if playlist.last_synced_at else '从未同步' }}</p>
+                </div>
             </div>
             <div class="flex space-x-2">
                 <button onclick="syncPlaylist()" class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700">
@@ -127,6 +131,17 @@
         </div>
     </div>
     
+    <!-- 视频状态筛选 -->
+    <div class="flex items-center space-x-2 mb-4" id="pl-video-status-filter">
+        <span class="text-gray-600 text-sm">状态:</span>
+        <button onclick="filterPlVideos('')" class="filter-tag px-3 py-1 rounded-full text-sm bg-gray-800 text-white" data-filter-value="" data-active-class="bg-gray-800 text-white">全部</button>
+        <button onclick="filterPlVideos('completed')" class="filter-tag px-3 py-1 rounded-full text-sm bg-gray-200 text-gray-700" data-filter-value="completed" data-active-class="bg-green-600 text-white">已完成</button>
+        <button onclick="filterPlVideos('pending')" class="filter-tag px-3 py-1 rounded-full text-sm bg-gray-200 text-gray-700" data-filter-value="pending" data-active-class="bg-yellow-600 text-white">待处理</button>
+        <button onclick="filterPlVideos('failed')" class="filter-tag px-3 py-1 rounded-full text-sm bg-gray-200 text-gray-700" data-filter-value="failed" data-active-class="bg-red-600 text-white">失败</button>
+        <button onclick="filterPlVideos('running')" class="filter-tag px-3 py-1 rounded-full text-sm bg-gray-200 text-gray-700" data-filter-value="running" data-active-class="bg-blue-600 text-white">进行中</button>
+        <button onclick="filterPlVideos('unavailable')" class="filter-tag px-3 py-1 rounded-full text-sm bg-gray-200 text-gray-700" data-filter-value="unavailable" data-active-class="bg-gray-600 text-white">不可用</button>
+    </div>
+
     <!-- 视频列表 -->
     <div class="bg-white rounded-lg shadow overflow-hidden" x-data="playlistManager()">
         <div class="px-6 py-4 border-b flex justify-between items-center">
@@ -145,31 +160,32 @@
                 </button>
             </div>
         </div>
-        <table class="min-w-full divide-y divide-gray-200">
+        <table class="min-w-full divide-y divide-gray-200" id="pl-video-table">
             <thead class="bg-gray-50">
                 <tr>
                     <th class="px-4 py-3 text-left">
                         <input type="checkbox" @change="toggleAll($event.target.checked)" 
                                class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
                     </th>
-                    <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">#</th>
-                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">标题</th>
-                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">发布日期</th>
-                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">时长</th>
+                    <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase" data-sort="1" data-sort-type="number">#</th>
+                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase" data-sort="2" data-sort-type="text">标题</th>
+                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase" data-sort="3" data-sort-type="date">发布日期</th>
+                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase" data-sort="4" data-sort-type="number">时长</th>
                     <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">状态</th>
                     <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">操作</th>
                 </tr>
             </thead>
             <tbody class="bg-white divide-y divide-gray-200">
                 {% for video in videos %}
-                <tr class="hover:bg-gray-50" :class="{'bg-blue-50': selectedVideos.includes('{{ video.id }}')}">
+                <tr class="hover:bg-gray-50" :class="{'bg-blue-50': selectedVideos.includes('{{ video.id }}')}"
+                    data-filter-status="{% if video.unavailable %}unavailable{% else %}{{ video.status }}{% endif %}">
                     <td class="px-4 py-4">
                         <input type="checkbox" :checked="selectedVideos.includes('{{ video.id }}')"
                                @change="toggleVideo('{{ video.id }}')"
                                class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
                     </td>
-                    <td class="px-4 py-4 text-sm text-gray-500">{{ video.global_index }}</td>
-                    <td class="px-6 py-4">
+                    <td class="px-4 py-4 text-sm text-gray-500" data-sort-value="{{ video.global_index }}">{{ video.global_index }}</td>
+                    <td class="px-6 py-4" data-sort-value="{{ video.title or video.id }}">
                         <a href="/video/{{ video.id }}?from_playlist={{ playlist.id }}" class="text-blue-600 hover:underline">
                             {{ video.title or video.id }}
                         </a>
@@ -177,7 +193,7 @@
                         <span class="ml-2 px-1.5 py-0.5 text-xs bg-gray-200 text-gray-600 rounded">不可用</span>
                         {% endif %}
                     </td>
-                    <td class="px-6 py-4 text-sm text-gray-500">
+                    <td class="px-6 py-4 text-sm text-gray-500" data-sort-value="{{ video.upload_date or '' }}">
                         {% if video.upload_date %}
                         {{ video.upload_date[:4] }}-{{ video.upload_date[4:6] }}-{{ video.upload_date[6:8] }}
                         {% if video.upload_date_interpolated %}
@@ -187,7 +203,7 @@
                         -
                         {% endif %}
                     </td>
-                    <td class="px-6 py-4 text-sm text-gray-500">
+                    <td class="px-6 py-4 text-sm text-gray-500" data-sort-value="{{ video.duration or 0 }}">
                         {% if video.duration %}
                         {{ video.duration_formatted or video.duration }}
                         {% else %}
@@ -308,6 +324,18 @@
 const playlistId = '{{ playlist.id }}';
 const allVideoIds = {{ all_video_ids | tojson }};
 
+// 视频状态筛选（当前页内）
+function filterPlVideos(status) {
+    const table = document.getElementById('pl-video-table');
+    setActiveFilter(document.getElementById('pl-video-status-filter'), status);
+    filterTableRows(table, row => !status || row.dataset.filterStatus === status);
+}
+
+// 初始化表格排序
+document.addEventListener('DOMContentLoaded', () => {
+    initSortableTable(document.getElementById('pl-video-table'));
+});
+
 // Alpine.js 组件：Playlist 批量管理
 function playlistManager() {
     return {
@@ -345,11 +373,12 @@ async function syncPlaylist() {
         if (response.ok) {
             const result = await response.json();
             if (result.syncing) {
-                showToast('已启动后台同步，请稍后刷新查看结果', 'info');
+                showToast('同步已启动，等待完成...', 'info');
+                pollSyncStatus();
             } else {
                 showToast(result.message || '同步完成', 'success');
+                location.reload();
             }
-            setTimeout(() => location.reload(), 1000);
         } else {
             const error = await response.json();
             showToast('同步失败: ' + (error.detail || '未知错误'), 'error');
@@ -357,6 +386,28 @@ async function syncPlaylist() {
     } catch (e) {
         showToast('请求失败: ' + e.message, 'error');
     }
+}
+
+function pollSyncStatus() {
+    const interval = setInterval(async () => {
+        try {
+            const resp = await fetch(`/api/playlists/${playlistId}/sync-status`);
+            const data = await resp.json();
+            if (data.status === 'syncing') {
+                showToast(data.message || '同步中...', 'info');
+            } else if (data.status === 'completed') {
+                clearInterval(interval);
+                showToast(data.message || '同步完成', 'success');
+                setTimeout(() => location.reload(), 500);
+            } else if (data.status === 'failed') {
+                clearInterval(interval);
+                showToast('同步失败: ' + (data.message || '未知错误'), 'error');
+            }
+        } catch (e) {
+            clearInterval(interval);
+            showToast('轮询状态失败: ' + e.message, 'error');
+        }
+    }, 2000);
 }
 
 function processAll() {
@@ -499,13 +550,8 @@ async function savePlaylistPrompt() {
     }
 }
 
-// 范围处理对话框
-const videoData = [
-    {% for video in videos %}
-    {id: '{{ video.id }}', pending: {{ 'true' if video.status != 'completed' and not video.unavailable else 'false' }}, unavailable: {{ 'true' if video.unavailable else 'false' }}}{% if not loop.last %},{% endif %}
-    {% endfor %}
-];
-const allVideoData = allVideoIds;
+// 全量视频数据（供范围选择使用，后端传入，不受分页限制）
+const videoData = {{ all_video_data | tojson }};
 
 function showRangeDialog() {
     document.getElementById('range-dialog').classList.remove('hidden');

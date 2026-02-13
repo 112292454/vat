@@ -12,23 +12,20 @@ logger = setup_logger("split_by_llm")
 MAX_WORD_COUNT = 20  # 英文单词或中文字符的最大数量
 MAX_STEPS = 3  # Agent loop最大尝试次数
 
-# 模型升级列表：当前模型失败后尝试下一个更强的模型
-MODEL_UPGRADE_CHAIN = [
-    "gpt-4o-mini",
-    "gpt-5-nano", 
-    "gpt-5-mini",
-    "gemini-3-flash-preview",
-    "gemini-3-pro-preview",
-    "gpt-5.2-chat",
-]
 
-
-def _get_next_model(current_model: str) -> str | None:
-    """获取升级后的模型，如果已是最强模型则返回 None"""
+def _get_next_model(current_model: str, upgrade_chain: List[str]) -> str | None:
+    """获取升级后的模型，如果已是最强模型则返回 None
+    
+    Args:
+        current_model: 当前模型名称
+        upgrade_chain: 模型升级顺序列表（从弱到强）
+    """
+    if not upgrade_chain:
+        return None
     try:
-        idx = MODEL_UPGRADE_CHAIN.index(current_model)
-        if idx + 1 < len(MODEL_UPGRADE_CHAIN):
-            return MODEL_UPGRADE_CHAIN[idx + 1]
+        idx = upgrade_chain.index(current_model)
+        if idx + 1 < len(upgrade_chain):
+            return upgrade_chain[idx + 1]
     except ValueError:
         # 当前模型不在升级链中，不升级
         pass
@@ -47,6 +44,9 @@ def split_by_llm(
     scene_prompt: str = "",
     mode: str = "sentence",
     allow_model_upgrade: bool = False,
+    model_upgrade_chain: List[str] | None = None,
+    api_key: str = "",
+    base_url: str = "",
 ) -> List[str]:
     """使用LLM进行文本断句
 
@@ -62,6 +62,7 @@ def split_by_llm(
         scene_prompt: 场景特定提示词，会插入到 system prompt 中（可选）
         mode: 断句模式，"sentence"（句子级）或 "semantic"（语义级）
         allow_model_upgrade: 是否允许在失败时升级到更强模型
+        model_upgrade_chain: 模型升级顺序列表（从弱到强），仅在 allow_model_upgrade=True 时生效
 
     Returns:
         断句后的文本列表
@@ -77,7 +78,8 @@ def split_by_llm(
                 text, current_model, max_word_count_cjk, max_word_count_english,
                 min_word_count_cjk, min_word_count_english, 
                 recommend_word_count_cjk, recommend_word_count_english,
-                scene_prompt, mode
+                scene_prompt, mode,
+                api_key=api_key, base_url=base_url,
             )
             
             if success:
@@ -86,7 +88,7 @@ def split_by_llm(
             
             # 失败，尝试升级模型
             if allow_model_upgrade:
-                next_model = _get_next_model(current_model)
+                next_model = _get_next_model(current_model, model_upgrade_chain or [])
                 if next_model:
                     logger.warning(f"模型 {current_model} 断句失败，升级到 {next_model}")
                     current_model = next_model
@@ -112,6 +114,8 @@ def _split_with_agent_loop(
     recommend_word_count_english: int = 8,
     scene_prompt: str = "",
     mode: str = "sentence",
+    api_key: str = "",
+    base_url: str = "",
 ) -> Tuple[List[str], bool]:
     """使用agent loop 建立反馈循环进行文本断句，自动验证和修正
     
@@ -160,6 +164,8 @@ def _split_with_agent_loop(
             messages=messages,
             model=model,
             temperature=0.1,
+            api_key=api_key,
+            base_url=base_url,
         )
 
         if not response or not response.choices:

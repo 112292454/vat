@@ -25,6 +25,7 @@ class BaseTranslator(ABC):
         target_language: TargetLanguage,
         output_dir: Union[str, Path],
         update_callback: Optional[Callable] = None,
+        progress_callback: Optional[Callable[[str], None]] = None,
     ):
         """
         初始化翻译器基类
@@ -34,7 +35,8 @@ class BaseTranslator(ABC):
             batch_num: 每批处理的字幕数量
             target_language: 目标语言
             output_dir: 输出目录，用于保存翻译结果
-            update_callback: 进度回调
+            update_callback: 数据回调（每批翻译结果）
+            progress_callback: 进度消息回调（人可读的进度文本）
         """
         self.thread_num = thread_num
         self.batch_num = batch_num
@@ -42,6 +44,7 @@ class BaseTranslator(ABC):
         self.output_dir = Path(output_dir)
         self.is_running = True
         self.update_callback = update_callback
+        self.progress_callback = progress_callback
         self.executor = None
         self._cache = get_translate_cache()
         self._cache_hit_count = 0  # 缓存命中计数
@@ -133,8 +136,11 @@ class BaseTranslator(ABC):
             try:
                 result = future.result()
                 translated_list.extend(result)
+                msg = f"翻译进度: {idx}/{total_chunks} 批次完成"
                 if idx % max(1, total_chunks // 10) == 0:
-                    logger.info(f"翻译进度: {idx}/{total_chunks} 批次完成")
+                    logger.info(msg)
+                if self.progress_callback:
+                    self.progress_callback(msg)
             except Exception as e:
                 logger.error(f"翻译块失败：{str(e)}")
                 failed_chunks.append((chunk, str(e)))

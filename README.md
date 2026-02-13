@@ -143,8 +143,11 @@ Key configuration items:
 | `asr.language` | Source language (e.g. `ja`) |
 | `translator.llm.model` | LLM model for translation |
 | `translator.llm.enable_reflect` | Enable reflective translation |
-| `llm.api_key` | LLM API Key (supports `${ENV_VAR}` format) |
-| `llm.base_url` | LLM API endpoint |
+| `llm.api_key` | Global LLM API Key (supports `${ENV_VAR}` format) |
+| `llm.base_url` | Global LLM API endpoint |
+| `asr.split.api_key/base_url` | Optional per-stage override for split (empty = inherit global) |
+| `translator.llm.api_key/base_url` | Optional per-stage override for translate (empty = inherit global) |
+| `translator.llm.optimize.*` | Optional overrides for optimize: model/api_key/base_url/batch_size/thread_num (empty = inherit parent → global) |
 | `proxy.http_proxy` | Proxy settings |
 
 See [`config/default.yaml`](config/default.yaml) for full configuration reference with comments.

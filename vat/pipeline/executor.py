@@ -101,21 +101,50 @@ class VideoProcessor:
         """默认进度回调"""
         self.logger.info(message)
     
-    def _progress_with_tracker(self, message: str):
-        """带进度追踪的回调"""
+    def _progress_with_tracker(self, message: str, component_name: str = None):
+        """带进度追踪的回调
+        
+        Args:
+            message: 进度消息
+            component_name: 组件名称，指定后日志来源显示为该组件而非 pipeline.executor
+        """
         if self._progress_tracker:
             per_video_progress = self._progress_tracker.get_overall_progress()
             # 计算批次总进度：(已完成视频数 + 当前视频进度) / 总视频数
             total_progress = (self.video_index + per_video_progress) / self.total_videos
             # 格式化：[TOTAL:33%] [50%] message（TOTAL 为批次总进度，后者为单视频进度）
             prefix = f"[TOTAL:{total_progress:.0%}] [{per_video_progress:.0%}]"
-            if message:
-                self.progress_callback(f"{prefix} {message}")
-            else:
-                self.progress_callback(prefix)
+            full_msg = f"{prefix} {message}" if message else prefix
         else:
-            if message:
-                self.progress_callback(message)
+            full_msg = message if message else None
+        
+        if full_msg:
+            if component_name and (self.progress_callback is self._default_progress_callback):
+                # 默认回调：用组件 logger 替代 pipeline.executor logger
+                setup_logger(component_name).info(full_msg)
+            else:
+                self.progress_callback(full_msg)
+    
+    def _make_component_progress_callback(self, component_name: str) -> Callable[[str], None]:
+        """
+        创建组件专用进度回调，使日志来源显示为组件名而非 pipeline.executor
+        
+        Args:
+            component_name: 组件名称（对应 setup_logger 的 name 参数，如 "subtitle_translator"）
+        """
+        component_logger = setup_logger(component_name)
+        original_cb = self.progress_callback
+        is_default = (original_cb is self._default_progress_callback)
+        
+        def callback(message: str):
+            if is_default:
+                # 默认回调：用组件 logger 替代 pipeline.executor logger
+                component_logger.info(message)
+            else:
+                # 外部回调（如 web SSE）：直接透传
+                original_cb(message)
+        
+        return callback
     
     def _get_output_dir(self) -> Path:
         """获取输出目录"""
@@ -772,7 +801,7 @@ class VideoProcessor:
                         if stage_prog:
                             stage_prog.total_items = total
                             stage_prog.completed_items = completed
-                    self._progress_with_tracker(msg)
+                    self._progress_with_tracker(msg, component_name="whisper_asr")
                 
                 # 确保音频文件存在
                 if not asr_audio_file.exists():
@@ -949,6 +978,10 @@ class VideoProcessor:
         
         try:
             asr_data = ASRData.from_subtitle_file(str(raw_srt))
+            
+            # ASR 后处理：移除日语文本中的无意义空格（防止断句碎片化）
+            asr_data.strip_cjk_spaces()
+            
             metadata = CacheMetadata.load(self.output_dir)
             
             if not self.config.asr.split.enable:
@@ -1003,7 +1036,7 @@ class VideoProcessor:
                             api_key=split_creds["api_key"],
                             base_url=split_creds["base_url"],
                         )
-                        asr_data = splitter.split(asr_data, progress_callback=self.progress_callback)
+                        asr_data = splitter.split(asr_data, progress_callback=self._make_component_progress_callback("chunked_split"))
                     else:
                         if len(asr_data.segments) < self.config.asr.split.chunk_min_threshold:
                             self.progress_callback("片段数较少，使用全文断句")
@@ -1099,7 +1132,7 @@ class VideoProcessor:
             optimize_model=optimize_model_override,
             optimize_api_key=optimize_api_key_override,
             optimize_base_url=optimize_base_url_override,
-            progress_callback=self.progress_callback,
+            progress_callback=self._make_component_progress_callback("subtitle_translator"),
         )
     
     def _run_optimize(self) -> bool:
@@ -1566,7 +1599,7 @@ class VideoProcessor:
                         self._progress_tracker.report_embed_progress(percent)
                 except (ValueError, IndexError):
                     pass
-                self._progress_with_tracker(f"{message}: {progress_str}")
+                self._progress_with_tracker(f"{message}: {progress_str}", component_name="ffmpeg_wrapper")
             
             success = self.ffmpeg.embed_subtitle_hard(
                 video_path=video_file,

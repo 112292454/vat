@@ -198,6 +198,8 @@ DEFAULT_STAGE_SEQUENCE = [
 | `_run_translate(force)` | TRANSLATE 阶段实现 |
 | `_embed(force)` | EMBED 阶段实现 |
 | `_upload()` | UPLOAD 阶段实现 |
+| `_progress_with_tracker(msg, component_name=None)` | 带进度追踪的回调，可指定组件名使日志来源显示为该组件 |
+| `_make_component_progress_callback(name)` | 创建组件专用进度回调，日志来源显示为组件名而非 pipeline.executor |
 
 ### 5.2 Scheduler（调度器）
 
@@ -397,14 +399,14 @@ class DownloadError(PipelineError):
 
 class ASRError(PipelineError):
     """ASR 阶段异常"""
-    def __init__(self, message, sub_phase=None, original_error=None):
-        self.sub_phase = sub_phase  # SubPhase.WHISPER / SubPhase.SPLIT
+    def __init__(self, message, original_error=None):
+        self.original_error = original_error
         ...
 
 class TranslateError(PipelineError):
     """翻译阶段异常"""
-    def __init__(self, message, sub_phase=None, original_error=None):
-        self.sub_phase = sub_phase  # SubPhase.OPTIMIZE / SubPhase.TRANSLATE_LLM
+    def __init__(self, message, original_error=None):
+        self.original_error = original_error
         ...
 
 class EmbedError(PipelineError):

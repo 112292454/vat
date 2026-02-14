@@ -1167,6 +1167,161 @@ class TestDeadCodeRemoval:
         assert not hasattr(services, 'WebTaskStatus')
 
 
+# ==================== 组件进度回调来源测试 ====================
+
+class TestComponentProgressCallback:
+    """测试 _make_component_progress_callback 日志来源正确性"""
+    
+    def _make_mock_vp(self):
+        """创建最小化的 mock VideoProcessor（绕过 __init__）"""
+        import logging
+        from vat.pipeline.executor import VideoProcessor
+        
+        vp = object.__new__(VideoProcessor)
+        vp.logger = logging.getLogger("pipeline.executor")
+        
+        def default_cb(message):
+            vp.logger.info(message)
+        vp._default_progress_callback = default_cb
+        vp.progress_callback = default_cb
+        return vp
+    
+    def test_default_callback_uses_component_logger(self):
+        """默认回调时，wrapper 应使用组件 logger 而非 pipeline.executor logger"""
+        import logging
+        from unittest.mock import patch
+        
+        vp = self._make_mock_vp()
+        cb = vp._make_component_progress_callback("subtitle_translator")
+        
+        # 验证：调用 cb 时使用的是 subtitle_translator logger，而非 pipeline.executor
+        with patch.object(logging.getLogger("subtitle_translator"), 'info') as mock_info:
+            cb("翻译进度: 1/10 批次完成")
+            mock_info.assert_called_once_with("翻译进度: 1/10 批次完成")
+    
+    def test_default_callback_does_not_call_original(self):
+        """默认回调时，wrapper 不应调用原始的默认回调（避免重复输出）"""
+        import logging
+        from vat.pipeline.executor import VideoProcessor
+        
+        vp = object.__new__(VideoProcessor)
+        vp.logger = logging.getLogger("pipeline.executor")
+        
+        call_log = []
+        def default_cb(message):
+            call_log.append(message)
+        vp._default_progress_callback = default_cb
+        vp.progress_callback = default_cb
+        
+        cb = vp._make_component_progress_callback("subtitle_translator")
+        cb("test message")
+        
+        # 默认回调不应被调用（wrapper 替代了它）
+        assert len(call_log) == 0, "默认回调不应被直接调用，wrapper 应使用组件 logger 替代"
+    
+    def test_external_callback_passthrough(self):
+        """外部回调时，wrapper 应直接透传消息给外部回调"""
+        import logging
+        from vat.pipeline.executor import VideoProcessor
+        
+        vp = object.__new__(VideoProcessor)
+        vp.logger = logging.getLogger("pipeline.executor")
+        
+        # 模拟外部回调（如 web SSE）
+        received = []
+        def external_cb(message):
+            received.append(message)
+        
+        # 默认回调是另一个函数
+        def default_cb(message):
+            vp.logger.info(message)
+        vp._default_progress_callback = default_cb
+        vp.progress_callback = external_cb  # 外部回调（与 default 不同对象）
+        
+        cb = vp._make_component_progress_callback("subtitle_translator")
+        cb("优化进度: 3/5 批次完成")
+        
+        assert received == ["优化进度: 3/5 批次完成"]
+    
+    def test_different_component_names(self):
+        """不同组件名应创建不同的 logger"""
+        import logging
+        from unittest.mock import patch
+        
+        vp = self._make_mock_vp()
+        
+        # subtitle_translator
+        cb_translator = vp._make_component_progress_callback("subtitle_translator")
+        with patch.object(logging.getLogger("subtitle_translator"), 'info') as mock_t:
+            cb_translator("msg1")
+            mock_t.assert_called_once_with("msg1")
+        
+        # chunked_split
+        cb_split = vp._make_component_progress_callback("chunked_split")
+        with patch.object(logging.getLogger("chunked_split"), 'info') as mock_s:
+            cb_split("msg2")
+            mock_s.assert_called_once_with("msg2")
+    
+    def test_method_exists_on_video_processor(self):
+        """确认 _make_component_progress_callback 方法存在"""
+        import inspect
+        from vat.pipeline.executor import VideoProcessor
+        members = [m[0] for m in inspect.getmembers(VideoProcessor, predicate=inspect.isfunction)]
+        assert '_make_component_progress_callback' in members
+    
+    def test_progress_with_tracker_component_name(self):
+        """_progress_with_tracker 传入 component_name 时应使用组件 logger"""
+        import logging
+        from unittest.mock import patch, MagicMock
+        from vat.pipeline.executor import VideoProcessor
+        
+        vp = self._make_mock_vp()
+        vp._progress_tracker = None  # 无 tracker，走简单分支
+        
+        with patch.object(logging.getLogger("whisper_asr"), 'info') as mock_info:
+            vp._progress_with_tracker("已完成 1/4 块", component_name="whisper_asr")
+            mock_info.assert_called_once_with("已完成 1/4 块")
+    
+    def test_progress_with_tracker_no_component_uses_default(self):
+        """_progress_with_tracker 不传 component_name 时使用默认回调"""
+        import logging
+        from vat.pipeline.executor import VideoProcessor
+        
+        vp = object.__new__(VideoProcessor)
+        vp.logger = logging.getLogger("pipeline.executor")
+        vp._progress_tracker = None
+        
+        call_log = []
+        def default_cb(message):
+            call_log.append(message)
+        vp._default_progress_callback = default_cb
+        vp.progress_callback = default_cb
+        
+        vp._progress_with_tracker("步骤完成: whisper")
+        assert call_log == ["步骤完成: whisper"]
+    
+    def test_progress_with_tracker_external_cb_ignores_component_name(self):
+        """外部回调时，即使传了 component_name 也应透传给外部回调"""
+        import logging
+        from vat.pipeline.executor import VideoProcessor
+        
+        vp = object.__new__(VideoProcessor)
+        vp.logger = logging.getLogger("pipeline.executor")
+        vp._progress_tracker = None
+        
+        received = []
+        def external_cb(msg):
+            received.append(msg)
+        def default_cb(msg):
+            vp.logger.info(msg)
+        
+        vp._default_progress_callback = default_cb
+        vp.progress_callback = external_cb  # 外部回调
+        
+        vp._progress_with_tracker("合成: 50%", component_name="ffmpeg_wrapper")
+        assert received == ["合成: 50%"]
+
+
 # ==================== Scheduler 日志统一测试 ====================
 
 class TestSchedulerLogging:
@@ -1308,6 +1463,7 @@ if __name__ == "__main__":
         TestSpeakerGrouping,
         TestCreateVideoFromUrl,
         TestDeadCodeRemoval,
+        TestComponentProgressCallback,
         TestSchedulerLogging,
         TestProgressTracker,
     ]

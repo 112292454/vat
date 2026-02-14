@@ -2,96 +2,135 @@
 
 > **🇬🇧 [English Documentation](README.md)**
 
-一个端到端的视频翻译自动化系统。从 YouTube 下载视频，到语音识别、智能断句、LLM 翻译、字幕嵌入，直至上传 B 站，全流程自动完成。
+端到端的视频翻译自动化流水线。从 YouTube 下载到语音识别、智能断句、LLM 翻译、字幕嵌入，直至上传 B 站，全流程自动完成。
 
-<!-- TODO: 插入效果展示截图/GIF -->
-<!-- ![效果展示](docs/assets/demo.gif) -->
+支持**命令行（CLI）**和 **Web 管理界面**两种使用方式。CLI 是核心能力载体，WebUI 是增强管理层——类似 Clash 与其 Dashboard 的关系：所有处理能力完全不依赖 WebUI，WebUI 仅提供可视化操作的便利。
+
+<p align="center">
+  <img src="docs/assets/webui_index.png" alt="视频管理总览" width="80%">
+</p>
 
 ---
 
-## 它能做什么
+## 目录
 
-VAT 的核心流程是一条 **7 阶段流水线**：
+- [定位与特点](#定位与特点)
+- [处理流水线](#处理流水线)
+- [各阶段能力](#各阶段能力)
+- [快速开始](#快速开始)
+- [CLI 使用](#cli-使用)
+- [Web 管理界面](#web-管理界面)
+- [项目结构](#项目结构)
+- [配置进阶](#配置进阶)
+- [技术文档](#技术文档)
+- [致谢](#致谢)
+- [许可证](#许可证)
+
+---
+
+## 定位与特点
+
+VAT 的设计目标是**服务器端批量视频翻译**，而非面向单个视频的桌面工具。
+
+### 架构定位
+
+- **CLI 是核心**：所有处理能力通过 `vat` 命令行暴露，可脚本化、可集成到其他系统
+- **WebUI 是增强**：WebUI 通过调用 CLI 子进程执行任务，不引入额外依赖。即使 WebUI 不启动，系统能力不受任何影响；WebUI 提供的是视频信息浏览、批量选择、进度可视化等便利
+- **流水线可拆分**：7 个阶段独立可控，可以只跑其中几步、跳过已完成的、或强制重跑某一步。中断后从断点继续
+- **可集成**：pipeline 模块可以直接被其他 Python 项目导入使用，不绑定任何 UI 框架
+
+### 相对于单视频工具的差异
+
+- **批量管理**：支持 Playlist 级别的增量同步、按时间排序、批量处理，管理数千个视频
+- **阶段级追踪**：每个视频的每个处理阶段独立记录状态，支持断点续传和选择性重跑
+- **并发调度**：多 GPU 任务调度、多视频并行处理
+- **状态可恢复**：进程崩溃后自动检测孤儿任务，重启即可继续
+
+---
+
+## 处理流水线
 
 ```
 YouTube URL / 本地视频
     │
-    ├─ 1. Download ─── 下载视频 + 字幕 + 元数据 + 场景识别
-    ├─ 2. Whisper ──── faster-whisper 语音识别（支持分块并发）
-    ├─ 3. Split ────── LLM 智能断句（零碎片段→完整句子）
+    ├─ 1. Download ─── 下载视频 + 字幕 + 元数据 + 场景识别 + 视频信息翻译
+    ├─ 2. Whisper ──── faster-whisper 语音识别（支持分块并发、人声分离）
+    ├─ 3. Split ────── LLM 智能断句（零碎片段→完整句子，时间戳对齐）
     ├─ 4. Optimize ─── LLM 字幕优化（纠错、术语统一）
     ├─ 5. Translate ── LLM 反思翻译（初译→反思→重译）
     ├─ 6. Embed ────── 字幕嵌入视频（硬字幕 GPU 加速 / 软字幕）
-    └─ 7. Upload ───── 自动上传 B 站（标题模板、封面、合集）
+    └─ 7. Upload ───── 自动上传 B 站（标题模板、封面、分区推荐）
 ```
-
-每个阶段独立可控：可以只跑其中几步，跳过已完成的步骤，或强制重跑某一步。中断后从断点继续，不需要从头开始。
 
 ---
 
-## 主要能力
+## 各阶段能力
 
 ### 语音识别（ASR）
 
-- 基于 **faster-whisper**，支持 large-v3 等模型
+基于 [faster-whisper](https://github.com/guillaumekln/faster-whisper)，在实际使用中对参数做了较广泛的测试（参见 [ASR 评估报告](docs/ASR_EVALUATION_REPORT.md)），采用了针对日语口语场景（VTuber 直播、游戏实况等）调优后的配置。
+
 - **分块并发**：长视频自动切分为多段并行转录，合并时处理重叠区域
 - 词级时间戳，为后续断句提供精确定位
-- ASR 后处理：幻觉检测（移除 "ご視聴ありがとう" 等）、重复清理、日语标点标准化
-- 可选人声分离（Mel-Band-Roformer），处理有背景音乐的视频
-
-<!-- TODO: 插入 ASR 转录结果截图 -->
-<!-- ![ASR 结果](docs/assets/asr_result.png) -->
+- **ASR 后处理**：幻觉检测（移除重复片段、无意义的固定短语等）、日语标点标准化。后处理实现参考了 [WhisperJAV](https://github.com/meizhong986/WhisperJAV.git) 项目
+- **人声分离**（可选，默认未启用）：基于 [Mel-Band-Roformer](https://github.com/KimberleyJensen/Mel-Band-Roformer-Vocal-Model) 模型，用于处理有背景音乐的视频
 
 ### 智能断句
 
-参考VideoCaptioner项目（见致谢）
+Whisper 输出的片段通常零碎且不完整。本阶段使用 LLM 将这些片段重组为符合人类阅读习惯的完整句子。
 
-Whisper 输出的片段通常是零碎的、不完整的。VAT 使用 LLM 将这些片段重组为符合人类阅读习惯的完整句子：
+断句的基本思路借鉴自 [VideoCaptioner](https://github.com/WEIFENG2333/VideoCaptioner) 项目，但在时间戳对齐算法上做了较大改动——原实现在长视频上容易出现时间漂移和句子时间不对齐的问题，当前版本在对齐精度上有明显改善。
 
 - 支持分块断句（长视频）和全文断句（短视频）
-- 可配置的句子长度约束（CJK/英文分别控制）
+- 可配置的句子长度约束（CJK / 英文分别控制）
 - 场景感知：不同类型的视频（游戏、闲聊、歌曲等）使用不同的断句策略
 
-### 字幕翻译
+### 字幕优化与翻译
 
-参考VideoCaptioner项目（见致谢）
+翻译引擎的核心实现来自 [VideoCaptioner](https://github.com/WEIFENG2333/VideoCaptioner) 项目（其翻译引擎基于 [GalTransl](https://github.com/xd2333/GalTransl)），包括：
 
 - **反思翻译**（基于吴恩达方法论）：初译 → 反思 → 重译，显著提升翻译质量
-- **上下文管理**：批量处理时维护前文上下文，保持术语和风格一致
 - **字幕优化**：翻译前自动修正原文中的错别字、统一术语
 - **场景提示词**：根据视频类型（游戏、科普、闲聊等）自动加载专用提示词
 - **自定义提示词**：支持为特定频道或内容定制翻译/优化提示词
-- 兼容任何 OpenAI 格式的 API（包括本地部署的 Ollama 等）
 
-<!-- TODO: 插入翻译对比截图（原文 vs 译文） -->
-<!-- ![翻译对比](docs/assets/translation_comparison.png) -->
+VAT 在此基础上的改动：
+- **上下文关联处理**：批量翻译时支持分 chunk 顺序执行并维护前文上下文（而非纯并行），以保持术语和风格一致性
+- 兼容任何 OpenAI 格式的 API
+
+> **关于本地模型**：配置中支持填写本地 LLM 地址（如 Ollama），但目前未做专门适配和测试，实际效果未验证。
 
 ### 字幕嵌入
 
-- **硬字幕**：GPU 加速（H.264/H.265/AV1），支持 NVIDIA 硬件编码
+- **硬字幕**：GPU 加速（H.264/H.265/AV1），封装了 FFmpeg 的 NVIDIA 硬件编码调用
 - **软字幕**：快速封装，保持原画质
-- 内置 ASS 样式模板（默认、科普风、番剧风、竖屏等），支持自定义样式
-- 字幕根据视频分辨率自动缩放
+- 内置多套 ASS 字幕样式模板（默认、科普风、番剧风、竖屏等），并根据视频分辨率自动缩放
 
 ### 视频下载
 
-- 基于 yt-dlp，支持 YouTube 视频和播放列表
+基于 [yt-dlp](https://github.com/yt-dlp/yt-dlp)：
+
+- 支持 YouTube 视频和播放列表
 - 自动下载人工字幕（检测到人工字幕时可跳过 ASR）
-- 场景自动识别（游戏、闲聊、歌曲、科普等）
-- 视频信息自动翻译（标题、简介、标签）
+- **Playlist 增量同步**：按时间顺序管理视频，支持后续只同步新增视频
+- LLM 场景自动识别（游戏、闲聊、歌曲、科普等）
+- LLM 视频信息自动翻译（标题、简介、标签）
 
 ### B 站上传
 
-- 基于 biliup 的自动上传
+基于 [biliup](https://github.com/biliup/biliup)：
+
 - 模板系统：标题/简介支持变量替换（频道名、翻译标题等）
-- 自动获取封面、推荐分区、生成标签
-- 支持添加到合集
+- 自动获取封面、生成标签
+- LLM 推荐 B 站分区
+- 支持添加到合集（⚠️ 已知问题：视频可以上传成功，但添加合集的功能目前不稳定）
 
 ### 调度与并发
 
 - 多 GPU 任务调度：自动分配视频到不同 GPU
 - 步骤级状态追踪：每个阶段独立记录状态，支持断点续传
 - 配置快照缓存：修改断句参数只重跑断句，不重跑 ASR
+- 多视频并行处理（可配置并发数）
 
 ---
 
@@ -100,9 +139,9 @@ Whisper 输出的片段通常是零碎的、不完整的。VAT 使用 LLM 将这
 ### 环境要求
 
 - Python 3.10+
-- CUDA GPU（推荐，ASR 和字幕嵌入需要）
+- CUDA GPU（推荐，ASR 和硬字幕嵌入需要）
 - ffmpeg（系统级安装）
-- LLM API（断句、翻译、优化需要）
+- LLM API（断句、翻译、优化需要；支持任何 OpenAI 格式 API）
 
 ### 安装
 
@@ -112,20 +151,16 @@ pip install -r requirements.txt
 pip install -e .
 ```
 
-**字体文件**（硬字幕渲染需要）：
+**字体文件**（仅硬字幕渲染需要，非必需）：
 
-字体未包含在仓库中（约 65MB）。将以下字体放入 `vat/resources/fonts/` 目录：
+将字体放入 `vat/resources/fonts/` 目录。大部分 Ubuntu 系统已自带 NotoSansCJK，通常无需手动安装。
 
 | 字体 | 用途 | 来源 |
 |------|------|------|
 | NotoSansCJKsc-VF.ttf | 默认中日韩字体 | [Google Fonts](https://fonts.google.com/noto/specimen/Noto+Sans+SC) |
-| LXGWWenKai-Regular.ttf | 番剧风格 | [LXGW WenKai](https://github.com/lxgw/LxgwWenKai) |
-| ZCOOLKuaiLe-Regular.ttf | 科普风格 | [Google Fonts](https://fonts.google.com/specimen/ZCOOL+KuaiLe) |
-| AlimamaFangYuanTiVF-Thin-2.ttf | 竖屏风格 | [Alimama Fonts](https://fonts.alibabagroup.com/) |
-
-如果不需要硬字幕或只使用默认样式，只需 NotoSansCJKsc-VF.ttf 即可。
-
-（事实上，大部分ubuntu系统上可以找到NotoSansCJKsc-VF.ttf，所以并不用安装，这里作为备用）
+| LXGWWenKai-Regular.ttf | 番剧风格（可选） | [LXGW WenKai](https://github.com/lxgw/LxgwWenKai) |
+| ZCOOLKuaiLe-Regular.ttf | 科普风格（可选） | [Google Fonts](https://fonts.google.com/specimen/ZCOOL+KuaiLe) |
+| AlimamaFangYuanTiVF-Thin-2.ttf | 竖屏风格（可选） | [Alimama Fonts](https://fonts.alibabagroup.com/) |
 
 ### 配置
 
@@ -140,7 +175,7 @@ vat init
 vim config/config.yaml
 ```
 
-配置文件中的关键项：
+关键配置项：
 
 | 配置项 | 说明 |
 |--------|------|
@@ -149,21 +184,21 @@ vim config/config.yaml
 | `storage.models_dir` | 模型文件目录 |
 | `asr.model` | Whisper 模型（推荐 `large-v3`） |
 | `asr.language` | 源语言（如 `ja`） |
+| `llm.api_key` | 全局 LLM API Key（支持 `${ENV_VAR}` 引用环境变量） |
+| `llm.base_url` | 全局 LLM API 地址 |
 | `translator.llm.model` | 翻译使用的 LLM 模型 |
 | `translator.llm.enable_reflect` | 是否启用反思翻译 |
-| `llm.api_key` | 全局 LLM API Key（支持 `${ENV_VAR}` 格式） |
-| `llm.base_url` | 全局 LLM API 地址 |
-| `asr.split.api_key/base_url` | 断句阶段可选覆写（留空继承全局） |
-| `translator.llm.api_key/base_url` | 翻译阶段可选覆写（留空继承全局） |
-| `translator.llm.optimize.*` | 优化阶段可选覆写 model/api_key/base_url/batch_size/thread_num（留空继承父级→全局） |
-| `proxy.http_proxy` | 代理设置 |
 
-完整配置说明参见 [`config/default.yaml`](config/default.yaml) 中的注释。
+各阶段（断句、翻译、优化）支持独立覆写 `api_key` / `base_url` / `model`，留空则继承全局配置。完整说明参见 [`config/default.yaml`](config/default.yaml) 中的注释。
 
-### 运行
+---
+
+## CLI 使用
+
+### 一键处理
 
 ```bash
-# 一键处理单个视频（下载→识别→翻译→嵌入）
+# 处理单个视频（全流程：下载→识别→断句→优化→翻译→嵌入）
 vat pipeline --url "https://www.youtube.com/watch?v=VIDEO_ID"
 
 # 处理播放列表
@@ -171,22 +206,62 @@ vat pipeline --playlist "https://www.youtube.com/playlist?list=PLAYLIST_ID"
 
 # 多 GPU 并行
 vat pipeline --url "URL" --gpus 0,1
+```
 
-# 分阶段执行
-vat process -v VIDEO_ID -s asr          # 只跑语音识别
-vat process -v VIDEO_ID -s translate    # 只跑翻译
-vat process -v VIDEO_ID -s embed        # 只跑字幕嵌入
+### 分阶段执行
 
-# 强制重跑
+```bash
+# 方式一：指定阶段列表（逗号分隔）
+vat process -v VIDEO_ID -s download,whisper,split
+
+# 方式二：指定单个阶段
+vat process -v VIDEO_ID -s translate
+
+# 方式三：使用快捷命令
+vat download -u URL              # 仅下载
+vat asr -v VIDEO_ID              # 仅语音识别
+vat translate -v VIDEO_ID        # 仅翻译
+vat embed -v VIDEO_ID            # 仅嵌入字幕
+
+# 强制重跑（忽略已完成状态）
 vat process -v VIDEO_ID -s translate -f
 
-# 查看状态
+# 指定 GPU
+vat process -v VIDEO_ID -s whisper -g cuda:1
+
+# 多视频并行
+vat process -v VID1 -v VID2 -v VID3 -s download,whisper -c 3
+```
+
+> **阶段跳跃**：如果指定了不连续的阶段（如 `whisper,embed`），系统会自动填充中间阶段并以"直通模式"执行（复制输入到输出），直通阶段标记为 `SKIPPED`。
+
+### Playlist 管理
+
+```bash
+# 同步播放列表
+vat playlist sync "https://www.youtube.com/playlist?list=PLAYLIST_ID"
+
+# 查看处理状态
 vat status
 ```
 
-### 输出文件
+### 命令速查
 
-处理完成后，输出目录结构：
+| 命令 | 说明 |
+|------|------|
+| `vat pipeline -u URL` | 完整流水线（下载到嵌入） |
+| `vat process -v ID -s STAGES` | 细粒度阶段控制 |
+| `vat download -u URL` | 仅下载 |
+| `vat asr -v ID` | 仅语音识别 |
+| `vat translate -v ID` | 仅翻译 |
+| `vat embed -v ID` | 仅嵌入字幕 |
+| `vat upload VIDEO_ID` | 上传到 B 站 |
+| `vat playlist sync URL` | 同步播放列表 |
+| `vat status` | 查看处理状态 |
+| `vat clean -v ID` | 清理中间产物 |
+| `vat bilibili login` | B 站登录获取 Cookie |
+
+### 输出文件
 
 ```
 data/videos/<VIDEO_ID>/
@@ -203,47 +278,54 @@ data/videos/<VIDEO_ID>/
 
 ## Web 管理界面
 
-VAT 提供基于 FastAPI 的 Web UI，用于查看视频状态、管理任务、编辑字幕文件。
+WebUI 是对 CLI 能力的可视化封装。所有任务通过子进程调用 CLI 执行，与 Web 服务器生命周期完全解耦——Web 服务重启不影响正在运行的任务。
 
 ```bash
-# 启动 WebUI
+# 启动
 vat web
-# 或
-python -m vat web --port 8080
+# 或指定端口
+python -m vat.web.app --port 8080
 ```
 
-<!-- TODO: 插入 WebUI 截图 -->
-<!-- ![WebUI 首页](docs/assets/webui_index.png) -->
-<!-- ![WebUI 视频详情](docs/assets/webui_detail.png) -->
-<!-- ![WebUI 任务管理](docs/assets/webui_tasks.png) -->
+### 视频管理
 
-功能包括：
-- 视频列表与状态总览（支持搜索、过滤）
-- 视频详情页（任务时间线、文件预览）
-- 在线创建和执行处理任务
-- 字幕文件在线查看与编辑
-- 播放列表管理与批量操作
-- B 站上传配置管理
+视频列表页提供全局总览：状态统计、搜索筛选（按标题/频道/状态/阶段/Playlist）、分页浏览。每个视频显示缩略图、来源、时长、7 阶段状态、进度、发布日期。
+
+<p align="center">
+  <img src="docs/assets/webui_index.png" alt="视频列表" width="90%">
+</p>
+
+视频详情页展示完整的处理时间线、翻译信息、相关文件（支持在线查看、编辑字幕、播放视频）。可直接点击执行某个阶段或强制重做。
+
+<p align="center">
+  <img src="docs/assets/webui_video_detail.png" alt="视频详情" width="90%">
+</p>
+
+### Playlist 管理
+
+支持添加 YouTube Playlist 并增量同步。视频按发布日期排序，支持批量处理、范围选择。每个 Playlist 可独立配置翻译/优化提示词和 B 站上传参数。
+
+<p align="center">
+  <img src="docs/assets/webui_playlists.png" alt="Playlist 列表" width="90%">
+</p>
+
+<p align="center">
+  <img src="docs/assets/webui_playlist_detail.png" alt="Playlist 详情" width="90%">
+</p>
+
+### 任务管理
+
+创建任务时可选择视频、执行阶段、GPU 设备、并发数。任务执行中提供实时日志（SSE 推送）和进度追踪。支持取消、重试、批量删除。
+
+<p align="center">
+  <img src="docs/assets/webui_tasks.png" alt="任务列表" width="90%">
+</p>
+
+<p align="center">
+  <img src="docs/assets/webui_task_new.png" alt="新建任务" width="90%">
+</p>
 
 详细操作说明参见 [WebUI 使用手册](docs/webui_manual.md)。
-
----
-
-## CLI 命令速查
-
-| 命令 | 说明 |
-|------|------|
-| `vat pipeline -u URL` | 完整流水线（下载到嵌入） |
-| `vat process -v ID -s STAGES` | 细粒度阶段控制 |
-| `vat download -u URL` | 仅下载 |
-| `vat asr -v ID` | 仅语音识别 |
-| `vat translate -v ID` | 仅翻译 |
-| `vat embed -v ID` | 仅嵌入字幕 |
-| `vat upload VIDEO_ID` | 上传到 B 站 |
-| `vat playlist sync URL` | 同步播放列表 |
-| `vat status` | 查看处理状态 |
-| `vat clean -v ID` | 清理中间产物 |
-| `vat bilibili login` | B 站登录获取 Cookie |
 
 ---
 
@@ -262,24 +344,24 @@ vat/
 ├── llm/                  # LLM 基础设施
 │   ├── client.py         #   统一 LLM 调用客户端
 │   ├── scene_identifier.py # 场景识别
-│   └── prompts/          #   提示词管理
+│   └── prompts/          #   提示词管理（内置 + 自定义）
 ├── embedder/             # 字幕嵌入模块
-│   └── ffmpeg_wrapper.py #   FFmpeg 封装（软/硬字幕）
-├── downloaders/          # 下载器
-├── uploaders/            # 上传器（B 站）
+│   └── ffmpeg_wrapper.py #   FFmpeg 封装（软/硬字幕 + GPU 加速）
+├── downloaders/          # 下载器（yt-dlp）
+├── uploaders/            # 上传器（B 站 biliup）
 ├── pipeline/             # 流水线编排
 │   ├── executor.py       #   VideoProcessor（阶段调度）
 │   ├── scheduler.py      #   多 GPU 调度器
-│   ├── progress.py       #   进度追踪
-│   └── exceptions.py     #   统一异常体系
+│   └── progress.py       #   进度追踪
 ├── web/                  # Web 管理界面
-│   ├── app.py            #   FastAPI 应用
-│   ├── deps.py           #   共享依赖
+│   ├── app.py            #   FastAPI 应用 + 页面路由
+│   ├── jobs.py           #   任务管理器（子进程调度）
 │   ├── routes/           #   API 路由
-│   └── templates/        #   页面模板
-├── cli/                  # CLI 命令
-├── database.py           # SQLite 数据层
-├── config.py             # 配置管理
+│   └── templates/        #   Jinja2 + TailwindCSS 页面模板
+├── cli/                  # CLI 命令（click）
+├── services/             # 业务逻辑层（Playlist 服务等）
+├── database.py           # SQLite 数据层（WAL 模式）
+├── config.py             # 配置管理（YAML + 环境变量）
 └── models.py             # 数据模型定义
 ```
 
@@ -289,7 +371,7 @@ vat/
 
 ### 自定义提示词
 
-在 `vat/llm/prompts/custom/` 下创建提示词文件，在配置中引用文件名即可：
+在 `vat/llm/prompts/custom/` 下创建提示词文件，在配置中引用文件名：
 
 ```yaml
 translator:
@@ -299,15 +381,15 @@ translator:
       custom_prompt: "my_channel"        # 优化提示词
 ```
 
-提示词编写指南参见 [提示词优化指南](docs/prompt_optimization_guide.md)。
+也可通过 WebUI 的 Prompts 管理页面创建和编辑。提示词编写指南参见 [提示词优化指南](docs/prompt_optimization_guide.md)。
 
 ### 场景识别
 
-VAT 会根据视频标题和简介自动识别场景类型（游戏、闲聊、歌曲、科普等），并加载对应的场景提示词。场景配置定义在 `vat/llm/scenes.yaml` 中。
+VAT 根据视频标题和简介自动识别场景类型（游戏、闲聊、歌曲、科普等），并加载对应的场景提示词。场景配置定义在 `vat/llm/scenes.yaml` 中。
 
 ### ASR 参数调优
 
-不同类型的视频可能需要不同的 ASR 参数。常见调优方向：
+不同类型的视频可能需要不同的 ASR 参数：
 
 - 游戏/直播：关闭 VAD，降低 `no_speech_threshold`
 - 纯人声（播客）：开启 VAD
@@ -326,12 +408,12 @@ VAT 会根据视频标题和简介自动识别场景类型（游戏、闲聊、�
 | 文档 | 内容 |
 |------|------|
 | [ASR 参数指南](docs/asr_parameters_guide.md) | Whisper 参数详解与调优建议 |
-| [ASR 评估报告](docs/ASR_EVALUATION_REPORT.md) | 不同参数组合的识别效果对比 |
+| [ASR 评估报告](docs/ASR_EVALUATION_REPORT.md) | 350 个 VTuber 视频的参数评估实验 |
 | [提示词优化指南](docs/prompt_optimization_guide.md) | 翻译/优化提示词的编写方法 |
 | [GPU 分配规范](docs/gpu_allocation_spec.md) | 多 GPU 调度策略 |
-| [WebUI 手册](docs/webui_manual.md) | Web 界面操作说明 |
+| [WebUI 手册](docs/webui_manual.md) | Web 界面功能详解与操作说明 |
 | [YouTube 字幕](docs/youtube_manual_subtitles.md) | YouTube 人工字幕检测与使用 |
-| [项目审查报告](docs/project_review.md) | 架构审查与重构记录 |
+| [字幕样式指南](docs/subtitle_style_guide.md) | ASS 字幕样式模板说明 |
 | [开发手册](README_USAGE.md) | 分阶段运行详解与开发参考 |
 
 ---
@@ -340,12 +422,13 @@ VAT 会根据视频标题和简介自动识别场景类型（游戏、闲聊、�
 
 本项目集成了以下开源项目的核心技术：
 
-- [VideoCaptioner](https://github.com/WEIFENG2333/VideoCaptioner) — 分块 ASR、智能断句、反思翻译、ASS 渲染的核心参考
+- [VideoCaptioner](https://github.com/WEIFENG2333/VideoCaptioner) — 分块 ASR、智能断句、反思翻译、ASS 渲染的核心参考。VAT 的断句和翻译模块在此基础上做了修改和扩展
 - [GalTransl](https://github.com/xd2333/GalTransl) — 翻译引擎
 - [faster-whisper](https://github.com/guillaumekln/faster-whisper) — 语音识别
 - [yt-dlp](https://github.com/yt-dlp/yt-dlp) — 视频下载
 - [biliup](https://github.com/biliup/biliup) — B 站上传
 - [Mel-Band-Roformer](https://github.com/KimberleyJensen/Mel-Band-Roformer-Vocal-Model) — 人声分离模型
+- [WhisperJAV](https://github.com/meizhong986/WhisperJAV.git) — ASR 后处理参考（幻觉检测、重复清理）
 
 详细致谢信息参见 [acknowledgement.md](acknowledgement.md)。
 

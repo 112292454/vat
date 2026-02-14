@@ -1,10 +1,11 @@
-# VAT 开发者与内部测试手册 (v0.3.0)
+# VAT 开发者与内部测试手册
 
-> **注意**：本文档面向开发者和深度用户，旨在提供最详尽的全流程运行指南、参数详解及验证方法。
+> **注意**：本文档面向开发者和深度用户，提供 CLI 分阶段运行指南、参数详解及验证方法。  
+> 如果你更偏好可视化操作，请参考 [WebUI 使用手册](docs/webui_manual.md)。
 
 ## 🏗️ 项目核心架构
 
-VAT (Video Hybrid Translator) 是一个集成了 **VideoCaptioner** 核心能力的高性能视频翻译流水线。
+VAT (Video Auto Translator) 是一个端到端的视频翻译自动化流水线，集成了 [VideoCaptioner](https://github.com/WEIFENG2333/VideoCaptioner) 等项目的核心能力。
 
 ### 核心能力集成
 - **语音识别 (ASR)**：

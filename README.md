@@ -2,10 +2,13 @@
 
 > **🇨🇳 [中文文档 / Chinese Documentation](README_CN.md)** — 完整的中文使用说明与功能介绍
 
-An end-to-end video translation automation system. Downloads videos from YouTube, performs speech recognition, intelligent sentence segmentation, LLM translation, subtitle embedding, and uploads to Bilibili — all fully automated.
+An end-to-end video translation automation pipeline. Downloads videos from YouTube, performs speech recognition, intelligent sentence segmentation, LLM translation, subtitle embedding, and uploads to Bilibili — all fully automated.
 
-<!-- TODO: Insert demo screenshot/GIF -->
-<!-- ![Demo](docs/assets/demo.gif) -->
+Supports both **CLI** and **Web UI**. The CLI is the core capability layer; the Web UI is an enhancement for visual management — similar to Clash vs its Dashboard.
+
+<p align="center">
+  <img src="docs/assets/webui_index.png" alt="Video Management Overview" width="80%">
+</p>
 
 ---
 
@@ -202,18 +205,20 @@ vat web
 python -m vat web --port 8080
 ```
 
-<!-- TODO: Insert WebUI screenshots -->
-<!-- ![WebUI Index](docs/assets/webui_index.png) -->
-<!-- ![WebUI Detail](docs/assets/webui_detail.png) -->
-<!-- ![WebUI Tasks](docs/assets/webui_tasks.png) -->
-
 Features include:
-- Video list with status overview (search, filter)
-- Video detail page (task timeline, file preview)
-- Online task creation and execution
-- Subtitle file viewing and editing
-- Playlist management and batch operations
+- Video list with status overview (search, filter, per-stage status)
+- Video detail page (task timeline, file preview, inline editing)
+- Online task creation and execution with real-time logs
+- Playlist management with incremental sync and batch operations
 - Bilibili upload configuration
+
+<p align="center">
+  <img src="docs/assets/webui_playlist_detail.png" alt="Playlist Detail" width="90%">
+</p>
+
+<p align="center">
+  <img src="docs/assets/webui_tasks.png" alt="Task Management" width="90%">
+</p>
 
 See [WebUI Manual](docs/webui_manual.md) for detailed instructions.
 
@@ -260,16 +265,16 @@ vat/
 ├── pipeline/             # Pipeline orchestration
 │   ├── executor.py       #   VideoProcessor (stage scheduling)
 │   ├── scheduler.py      #   Multi-GPU scheduler
-│   ├── progress.py       #   Progress tracking
-│   └── exceptions.py     #   Unified exception hierarchy
+│   └── progress.py       #   Progress tracking
 ├── web/                  # Web management UI
-│   ├── app.py            #   FastAPI application
-│   ├── deps.py           #   Shared dependencies
+│   ├── app.py            #   FastAPI app + page routes
+│   ├── jobs.py           #   Job manager (subprocess scheduling)
 │   ├── routes/           #   API routes
-│   └── templates/        #   Page templates
-├── cli/                  # CLI commands
-├── database.py           # SQLite data layer
-├── config.py             # Configuration management
+│   └── templates/        #   Jinja2 + TailwindCSS templates
+├── cli/                  # CLI commands (click)
+├── services/             # Business logic (Playlist service, etc.)
+├── database.py           # SQLite data layer (WAL mode)
+├── config.py             # Configuration management (YAML + env vars)
 └── models.py             # Data model definitions
 ```
 
@@ -321,7 +326,7 @@ See [GPU Allocation Spec](docs/gpu_allocation_spec.md) for multi-GPU task distri
 | [GPU Allocation Spec](docs/gpu_allocation_spec.md) | Multi-GPU scheduling strategy |
 | [WebUI Manual](docs/webui_manual.md) | Web UI operation guide |
 | [YouTube Subtitles](docs/youtube_manual_subtitles.md) | YouTube manual subtitle detection and usage |
-| [Project Review](docs/project_review.md) | Architecture review and refactoring log |
+| [Subtitle Style Guide](docs/subtitle_style_guide.md) | ASS subtitle style template guide |
 | [Developer Manual](README_USAGE.md) | Per-stage execution details and dev reference |
 
 ---

@@ -21,7 +21,7 @@ bilibili:
 
       📺 原视频: ${source_url}
 
-      📺 原始标题${original_title}
+      📺 原始标题: ${original_title}
 
       📅 原发布日期: ${original_date}
 

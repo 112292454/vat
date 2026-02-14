@@ -472,7 +472,8 @@ class ASRData:
             "[Script Info]\n"
             "ScriptType: v4.00+\n"
             f"PlayResX: {video_width}\n"
-            f"PlayResY: {video_height}\n\n"
+            f"PlayResY: {video_height}\n"
+            "WrapStyle: 1\n\n"
             f"{style_str}\n\n"
             "[Events]\n"
             "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
@@ -491,8 +492,11 @@ class ASRData:
         # → 碰撞时译文保持原位，原文被推开（因为 ASS 中先出现的事件有碰撞优先权）
         # _Base 样式与主样式的 Outline/Shadow 完全一致（保证碰撞 bounding box 相同），
         # 发光效果通过 \blur 内联标签实现（后处理特效，不影响碰撞检测布局）
-        dlg_base = "Dialogue: 0,{},{},{},,0,0,0,,{{\\blur3}}{}\n"  # Layer 0（发光底层）
-        dlg_main = "Dialogue: 1,{},{},{},,0,0,0,,{}\n"             # Layer 1（主文字层）
+        # 注意：两层都必须有相同结构的 override block，否则部分渲染器（VSFilter等）
+        # 在计算自动换行时会因 tag 解析差异导致两层换行位置不同。
+        # Main 层使用 \blur0（无模糊）保持 override block 结构对称。
+        dlg_base = "Dialogue: 0,{},{},{},,0,0,0,,{{\\blur4}}{}\n"  # Layer 0（发光底层）
+        dlg_main = "Dialogue: 1,{},{},{},,0,0,0,,{{\\blur0}}{}\n"  # Layer 1（主文字层，\blur0=无模糊）
         
         # 检测样式表中已有的 _Base 样式，用于决定 base 层使用哪个样式名
         # 如果 X_Base 不存在，base 层使用 X 本身（仍能保证碰撞检测对称）

@@ -38,6 +38,8 @@ class Database:
         """获取数据库连接的上下文管理器"""
         conn = sqlite3.connect(str(self.db_path))
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
         try:
             yield conn
             conn.commit()

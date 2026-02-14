@@ -112,16 +112,28 @@
 </div>
 
 <script>
+// 当前筛选状态
+let currentTaskFilter = '';
+
 // 状态筛选
 function filterTasks(status) {
+    currentTaskFilter = status;
+    // 保存到 URL hash，刷新后可恢复
+    window.location.hash = status ? `filter=${status}` : '';
     const table = document.getElementById('task-table');
     setActiveFilter(document.getElementById('task-status-filter'), status);
     filterTableRows(table, row => !status || row.dataset.filterStatus === status);
 }
 
-// 初始化表格排序
+// 初始化表格排序 + 恢复筛选状态
 document.addEventListener('DOMContentLoaded', () => {
     initSortableTable(document.getElementById('task-table'));
+    // 从 URL hash 恢复筛选
+    const hash = window.location.hash.replace('#', '');
+    const match = hash.match(/^filter=(.*)$/);
+    if (match && match[1]) {
+        filterTasks(match[1]);
+    }
 });
 
 // 选择相关
@@ -178,12 +190,40 @@ async function cancelTask(taskId) {
     }
 }
 
-// 自动刷新运行中的任务
-setInterval(() => {
-    const hasRunning = document.querySelector('[class*="bg-blue-100"]');
-    if (hasRunning) {
-        location.reload();
-    }
+// 自动刷新运行中的任务（增量更新，保留筛选和选中状态）
+setInterval(async () => {
+    const hasRunning = document.querySelector('tr[data-filter-status="running"]');
+    if (!hasRunning) return;
+    
+    try {
+        const resp = await fetch(window.location.pathname, {headers: {'Accept': 'text/html'}});
+        if (!resp.ok) return;
+        const html = await resp.text();
+        const parser = new DOMParser();
+        const doc = parser.parseFromString(html, 'text/html');
+        const newTbody = doc.querySelector('#task-list');
+        if (!newTbody) return;
+        
+        // 保存当前 checkbox 选中状态
+        const checkedIds = new Set();
+        document.querySelectorAll('.task-checkbox:checked').forEach(cb => checkedIds.add(cb.value));
+        
+        // 替换表格内容
+        document.getElementById('task-list').innerHTML = newTbody.innerHTML;
+        
+        // 恢复 checkbox 选中状态
+        checkedIds.forEach(id => {
+            const cb = document.querySelector(`.task-checkbox[value="${id}"]`);
+            if (cb) cb.checked = true;
+        });
+        updateSelectedCount();
+        
+        // 重新应用筛选
+        if (currentTaskFilter) {
+            const table = document.getElementById('task-table');
+            filterTableRows(table, row => row.dataset.filterStatus === currentTaskFilter);
+        }
+    } catch (e) { /* 静默失败 */ }
 }, 5000);
 </script>
 {% endblock %}

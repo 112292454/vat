@@ -223,16 +223,22 @@
     
     // 更新筛选按钮的激活状态
     function setActiveFilter(container, activeValue) {
+        // 收集所有可能的 active 样式类（用于 remove 时清理干净）
+        const allActiveClasses = new Set();
+        container.querySelectorAll('.filter-tag').forEach(tag => {
+            (tag.dataset.activeClass || '').split(/\s+/).filter(Boolean).forEach(c => allActiveClasses.add(c));
+        });
+
         container.querySelectorAll('.filter-tag').forEach(tag => {
             const isActive = tag.dataset.filterValue === activeValue;
             tag.classList.toggle('active', isActive);
-            // 样式切换
+            const activeClasses = (tag.dataset.activeClass || 'bg-gray-800 text-white').split(/\s+/).filter(Boolean);
             if (isActive) {
                 tag.classList.remove('bg-gray-200', 'text-gray-700');
-                tag.classList.add(tag.dataset.activeClass || 'bg-gray-800 text-white');
+                tag.classList.add(...activeClasses);
             } else {
                 tag.classList.add('bg-gray-200', 'text-gray-700');
-                tag.classList.remove('bg-gray-800', 'text-white', 'bg-green-600', 'bg-blue-600', 'bg-red-600', 'bg-yellow-600', 'bg-orange-600');
+                tag.classList.remove(...allActiveClasses);
             }
         });
     }

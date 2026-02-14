@@ -393,11 +393,13 @@ async def tasks_page(request: Request):
     log_dir = Path(config.storage.database_path).parent / "job_logs"
     job_manager = JobManager(config.storage.database_path, str(log_dir))
     
-    # 先更新所有 running 状态任务的实际状态
+    # 先更新所有 running 状态 job 的实际状态（含孤儿 task 清理）
     jobs = job_manager.list_jobs(limit=50)
     for j in jobs:
         if j.status == JobStatus.RUNNING:
             job_manager.update_job_status(j.job_id)
+    # 全局清理：修复任何不属于活跃 job 的 running task（如 CLI 崩溃残留）
+    job_manager.cleanup_all_orphaned_running_tasks()
     # 重新获取更新后的列表
     jobs = job_manager.list_jobs(limit=50)
     task_list = [j.to_dict() for j in jobs]

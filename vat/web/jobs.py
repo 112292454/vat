@@ -81,6 +81,8 @@ class JobManager:
     def _get_connection(self):
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
         return conn
     
     def _init_table(self):
@@ -316,7 +318,10 @@ class JobManager:
                     """, (progress, job_id))
             return
         
-        # 进程已结束，基于数据库中视频任务的实际状态判定 job 状态
+        # 进程已结束，先清理该 job 关联视频中残留的 running 状态 task
+        self._cleanup_orphaned_running_tasks(job)
+        
+        # 基于数据库中视频任务的实际状态判定 job 状态
         status, error, progress = self._determine_job_result(job)
         
         with self._get_connection() as conn:
@@ -326,6 +331,46 @@ class JobManager:
                 SET status = ?, error = ?, progress = ?, finished_at = ?
                 WHERE job_id = ?
             """, (status.value, error, progress, datetime.now(), job_id))
+    
+    def _cleanup_orphaned_running_tasks(self, job: WebJob):
+        """清理 job 关联视频中残留的 running 状态 task
+        
+        当 job 进程已结束但 tasks 表中仍有 running 状态记录时，
+        将这些记录标记为 failed（进程异常终止）。
+        """
+        video_ids = job.video_ids
+        requested_steps = job.steps
+        if not video_ids or not requested_steps:
+            return
+        
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                for vid in video_ids:
+                    placeholders = ','.join('?' * len(requested_steps))
+                    # 查找该视频在请求步骤中仍为 running 的最新 task 记录
+                    cursor.execute(f"""
+                        SELECT id, step FROM (
+                            SELECT id, step, status,
+                                   ROW_NUMBER() OVER (PARTITION BY step ORDER BY id DESC) as rn
+                            FROM tasks
+                            WHERE video_id = ? AND step IN ({placeholders})
+                        ) WHERE rn = 1 AND status = 'running'
+                    """, [vid] + requested_steps)
+                    
+                    orphaned = cursor.fetchall()
+                    for row in orphaned:
+                        cursor.execute("""
+                            UPDATE tasks SET status = 'failed', 
+                                   error_message = '进程异常终止（job 进程已退出）'
+                            WHERE id = ?
+                        """, (row['id'],))
+                        logger.warning(
+                            f"清理孤儿 task: video={vid} step={row['step']} "
+                            f"task_id={row['id']} (job={job.job_id})"
+                        )
+        except Exception as e:
+            logger.error(f"清理孤儿 running tasks 失败: {e}")
     
     def _determine_job_result(self, job: WebJob) -> tuple:
         """基于数据库中视频任务的实际状态判定 job 结果
@@ -417,6 +462,46 @@ class JobManager:
             error_msg = "\n".join(error_parts)
             return JobStatus.FAILED, error_msg, progress
 
+    def cleanup_all_orphaned_running_tasks(self):
+        """全局清理：将所有没有活跃 job 进程的 running tasks 标记为 failed
+        
+        适用于启动时或定期检查，清理因进程崩溃导致的孤儿 running 记录。
+        """
+        # 获取真正在运行的 job 的 video_ids
+        active_video_ids = set()
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM web_jobs WHERE status = 'running'")
+            for row in cursor.fetchall():
+                job = self._row_to_job(row)
+                # 检查进程是否真正存活
+                if job.pid:
+                    try:
+                        os.kill(job.pid, 0)
+                        active_video_ids.update(job.video_ids)
+                    except ProcessLookupError:
+                        pass  # 进程已死，不加入活跃集合
+        
+        # 查找所有 running 状态的 tasks
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT id, video_id, step FROM tasks WHERE status = 'running'
+            """)
+            orphaned = []
+            for row in cursor.fetchall():
+                if row['video_id'] not in active_video_ids:
+                    orphaned.append(row)
+            
+            if orphaned:
+                for row in orphaned:
+                    cursor.execute("""
+                        UPDATE tasks SET status = 'failed',
+                               error_message = '进程异常终止（清理孤儿记录）'
+                        WHERE id = ?
+                    """, (row['id'],))
+                logger.warning(f"全局清理: 修复 {len(orphaned)} 条孤儿 running task 记录")
+    
     def get_running_job_for_video(self, video_id: str) -> Optional[WebJob]:
         """查找正在处理指定视频的 running job（假设同一视频同时只有一个 running job）"""
         with self._get_connection() as conn:

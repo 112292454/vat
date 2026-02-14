@@ -170,10 +170,13 @@ class PlaylistService:
                         callback(f"[{index}/{total_videos}] 新增: {video.title[:50]}...")
         
         # 更新 Playlist 信息
+        # video_count 使用关联表实际数量，而非 yt-dlp 本次返回的 entries 数量
+        # （增量同步时 entries 只包含本次获取到的视频，不代表全量）
+        actual_video_count = len(self.db.get_playlist_video_ids(playlist_id))
         self.db.update_playlist(
             playlist_id,
             title=playlist_title,
-            video_count=total_videos,
+            video_count=actual_video_count,
             last_synced_at=datetime.now()
         )
         

@@ -504,8 +504,9 @@ class VideoProcessor:
                 if self._progress_tracker:
                     self._progress_tracker.report_event(ProgressEvent.DOWNLOAD_VIDEO_DONE, "视频下载完成")
                 
-                # 更新视频信息
-                metadata = result.get('metadata', {})
+                # 更新视频信息（merge，保留 playlist sync 阶段写入的字段如 thumbnail）
+                existing_metadata = self.video.metadata or {}
+                metadata = {**existing_metadata, **result.get('metadata', {})}
                 title = result.get('title', '')
                 
                 # 处理 YouTube 字幕（如果有）

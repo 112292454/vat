@@ -80,3 +80,43 @@ Reflect 不是多次 LLM 调用，而是单次调用中输出 3 个字段（init
 - **涉及文件**：`vat/resources/subtitle_style/default.txt`
 
 ---
+
+## 四、WebUI 与数据问题
+
+### Web-1: Playlist 视频数量显示不正确 ✅ 已修复
+
+- **现象**：Playlist 列表页的「视频数」列显示旧值（如 181），实际关联表中有 2948 条
+- **根因**：
+  1. `playlist_service.py` 同步时用 `len(entries)`（yt-dlp 本次返回数）更新 `video_count`，增量同步时该值只包含本次获取到的视频
+  2. `app.py` 展示时直接使用 `pl.video_count`（playlists 表中的陈旧字段）
+- **修复**：
+  1. 同步完成后用关联表实际 COUNT 更新 `video_count`
+  2. 展示时优先使用 `batch_get_playlist_progress` 返回的 `total`（来自关联表 COUNT）
+- **涉及文件**：`vat/services/playlist_service.py`、`vat/web/app.py`
+
+### Web-2: 视频缩略图丢失 ✅ 已修复
+
+- **现象**：部分视频（约 173 个）缩略图不显示，metadata 中 `thumbnail` key 缺失
+- **根因**：
+  1. `youtube.py` 的 `download()` 返回的 metadata 未包含 `thumbnail` 字段
+  2. `executor.py` 下载步骤用下载器返回的 metadata **整体替换**了原有 metadata，丢弃了 playlist sync 时写入的 `thumbnail`
+- **修复**：
+  1. 下载器返回的 metadata 中加入 `thumbnail: info.get('thumbnail', '')`
+  2. 执行器下载步骤改为 merge metadata（`{**existing, **new}`）而非 replace
+- **涉及文件**：`vat/downloaders/youtube.py`、`vat/pipeline/executor.py`
+
+### Web-3: Playlist 总览页加载慢 ✅ 已修复
+
+- **现象**：Playlist 列表页加载约 3.1 秒
+- **根因**：N+1 查询——为每个 Playlist 逐视频查询 task 状态计算进度
+- **修复**：实现 `batch_get_playlist_progress` 单次 SQL 批量计算所有 Playlist 进度，加载时间降至 0.09 秒
+- **涉及文件**：`vat/database.py`、`vat/web/app.py`
+
+### Web-4: Playlist 详情页加载慢 ✅ 已修复
+
+- **现象**：2948 个视频的 Playlist 详情页加载约 3 秒
+- **根因**：对全量视频查询详细进度（即使只显示当前页 100 条）
+- **修复**：仅对当前页视频查询详细进度，全量视频用轻量 SQL 判断 pending/unavailable 状态
+- **涉及文件**：`vat/web/app.py`
+
+---

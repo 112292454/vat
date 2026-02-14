@@ -273,12 +273,14 @@ async def playlists_page(request: Request):
     playlist_list = []
     for pl in playlists:
         progress = progress_map.get(pl.id, {'total': 0, 'completed': 0, 'failed': 0})
+        # 使用关联表实际数量（batch_get_playlist_progress 从 playlist_videos COUNT），
+        # 而非 playlists 表中可能过时的 video_count 字段
         total = progress.get('total', 0) or (pl.video_count or 0)
         playlist_list.append({
             "id": pl.id,
             "title": pl.title,
             "channel": pl.channel,
-            "video_count": pl.video_count or 0,
+            "video_count": total,
             "completed": progress.get('completed', 0),
             "failed": progress.get('failed', 0),
             "progress_percent": int(progress.get('completed', 0) / max(total, 1) * 100),

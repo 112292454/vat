@@ -197,6 +197,7 @@ class YouTubeDownloader(BaseDownloader):
                     'duration': duration,
                     'uploader': uploader,
                     'upload_date': upload_date,
+                    'thumbnail': info.get('thumbnail', ''),
                     'url': url,
                     'available_subtitles': available_subs,
                     'available_auto_subtitles': available_auto_subs,

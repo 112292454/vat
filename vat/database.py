@@ -407,11 +407,18 @@ class Database:
                         WHERE {
                             f"vs.completed_count >= {total_steps}" if status == 'completed' else
                             "vs.failed_count > 0" if status == 'failed' else
-                            "vs.running_count > 0" if status == 'running' else "1=1"
+                            "vs.running_count > 0" if status == 'running' else
+                            f"vs.completed_count < {total_steps} AND vs.failed_count = 0 AND vs.running_count = 0" if status == 'pending' else "1=1"
                         }
                     )
                 """
-                where_clauses.append(status_subquery)
+                if status == 'pending':
+                    # pending 还包括完全没有 task 记录的视频
+                    where_clauses.append(f"""
+                        ({status_subquery} OR v.id NOT IN (SELECT DISTINCT video_id FROM tasks))
+                    """)
+                else:
+                    where_clauses.append(status_subquery)
             
             # 阶段级过滤（AND 逻辑）
             if stage_filters:
@@ -1087,6 +1094,63 @@ class Database:
                 SET upload_order_index = ?
                 WHERE playlist_id = ? AND video_id = ?
             """, (upload_order_index, playlist_id, video_id))
+    
+    def batch_get_playlist_progress(self) -> Dict[str, Dict[str, Any]]:
+        """批量获取所有 playlist 的进度统计（单次 SQL，替代逐视频 N+1 查询）
+        
+        Returns:
+            {playlist_id: {'total': N, 'completed': N, 'failed': N, 'unavailable': N, 'pending': N}}
+        """
+        total_steps = len(DEFAULT_STAGE_SEQUENCE)
+        
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            
+            cursor.execute(f"""
+                WITH latest_tasks AS (
+                    SELECT video_id, step, status,
+                           ROW_NUMBER() OVER (PARTITION BY video_id, step ORDER BY id DESC) as rn
+                    FROM tasks
+                ),
+                video_task_summary AS (
+                    SELECT 
+                        video_id,
+                        SUM(CASE WHEN status IN ('completed', 'skipped') THEN 1 ELSE 0 END) as completed_steps,
+                        SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed_steps
+                    FROM latest_tasks
+                    WHERE rn = 1
+                    GROUP BY video_id
+                )
+                SELECT 
+                    pv.playlist_id,
+                    COUNT(*) as total,
+                    SUM(CASE WHEN JSON_EXTRACT(v.metadata, '$.unavailable') = 1 THEN 1 ELSE 0 END) as unavailable,
+                    SUM(CASE WHEN COALESCE(JSON_EXTRACT(v.metadata, '$.unavailable'), 0) != 1
+                                  AND COALESCE(vts.completed_steps, 0) >= {total_steps} THEN 1 ELSE 0 END) as completed,
+                    SUM(CASE WHEN COALESCE(JSON_EXTRACT(v.metadata, '$.unavailable'), 0) != 1
+                                  AND COALESCE(vts.failed_steps, 0) > 0 THEN 1 ELSE 0 END) as failed
+                FROM playlist_videos pv
+                JOIN videos v ON v.id = pv.video_id
+                LEFT JOIN video_task_summary vts ON vts.video_id = pv.video_id
+                GROUP BY pv.playlist_id
+            """)
+            
+            result = {}
+            for row in cursor.fetchall():
+                pid = row['playlist_id']
+                total = row['total'] or 0
+                unavailable = row['unavailable'] or 0
+                completed = row['completed'] or 0
+                failed = row['failed'] or 0
+                processable = total - unavailable
+                result[pid] = {
+                    'total': total,
+                    'completed': completed,
+                    'failed': failed,
+                    'unavailable': unavailable,
+                    'pending': processable - completed,
+                }
+            return result
     
     def _row_to_playlist(self, row: sqlite3.Row) -> Playlist:
         """将数据库行转换为 Playlist 对象"""

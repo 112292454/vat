@@ -147,6 +147,7 @@ async def index(
             "thumbnail": video.metadata.get("thumbnail") if video.metadata else None,
             "duration": video.metadata.get("duration") if video.metadata else None,
             "channel": video.metadata.get("channel") if video.metadata else None,
+            "upload_date": video.metadata.get("upload_date", "") if video.metadata else "",
             "created_at": video.created_at,
             "task_status": vp["task_status"],
             "progress": vp["progress"]
@@ -264,15 +265,15 @@ async def video_detail(request: Request, video_id: str, from_playlist: Optional[
 async def playlists_page(request: Request):
     """Playlist 列表页"""
     db = get_db()
-    from vat.services import PlaylistService
-    
-    playlist_service = PlaylistService(db)
     playlists = db.list_playlists()
     
-    # 添加进度信息
+    # 批量获取所有 playlist 的进度（单次 SQL，替代逐视频 N+1 查询）
+    progress_map = db.batch_get_playlist_progress()
+    
     playlist_list = []
     for pl in playlists:
-        progress = playlist_service.get_playlist_progress(pl.id)
+        progress = progress_map.get(pl.id, {'total': 0, 'completed': 0, 'failed': 0})
+        total = progress.get('total', 0) or (pl.video_count or 0)
         playlist_list.append({
             "id": pl.id,
             "title": pl.title,
@@ -280,7 +281,7 @@ async def playlists_page(request: Request):
             "video_count": pl.video_count or 0,
             "completed": progress.get('completed', 0),
             "failed": progress.get('failed', 0),
-            "progress_percent": int(progress.get('completed', 0) / max(progress.get('total', 1), 1) * 100),
+            "progress_percent": int(progress.get('completed', 0) / max(total, 1) * 100),
             "last_synced_at": pl.last_synced_at
         })
     
@@ -309,21 +310,41 @@ async def playlist_detail_page(
     
     # 获取全量视频列表（轻量：仅模型对象，不含进度）
     all_videos = playlist_service.get_playlist_videos(playlist_id)
-    progress = playlist_service.get_playlist_progress(playlist_id)
+    
+    # 进度统计（单次批量 SQL，替代逐视频 N+1 查询）
+    progress_map_all = db.batch_get_playlist_progress()
+    progress = progress_map_all.get(playlist_id, {
+        'total': len(all_videos), 'completed': 0, 'failed': 0, 'unavailable': 0, 'pending': len(all_videos)
+    })
     
     # 全量 ID 列表（供 JS 批量操作使用）
     all_video_ids = [v.id for v in all_videos]
     
-    # 全量进度查询（单次SQL，供分页渲染 + JS 范围选择共用）
-    all_progress_map = db.batch_get_video_progress(all_video_ids) if all_video_ids else {}
-    
     # 构建全量视频基础数据（供 JS 范围选择使用，仅含 id/pending/unavailable）
+    # 用轻量 SQL 查询已完成的 video_id 集合，避免对 2900+ 视频全量查进度
+    completed_video_ids = set()
+    if all_video_ids:
+        total_steps = len(DEFAULT_STAGE_SEQUENCE)
+        with db.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(f"""
+                SELECT video_id, 
+                       SUM(CASE WHEN status IN ('completed', 'skipped') THEN 1 ELSE 0 END) as done
+                FROM (
+                    SELECT video_id, step, status,
+                           ROW_NUMBER() OVER (PARTITION BY video_id, step ORDER BY id DESC) as rn
+                    FROM tasks
+                ) WHERE rn = 1
+                GROUP BY video_id
+                HAVING done >= {total_steps}
+            """)
+            completed_video_ids = {row['video_id'] for row in cursor.fetchall()}
+    
     all_video_data = []
     for v in all_videos:
-        vp = all_progress_map.get(v.id, {"completed": 0, "total": 7})
         metadata = v.metadata or {}
         unavailable = metadata.get("unavailable", False)
-        pending = (vp["total"] - vp["completed"]) > 0 and not unavailable
+        pending = v.id not in completed_video_ids and not unavailable
         all_video_data.append({"id": v.id, "pending": pending, "unavailable": unavailable})
     
     # 分页
@@ -333,9 +354,13 @@ async def playlist_detail_page(
     end = start + per_page
     page_videos = all_videos[start:end]
     
+    # 仅对当前页视频查询详细进度（而非全量 2900+）
+    page_video_ids = [v.id for v in page_videos]
+    page_progress_map = db.batch_get_video_progress(page_video_ids) if page_video_ids else {}
+    
     video_list = []
     for idx, v in enumerate(page_videos):
-        vp = all_progress_map.get(v.id, {"completed": 0, "total": 7, "progress": 0, "has_failed": False, "has_running": False})
+        vp = page_progress_map.get(v.id, {"completed": 0, "total": 7, "progress": 0, "has_failed": False, "has_running": False})
         pending_count = vp["total"] - vp["completed"]
         metadata = v.metadata or {}
         duration = metadata.get("duration", 0)

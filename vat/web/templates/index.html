@@ -110,7 +110,8 @@
                 <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase" data-sort="3" data-sort-type="number">时长</th>
                 <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">任务状态</th>
                 <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase" data-sort="5" data-sort-type="number">进度</th>
-                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase" data-sort="6" data-sort-type="date">创建时间</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase" data-sort="6" data-sort-type="date">发布日期</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase" data-sort="7" data-sort-type="date">创建时间</th>
             </tr>
         </thead>
         <tbody class="divide-y divide-gray-200">
@@ -178,13 +179,18 @@
                         <span class="text-xs text-gray-600">{{ video.progress }}%</span>
                     </div>
                 </td>
+                <td class="px-4 py-3 text-sm text-gray-600" data-sort-value="{{ video.upload_date or '' }}">
+                    {% if video.upload_date %}
+                    {{ video.upload_date[:4] }}-{{ video.upload_date[4:6] }}-{{ video.upload_date[6:8] }}
+                    {% else %}-{% endif %}
+                </td>
                 <td class="px-4 py-3 text-sm text-gray-600" data-sort-value="{{ video.created_at }}">
                     {{ video.created_at | format_datetime }}
                 </td>
             </tr>
             {% else %}
             <tr>
-                <td colspan="6" class="px-4 py-8 text-center text-gray-500">
+                <td colspan="8" class="px-4 py-8 text-center text-gray-500">
                     暂无视频
                 </td>
             </tr>

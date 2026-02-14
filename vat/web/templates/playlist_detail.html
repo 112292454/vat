@@ -36,24 +36,24 @@
             </div>
         </div>
         
-        <!-- 进度统计 -->
+        <!-- 进度统计（可点击跳转首页筛选） -->
         <div class="grid grid-cols-5 gap-3 mb-4">
-            <div class="text-center p-3 bg-gray-50 rounded-lg">
+            <a href="/?playlist_id={{ playlist.id }}" class="text-center p-3 bg-gray-50 rounded-lg hover:bg-gray-100 transition">
                 <div class="text-2xl font-bold text-gray-800">{{ progress.total }}</div>
                 <div class="text-sm text-gray-500">总视频</div>
-            </div>
-            <div class="text-center p-3 bg-green-50 rounded-lg">
+            </a>
+            <a href="/?playlist_id={{ playlist.id }}&status=completed" class="text-center p-3 bg-green-50 rounded-lg hover:bg-green-100 transition">
                 <div class="text-2xl font-bold text-green-600">{{ progress.completed }}</div>
                 <div class="text-sm text-gray-500">已完成</div>
-            </div>
-            <div class="text-center p-3 bg-yellow-50 rounded-lg">
+            </a>
+            <a href="/?playlist_id={{ playlist.id }}&status=pending" class="text-center p-3 bg-yellow-50 rounded-lg hover:bg-yellow-100 transition">
                 <div class="text-2xl font-bold text-yellow-600">{{ progress.pending }}</div>
                 <div class="text-sm text-gray-500">待处理</div>
-            </div>
-            <div class="text-center p-3 bg-red-50 rounded-lg">
+            </a>
+            <a href="/?playlist_id={{ playlist.id }}&status=failed" class="text-center p-3 bg-red-50 rounded-lg hover:bg-red-100 transition">
                 <div class="text-2xl font-bold text-red-600">{{ progress.failed }}</div>
                 <div class="text-sm text-gray-500">失败</div>
-            </div>
+            </a>
             <div class="text-center p-3 bg-purple-50 rounded-lg">
                 <div class="text-2xl font-bold text-purple-600">{{ progress.unavailable|default(0, true) }}</div>
                 <div class="text-sm text-gray-500">不可用</div>

@@ -125,7 +125,7 @@ pip install -e .
 
 如果不需要硬字幕或只使用默认样式，只需 NotoSansCJKsc-VF.ttf 即可。
 
-（事实上，大部分ubuntu系统上可以找到NotoSansCJKsc-VF.ttf）
+（事实上，大部分ubuntu系统上可以找到NotoSansCJKsc-VF.ttf，所以并不用安装，这里作为备用）
 
 ### 配置
 

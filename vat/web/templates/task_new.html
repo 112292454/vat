@@ -270,7 +270,8 @@ async function submitTask(event) {
                 steps: steps,
                 gpu_device: gpuDevice,
                 force: force,
-                concurrency: concurrency
+                concurrency: concurrency,
+                playlist_id: document.querySelector('input[name="playlist_id"]')?.value || null
             })
         });
         

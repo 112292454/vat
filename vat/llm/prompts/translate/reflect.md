@@ -66,6 +66,7 @@ Hard requirements for the FINAL output (native_translation):
 
 2) Translate-first (default):
    - Always try to translate meaning into natural Chinese. Reasonable speculation and modifications can exist, such as "ショコラテ" clearly being 巧克力. And once it is presumed to be a substantive word rather than a proper noun,**only output translate result** Romanization should not be used.
+   - For the term specified in the <terminology_and_requirements> section, its katakana, hiragana, and kanji forms should be applicable at the same time (for example, if it requires the translation of るるど into Rurudo, then this rule also applies to ルルド)
    - NEVER romanize normal content words (verbs/adjectives/particles or conjugated forms).
      If the Japanese contains typical verb endings or particles, it MUST be translated, not romanized.
    - If a katakana token is attached to normal grammar (e.g., "Xで/を/に/が/は"),treat it as a content noun and translate it; do NOT output romaji.

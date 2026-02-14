@@ -162,7 +162,8 @@ class YouTubeDownloader(BaseDownloader):
             logger.info(f"开始下载视频: {title}")
             if download_subs and (available_subs or available_auto_subs):
                 logger.info(f"同时下载字幕 - 手动: {available_subs[:5]}, 自动: {available_auto_subs[:5]}...")
-            ydl.download([url])
+            # 注意：ignoreerrors=True 时 yt-dlp 不抛异常，返回非零码表示有错误
+            ret_code = ydl.download([url])
             
             # 查找下载的视频文件
             video_path = None
@@ -173,7 +174,17 @@ class YouTubeDownloader(BaseDownloader):
                     break
             
             if video_path is None:
-                raise FileNotFoundError(f"下载完成但找不到视频文件: {video_id} 在 {output_dir}")
+                # 区分：yt-dlp 报告了错误（网络/限流等）vs 文件格式不匹配
+                if ret_code != 0:
+                    raise RuntimeError(
+                        f"视频下载失败（yt-dlp 返回码 {ret_code}），"
+                        f"可能原因：网络连接被重置、YouTube 限流、代理问题。"
+                        f"视频: {video_id}"
+                    )
+                raise FileNotFoundError(
+                    f"yt-dlp 报告下载成功但找不到视频文件: {video_id} 在 {output_dir}，"
+                    f"可能是输出格式不匹配（当前查找: mp4/webm/mkv）"
+                )
             
             if video_path.stat().st_size == 0:
                 raise RuntimeError(f"下载的视频文件大小为0: {video_path}")

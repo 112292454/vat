@@ -603,16 +603,23 @@ def process(ctx, video_id, process_all, playlist, stages, gpu, force, dry_run, c
     video_ids = list(video_id)
     
     if playlist:
-        # 从 Playlist 获取视频
+        # 从 Playlist 获取信息
         playlist_service = PlaylistService(db)
         pl = playlist_service.get_playlist(playlist)
         if not pl:
             click.echo(f"错误: Playlist 不存在: {playlist}", err=True)
             return
         
-        pl_videos = playlist_service.get_playlist_videos(playlist)
-        video_ids.extend([v.id for v in pl_videos])
-        logger.info(f"Playlist '{pl.title}' 包含 {len(pl_videos)} 个视频")
+        # 应用 playlist 级别的 custom prompt 覆写（始终生效）
+        if pl.metadata:
+            config.apply_playlist_prompts(pl.metadata)
+        
+        # 仅在未显式指定 -v 时从 playlist 收集视频
+        # 当同时指定 -v 和 -p 时，-p 仅作为 prompt context
+        if not video_ids:
+            pl_videos = playlist_service.get_playlist_videos(playlist)
+            video_ids.extend([v.id for v in pl_videos])
+            logger.info(f"Playlist '{pl.title}' 包含 {len(pl_videos)} 个视频")
     
     if process_all:
         # 获取所有待处理的视频

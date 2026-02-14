@@ -102,11 +102,11 @@ asr:
   split:
     enable: true                            # 是否启用智能断句（将零碎文本重组为完整句子）
     mode: "sentence"                        # 断句模式：sentence（句子级）| semantic（语义级）
-    max_words_cjk: 48                       # 中文/日文每句最大字符数（硬性限制）
+    max_words_cjk: 40                       # 中文/日文每句最大字符数（硬性限制）
     max_words_english: 24                   # 英文每句最大单词数（硬性限制）
     min_words_cjk: 6                        # 中文/日文每句最小字符数（软性建议）
     min_words_english: 1                    # 英文每句最小单词数（软性建议）
-    recommend_words_cjk: 24                 # 中文/日文每句推荐字符数（软性建议，理想长度）
+    recommend_words_cjk: 20                 # 中文/日文每句推荐字符数（软性建议，理想长度）
     recommend_words_english: 10             # 英文每句推荐单词数（软性建议，理想长度）
     model: "gpt-4o-mini"                      # 断句使用的 LLM 模型（断句对模型要求低，用便宜模型即可）
     api_key: "${VAT_RESELLER_APIKEY}"         # 中转站 API Key
@@ -162,8 +162,8 @@ translator:
     # api_key: ""                             # 留空 = 使用全局 llm 配置（Google API）
     # base_url: ""                            # 留空 = 使用全局 llm 配置（Google API）
     enable_reflect: true                    # 反思翻译（启用后质量更高，但消耗更多 token）
-    batch_size: 20                          # 每批处理的字幕数量
-    thread_num: 5                           # 并发线程数
+    batch_size: 40                          # 每批处理的字幕数量
+    thread_num: 10                           # 并发线程数
     custom_prompt: "fubuki"                       # 自定义提示词文件名（相对于 vat/llm/prompts/custom/），如 "translate/example.md"，空字符串表示不使用
     enable_context: true                    # 是否启用前文上下文（新增）
     

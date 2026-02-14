@@ -976,6 +976,10 @@ class VideoProcessor:
         
         self._progress_with_tracker("开始智能断句")
         
+        if self.force:
+            disable_cache()
+            self.progress_callback("强制模式：已禁用断句缓存")
+        
         try:
             asr_data = ASRData.from_subtitle_file(str(raw_srt))
             
@@ -1042,6 +1046,7 @@ class VideoProcessor:
                             self.progress_callback("片段数较少，使用全文断句")
                         asr_data = self._split_with_speaker_awareness(asr_data, split_scene_prompt)
                     
+                    asr_data.dedup_adjacent_segments()
                     asr_data.optimize_timing()
                     asr_data.save(str(split_srt))
                     metadata.update_substep('split', split_config, "original_split.srt")
@@ -1053,9 +1058,14 @@ class VideoProcessor:
             self.asr.save_results_as_json(asr_data, original_json)
             metadata.save(self.output_dir)
             
+            if self.force:
+                enable_cache()
+            
             return True
             
         except Exception as e:
+            if self.force:
+                enable_cache()
             error_msg = f"智能断句失败: {e}"
             self.progress_callback(error_msg)
             self.logger.debug(traceback.format_exc())

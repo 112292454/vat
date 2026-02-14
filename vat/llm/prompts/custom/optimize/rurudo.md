@@ -40,12 +40,13 @@ Do NOT translate. Do NOT rewrite sentence structure. Prefer the smallest possibl
 - If ASR outputs near-miss variants (e.g., おっきモード / ちっちゃモード),
   correct ONLY when the intended phrase is obvious and use minimal edits.
 
-[RELATED PROPER NOUNS (only when clearly referenced)]
-- Hololive / talent mentions may appear in talk; do not "invent" them.
-  If the line explicitly contains the name, keep it consistent:
-  - 常闇トワ (Towa)
-- Guardrail:
-  Do NOT change a generic word into a person name unless there is strong adjacent evidence (e.g., "トワ", "ホロ", "新衣装", "配信", etc.).
+[COSTUME / PRODUCT NAMES (fixed proper nouns, do NOT alter)]
+- パステルお肉: costume name, keep as-is. Do NOT correct to food/meat related words.
+
+[OTHER PROPER NOUNS]
+- For any proper nouns (person names, game/anime titles, brand names, etc.) not listed above:
+  keep them as-is in Japanese if ASR output looks correct; only correct obvious ASR typos.
+- Do NOT change a generic word into a person name unless there is strong adjacent evidence.
 
 [GENERAL MINIMAL-EDIT STYLE]
 - Prefer 1–2 character fixes over rewriting.

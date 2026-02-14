@@ -10,6 +10,35 @@ from typing import Dict, Any, Optional, List, Union
 from dataclasses import dataclass, field, asdict
 
 
+logger = logging.getLogger("config")
+
+
+def _read_custom_prompt_file(prompt_type: str, name: str) -> str:
+    """读取 custom prompt 文件内容
+    
+    Args:
+        prompt_type: "optimize" 或 "translate"
+        name: 文件名（不含扩展名），如 "rurudo"
+        
+    Returns:
+        文件内容
+        
+    Raises:
+        FileNotFoundError: 文件不存在
+    """
+    prompts_dir = Path(__file__).parent / "llm" / "prompts" / "custom" / prompt_type
+    prompt_file = prompts_dir / (name + ".md")
+    
+    if not prompt_file.exists():
+        raise FileNotFoundError(
+            f"Custom prompt 文件不存在: {name}\n"
+            f"期望路径: {prompt_file}\n"
+            f"请将文件放置在 vat/llm/prompts/custom/{prompt_type}/ 目录下"
+        )
+    
+    return prompt_file.read_text(encoding="utf-8")
+
+
 def _resolve_env_var(value: Optional[str]) -> str:
     """Resolve ${VAR_NAME} environment variable placeholders.
     
@@ -252,30 +281,8 @@ class OptimizeConfig:
         self.api_key = _resolve_env_var(self.api_key) if self.api_key else ""
         self.base_url = _resolve_env_var(self.base_url) if self.base_url else ""
         
-        if not self.custom_prompt:
-            # 空字符串表示不使用自定义提示词
-            return
-        
-        # 获取 prompts/custom 目录的绝对路径
-        prompts_custom_dir = Path(__file__).parent / "llm" / "prompts" / "custom" / "optimize"
-        prompt_file = prompts_custom_dir / (self.custom_prompt + ".md")
-        
-        if not prompt_file.exists():
-            raise FileNotFoundError(
-                f"优化自定义提示词文件不存在: {self.custom_prompt}\n"
-                f"期望路径: {prompt_file}\n"
-                f"请将文件放置在 vat/llm/prompts/custom/optimize/ 目录下"
-            )
-        
-        # 读取文件内容并替换配置值
-        try:
-            self.custom_prompt = prompt_file.read_text(encoding="utf-8")
-        except Exception as e:
-            raise RuntimeError(
-                f"读取优化自定义提示词文件失败: {self.custom_prompt}\n"
-                f"文件路径: {prompt_file}\n"
-                f"错误: {e}"
-            )
+        if self.custom_prompt:
+            self.custom_prompt = _read_custom_prompt_file("optimize", self.custom_prompt)
 
 
 @dataclass
@@ -302,30 +309,8 @@ class LLMTranslatorConfig:
         self.api_key = _resolve_env_var(self.api_key) if self.api_key else ""
         self.base_url = _resolve_env_var(self.base_url) if self.base_url else ""
         
-        if not self.custom_prompt:
-            # 空字符串表示不使用自定义提示词
-            return
-        
-        # 获取 prompts/custom 目录的绝对路径
-        prompts_custom_dir = Path(__file__).parent / "llm" / "prompts" / "custom" / "translate"
-        prompt_file = prompts_custom_dir / (self.custom_prompt + ".md")   
-        
-        if not prompt_file.exists():
-            raise FileNotFoundError(
-                f"翻译自定义提示词文件不存在: {self.custom_prompt}\n"
-                f"期望路径: {prompt_file}\n"
-                f"请将文件放置在 vat/llm/prompts/custom/translate/ 目录下"  
-            )
-        
-        # 读取文件内容并替换配置值
-        try:
-            self.custom_prompt = prompt_file.read_text(encoding="utf-8")
-        except Exception as e:
-            raise RuntimeError(
-                f"读取翻译自定义提示词文件失败: {self.custom_prompt}\n"
-                f"文件路径: {prompt_file}\n"
-                f"错误: {e}"
-            )
+        if self.custom_prompt:
+            self.custom_prompt = _read_custom_prompt_file("translate", self.custom_prompt)
 
 
 @dataclass
@@ -812,6 +797,31 @@ class Config:
             "batch_size": opt.batch_size if opt.batch_size > 0 else parent.batch_size,
             "thread_num": opt.thread_num if opt.thread_num > 0 else parent.thread_num,
         }
+
+
+    def apply_playlist_prompts(self, playlist_metadata: dict) -> None:
+        """应用 playlist 级别的 custom prompt 覆写
+        
+        从 playlist metadata 读取 prompt 文件名，解析为文件内容后覆写 config 中对应的属性。
+        优先级：playlist prompt > config 文件中的 prompt
+        
+        Args:
+            playlist_metadata: playlist 的 metadata 字典，可能包含:
+                - custom_prompt_optimize: optimize prompt 文件名
+                - custom_prompt_translate: translate prompt 文件名
+        """
+        if not playlist_metadata:
+            return
+        
+        opt_name = playlist_metadata.get('custom_prompt_optimize', '')
+        if opt_name:
+            self.translator.llm.optimize.custom_prompt = _read_custom_prompt_file("optimize", opt_name)
+            logger.info(f"Playlist prompt 覆写 optimize: {opt_name}")
+        
+        trans_name = playlist_metadata.get('custom_prompt_translate', '')
+        if trans_name:
+            self.translator.llm.custom_prompt = _read_custom_prompt_file("translate", trans_name)
+            logger.info(f"Playlist prompt 覆写 translate: {trans_name}")
 
 
 def load_config(config_path: Optional[str] = None) -> Config:

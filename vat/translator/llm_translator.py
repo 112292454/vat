@@ -146,8 +146,8 @@ class LLMTranslator(BaseTranslator):
                 optimized_dict.update(chunk)  # 失败时保留原文
             
             msg = f"优化进度: {idx}/{total_chunks} 批次完成"
-            if idx % max(1, total_chunks // 10) == 0:
-                logger.info(msg)
+            # if idx % max(1, total_chunks // 10) == 0:
+            #     logger.info(msg)
             if self.progress_callback:
                 self.progress_callback(msg)
 
@@ -245,7 +245,100 @@ class LLMTranslator(BaseTranslator):
                 if step == self.MAX_STEPS - 1:
                     return last_result
         
+        # 反馈循环用尽仍未通过验证，尝试自动修复错位
+        if isinstance(last_result, dict) and set(last_result.keys()) == set(subtitle_chunk.keys()):
+            realigned = self._try_realign_shifted_keys(subtitle_chunk, last_result)
+            if realigned is not None:
+                return realigned
+        
         return last_result
+
+    @staticmethod
+    def _normalize_kana(text: str) -> str:
+        """片假名→平假名归一化（用于相似度比较）
+        
+        避免 ルルドライオン→るるどらいおん 这种合法的片假名→平假名规范化
+        被误判为"改动过大"。
+        """
+        # 片假名 U+30A1-U+30F6 → 平假名 U+3041-U+3096（偏移 0x60）
+        result = []
+        for ch in text:
+            cp = ord(ch)
+            if 0x30A1 <= cp <= 0x30F6:
+                result.append(chr(cp - 0x60))
+            else:
+                result.append(ch)
+        return ''.join(result)
+
+    @staticmethod
+    def _try_realign_shifted_keys(
+        original_chunk: Dict[str, str], optimized_chunk: Dict[str, str]
+    ) -> Optional[Dict[str, str]]:
+        """检测并修复 LLM 返回值系统性错位的问题
+        
+        当 LLM 在优化时将字幕内容整体移位（如 Opt[k]=Orig[k+2]），
+        尝试通过贪心匹配将每个 optimized value 对应回最相似的 original key。
+        
+        Returns:
+            修复后的 dict，如果无法修复则返回 None
+        """
+        keys = sorted(original_chunk.keys(), key=lambda k: int(k))
+        opt_values = [optimized_chunk[k] for k in keys]
+        orig_values = [original_chunk[k] for k in keys]
+        
+        # 检测有多少个 key 的值与原文不匹配但与其他 key 的原文高度匹配
+        shifted_count = 0
+        for i, opt_val in enumerate(opt_values):
+            orig_val = orig_values[i]
+            # 如果与自身原文相似度 >= 0.5，不算错位
+            self_sim = difflib.SequenceMatcher(None, orig_val, opt_val).ratio()
+            if self_sim >= 0.5:
+                continue
+            # 检查是否与其他 key 的原文高度匹配
+            for j, other_orig in enumerate(orig_values):
+                if i == j:
+                    continue
+                cross_sim = difflib.SequenceMatcher(None, other_orig, opt_val).ratio()
+                if cross_sim >= 0.8:
+                    shifted_count += 1
+                    break
+        
+        # 如果错位数量 >= 3，认为是系统性错位，尝试修复
+        if shifted_count < 3:
+            return None
+        
+        logger.warning(f"检测到优化结果系统性错位 ({shifted_count} 个 key)，尝试自动修复")
+        
+        # 贪心匹配：为每个 key 找最佳匹配的 optimized value
+        # 对于每个 original，找到与其最相似的 optimized value
+        used = set()
+        realigned = {}
+        
+        # 按原文与优化值的最佳匹配排序
+        matches = []
+        for i, key in enumerate(keys):
+            for j, opt_val in enumerate(opt_values):
+                sim = difflib.SequenceMatcher(None, orig_values[i], opt_val).ratio()
+                matches.append((sim, i, j))
+        
+        matches.sort(reverse=True)
+        used_orig = set()
+        used_opt = set()
+        
+        for sim, i, j in matches:
+            if i in used_orig or j in used_opt:
+                continue
+            used_orig.add(i)
+            used_opt.add(j)
+            realigned[keys[i]] = opt_values[j]
+        
+        # 未匹配的用原文填充
+        for i, key in enumerate(keys):
+            if key not in realigned:
+                realigned[key] = orig_values[i]
+        
+        logger.info(f"自动修复完成，重新对齐了 {shifted_count} 个错位的 key")
+        return realigned
 
     def _validate_optimization_result(
         self, original_chunk: Dict[str, str], optimized_chunk: Dict[str, str]
@@ -271,7 +364,7 @@ class LLMTranslator(BaseTranslator):
             )
             return False, error_msg
 
-        # 检查改动是否过大
+        # 检查改动是否过大（使用片假名→平假名归一化避免误判）
         excessive_changes = []
         for key in expected_keys:
             original_text = original_chunk[key]
@@ -280,7 +373,11 @@ class LLMTranslator(BaseTranslator):
             original_cleaned = re.sub(r"\s+", " ", original_text).strip()
             optimized_cleaned = re.sub(r"\s+", " ", optimized_text).strip()
 
-            matcher = difflib.SequenceMatcher(None, original_cleaned, optimized_cleaned)
+            # 先用归一化后的文本比较（片假名→平假名不算差异）
+            orig_normalized = self._normalize_kana(original_cleaned)
+            opt_normalized = self._normalize_kana(optimized_cleaned)
+            
+            matcher = difflib.SequenceMatcher(None, orig_normalized, opt_normalized)
             similarity = matcher.ratio()
             similarity_threshold = 0.3 if count_words(original_text) <= 10 else 0.5
 

@@ -208,8 +208,8 @@ class SilenceGap:
 
 def detect_silence_gaps(
     segments: List[Dict[str, Any]],
-    min_gap_ratio: float = 3.0,
-    beginning_threshold_sec: float = 10.0,
+    min_gap_ratio: float = 5.0,
+    beginning_threshold_sec: float = 120,
 ) -> List[SilenceGap]:
     """
     检测 ASR 输出中的异常静默间隙
@@ -301,7 +301,7 @@ def warn_silence_gaps(
         
         msg = f"异常静默: {gap.start:.1f}s - {gap.end:.1f}s ({gap.duration:.1f}s)"
         warnings.append(msg)
-        logger.warning(f"[ASR] {msg}")
+        # logger.warning(f"[ASR] {msg}")
     
     return warnings
 

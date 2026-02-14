@@ -457,12 +457,46 @@ class JapanesePostProcessor:
         return result
     
     def _clean_whitespace(self, text: str) -> str:
-        """清理多余空白"""
-        # 日语文本通常不需要空格分隔
-        # 但保留换行和必要的空格
-        result = re.sub(r'[ \t]+', ' ', text)  # 合并连续空格
-        result = result.strip()
-        return result
+        """清理多余空白
+        
+        日语文本不使用空格分词，ASR 有时会在每个词/字之间插入空格，
+        例如 "微熱 に なっ て き た ん だ けど"，这些空格是无意义的。
+        
+        策略：
+        - CJK 字符之间的空格：直接移除
+        - CJK 与 ASCII 之间的空格：移除（日语字幕中不需要）
+        - ASCII 单词之间的空格：保留（如 "CLIP STUDIO PAINT"）
+        """
+        if not text:
+            return text
+        
+        # 判断是否为 CJK 为主的文本
+        cjk_count = len(re.findall(r'[\u3000-\u9fff\uf900-\ufaff\uff00-\uffef]', text))
+        total_alpha = len(re.findall(r'\S', text))
+        
+        if total_alpha > 0 and cjk_count / total_alpha >= 0.3:
+            # CJK 为主的文本：移除 CJK 字符周围的空格
+            # 1. 移除两个 CJK/kana 字符之间的空格
+            result = re.sub(
+                r'(?<=[\u3000-\u9fff\uf900-\ufaff\uff00-\uffef])'
+                r'[\s]+'
+                r'(?=[\u3000-\u9fff\uf900-\ufaff\uff00-\uffef])',
+                '', text
+            )
+            # 2. 移除 CJK 与 ASCII 之间的空格
+            result = re.sub(
+                r'(?<=[\u3000-\u9fff\uf900-\ufaff\uff00-\uffef])[\s]+(?=[A-Za-z0-9])',
+                '', result
+            )
+            result = re.sub(
+                r'(?<=[A-Za-z0-9])[\s]+(?=[\u3000-\u9fff\uf900-\ufaff\uff00-\uffef])',
+                '', result
+            )
+        else:
+            # 非 CJK 文本：只合并连续空格
+            result = re.sub(r'[ \t]+', ' ', text)
+        
+        return result.strip()
     
     def is_aizuchi(self, text: str) -> bool:
         """检查是否为相槌"""

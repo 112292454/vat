@@ -9,6 +9,9 @@ from typing import List, Optional, Tuple
 from langdetect import LangDetectException, detect
 
 from ..utils.text_utils import is_mainly_cjk
+from ..utils.logger import setup_logger
+
+logger = setup_logger("asr_data")
 
 # 注意：不导入 SubtitleLayoutEnum，to_ass() 使用简化的布局逻辑
 # 默认行为：双语字幕，原文在上（小字），译文在下（大字）
@@ -223,6 +226,98 @@ class ASRData:
                 current_time = word_end_time
 
         self.segments = new_segments
+        return self
+
+    def strip_cjk_spaces(self) -> "ASRData":
+        """移除 CJK 文本中的无意义空格
+        
+        ASR (Whisper) 有时在日语文本中插入空格分隔每个词/字，
+        例如 "微熱 に なっ て き た ん だ けど"。
+        日语不使用空格分词，这些空格会导致下游断句产生碎片化。
+        
+        策略：
+        - CJK 字符之间的空格：直接移除
+        - CJK 与 ASCII 之间的空格：移除
+        - ASCII 单词之间的空格：保留（如 "CLIP STUDIO PAINT"）
+        
+        Returns:
+            Self for method chaining
+        """
+        # CJK 范围：CJK统一汉字 + 平假名 + 片假名 + 全角字符
+        _CJK = r'[\u3000-\u9fff\uf900-\ufaff\uff00-\uffef]'
+        
+        cleaned_count = 0
+        for seg in self.segments:
+            text = seg.text
+            if not text or ' ' not in text:
+                continue
+            
+            # 判断是否为 CJK 为主的文本（阈值 30%）
+            cjk_chars = len(re.findall(_CJK, text))
+            non_space = len(re.findall(r'\S', text))
+            if non_space == 0 or cjk_chars / non_space < 0.3:
+                continue
+            
+            # 1. 移除两个 CJK 字符之间的空格
+            new_text = re.sub(
+                rf'(?<={_CJK})[\s]+(?={_CJK})',
+                '', text
+            )
+            # 2. 移除 CJK 与 ASCII 之间的空格
+            new_text = re.sub(
+                rf'(?<={_CJK})[\s]+(?=[A-Za-z0-9])',
+                '', new_text
+            )
+            new_text = re.sub(
+                rf'(?<=[A-Za-z0-9])[\s]+(?={_CJK})',
+                '', new_text
+            )
+            
+            if new_text != text:
+                seg.text = new_text.strip()
+                cleaned_count += 1
+        
+        if cleaned_count > 0:
+            logger.info(f"strip_cjk_spaces: 清理了 {cleaned_count} 个片段中的无意义空格")
+        
+        return self
+
+    def dedup_adjacent_segments(self, max_gap_ms: int = 15000) -> "ASRData":
+        """移除相邻的重复字幕段
+        
+        Whisper 分块处理时，重叠窗口可能产生完全相同的相邻段。
+        检测条件：文本完全相同 + 时间间隔 <= max_gap_ms。
+        保留第一个出现的段，删除后续重复段。
+        
+        Args:
+            max_gap_ms: 最大时间间隔（毫秒），超过此间隔的相同文本视为有意重复
+            
+        Returns:
+            Self for method chaining
+        """
+        if len(self.segments) < 2:
+            return self
+        
+        kept = [self.segments[0]]
+        removed_count = 0
+        
+        for i in range(1, len(self.segments)):
+            prev = kept[-1]
+            curr = self.segments[i]
+            
+            # 文本相同 + 时间间隔在阈值内 → 重复段，跳过
+            gap = curr.start_time - prev.end_time
+            if curr.text.strip() == prev.text.strip() and gap <= max_gap_ms:
+                # 扩展前一段的结束时间以覆盖被删段的范围
+                prev.end_time = max(prev.end_time, curr.end_time)
+                removed_count += 1
+            else:
+                kept.append(curr)
+        
+        if removed_count > 0:
+            logger.info(f"dedup_adjacent_segments: 移除了 {removed_count} 个相邻重复段")
+            self.segments = kept
+        
         return self
 
     def remove_punctuation(self) -> "ASRData":

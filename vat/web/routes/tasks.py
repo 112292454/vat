@@ -38,6 +38,7 @@ class ExecuteRequest(BaseModel):
     gpu_device: str = "auto"  # "auto", "cuda:0", "cpu"
     force: bool = False
     concurrency: int = 1  # 并发处理的视频数量（默认1=串行）
+    playlist_id: Optional[str] = None  # playlist context（用于 custom prompt 覆写）
     
     # 可选：生成等价 CLI 命令
     generate_cli: bool = False
@@ -157,7 +158,8 @@ async def execute_task(
         steps=steps,
         gpu_device=request.gpu_device,
         force=request.force,
-        concurrency=request.concurrency
+        concurrency=request.concurrency,
+        playlist_id=request.playlist_id
     )
     
     # 生成等价 CLI 命令（可选）

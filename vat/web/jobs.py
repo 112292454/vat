@@ -114,7 +114,8 @@ class JobManager:
         steps: List[str],
         gpu_device: str = "auto",
         force: bool = False,
-        concurrency: int = 1
+        concurrency: int = 1,
+        playlist_id: Optional[str] = None
     ) -> str:
         """
         提交任务并立即启动子进程执行
@@ -146,7 +147,7 @@ class JobManager:
             ))
         
         # 启动子进程
-        self._start_job_process(job_id, video_ids, steps, gpu_device, force, log_file, concurrency)
+        self._start_job_process(job_id, video_ids, steps, gpu_device, force, log_file, concurrency, playlist_id)
         
         logger.info(f"任务已提交: {job_id}, 视频数: {len(video_ids)}, 步骤: {steps}")
         return job_id
@@ -159,7 +160,8 @@ class JobManager:
         gpu_device: str,
         force: bool,
         log_file: str,
-        concurrency: int = 1
+        concurrency: int = 1,
+        playlist_id: Optional[str] = None
     ):
         """启动子进程执行任务"""
         # 构建 CLI 命令
@@ -176,6 +178,9 @@ class JobManager:
         
         if force:
             cmd.append("-f")
+        
+        if playlist_id:
+            cmd.extend(["-p", playlist_id])
         
         if concurrency > 1:
             cmd.extend(["-c", str(concurrency)])

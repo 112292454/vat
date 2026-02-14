@@ -4,14 +4,14 @@
 负责翻译YouTube视频的标题、描述、标签，并智能判断B站分区
 """
 import json
-import logging
 from dataclasses import dataclass, field
 from typing import List, Optional, Dict, Any
 
 from .client import get_or_create_client
+from vat.utils.logger import setup_logger
 
 
-logger = logging.getLogger(__name__)
+logger = setup_logger("video_info_translator")
 
 
 @dataclass
@@ -160,7 +160,7 @@ TRANSLATE_VIDEO_INFO_PROMPT = '''将以下YouTube视频信息翻译为中文，�
 
 ### 标题翻译规则
 1. **只翻译标题内容本身**，**不要添加主播名前缀**（主播名会在后处理时自动添加，因此即便原标题内有主播名前缀，也不需要保留）
-2. **完整翻译**：标题中的日文/英文内容，如果有约定俗成的译名则优先使用（如Minecraft->我的世界）；对于无法确定含义的部分采用音译或原文，如果仍有疑虑则必须翻译 
+2. **完整翻译**：标题中的日文/英文内容，如果有约定俗成的译名则优先使用（如Minecraft->我的世界）；对于无法确定含义的部分采用音译或原文，如结果仍有疑虑则必须翻译 
 3. **示例**：
    - 原标题：「【白上フブキ】雑談配信！みんなとおしゃべり」
    - 翻译后：`杂谈直播！和大家聊聊天`（不需要加[白上吹雪]前缀）

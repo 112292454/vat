@@ -4,11 +4,12 @@
 支持 ${变量名} 格式的变量替换
 """
 import re
-import logging
 from typing import Dict, Any, Optional
 from datetime import datetime
 
-logger = logging.getLogger(__name__)
+from vat.utils.logger import setup_logger
+
+logger = setup_logger("uploader.template")
 
 
 class TemplateRenderer:

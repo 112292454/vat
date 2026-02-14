@@ -217,16 +217,13 @@ async def video_detail(request: Request, video_id: str, from_playlist: Optional[
             "error_message": task.error_message if task else None,
         })
     
-    # 查找正在处理该视频的活跃 job
+    # 查找正在处理该视频的活跃 job（复用与 get_job_manager 相同的路径）
     active_job_id = None
     try:
         from vat.web.jobs import JobManager
-        from vat.config import load_config
         config = load_config()
-        job_mgr = JobManager(
-            db_path=str(Path(config.storage.work_dir) / "web_jobs.db"),
-            log_dir=str(Path(config.storage.work_dir) / "logs" / "jobs"),
-        )
+        log_dir = Path(config.storage.database_path).parent / "job_logs"
+        job_mgr = JobManager(config.storage.database_path, str(log_dir))
         active_job = job_mgr.get_running_job_for_video(video_id)
         if active_job:
             active_job_id = active_job.job_id
@@ -236,7 +233,6 @@ async def video_detail(request: Request, video_id: str, from_playlist: Optional[
     # 获取相关文件列表
     files_list = []
     if video.output_dir:
-        from pathlib import Path
         output_path = Path(video.output_dir)
         if output_path.exists():
             for f in output_path.iterdir():

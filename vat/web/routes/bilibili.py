@@ -2,7 +2,6 @@
 B站设置相关路由
 """
 import json
-import logging
 from pathlib import Path
 from typing import Optional, Dict, Any
 
@@ -13,8 +12,9 @@ from fastapi.templating import Jinja2Templates
 from ...config import load_config
 from ...uploaders.bilibili import BilibiliUploader
 from ...uploaders.upload_config import get_upload_config_manager, UploadConfigManager
+from ...utils.logger import setup_logger
 
-logger = logging.getLogger(__name__)
+logger = setup_logger("web.bilibili")
 
 router = APIRouter(prefix="/bilibili", tags=["bilibili"])
 

@@ -12,12 +12,12 @@ from pathlib import Path
 from typing import Optional, Dict, Any, List
 from dataclasses import dataclass
 from datetime import datetime
-import logging
 from enum import Enum
 import json
 
 from ..embedder.ffmpeg_wrapper import FFmpegWrapper
 from ..database import SessionLocal, Video, ProcessingStatus
+from ..utils.logger import setup_logger
 
 
 class EmbedTaskStatus(str, Enum):
@@ -115,7 +115,7 @@ class AsyncEmbedderQueue:
             'total_processing_time': 0.0
         }
         
-        self.logger = logging.getLogger(__name__)
+        self.logger = setup_logger("async_embedder")
         self.ffmpeg = FFmpegWrapper()
     
     async def start(self):

@@ -1891,7 +1891,7 @@ def create_video_from_url(
     if existing:
         deleted = db.delete_tasks_for_video(video_id)
         if deleted > 0:
-            logging.getLogger("vat.pipeline").info(
+            setup_logger("pipeline.executor").info(
                 f"视频 {video_id} 已存在，已清理 {deleted} 条旧任务记录"
             )
     

@@ -4,12 +4,12 @@ B站上传器实现
 直接使用 biliup 库的 Web 端 API 上传（TV 端 API 已停用）
 """
 import json
-import logging
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 from dataclasses import dataclass
 
 from .base import BaseUploader
+from vat.utils.logger import setup_logger
 
 try:
     from biliup.plugins.bili_webup import BiliBili, Data
@@ -17,7 +17,7 @@ try:
 except ImportError:
     BILIUP_AVAILABLE = False
 
-logger = logging.getLogger(__name__)
+logger = setup_logger("uploader.bilibili")
 
 
 @dataclass

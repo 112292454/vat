@@ -17,7 +17,7 @@ from ..models import (
 from ..pipeline import create_video_from_url, VideoProcessor, schedule_videos
 from ..downloaders import YouTubeDownloader
 from ..services import PlaylistService
-from .logger import setup_logger
+from ..utils.logger import setup_logger
 
 
 # 全局配置
@@ -40,15 +40,10 @@ def get_config(config_path: Optional[str] = None) -> Config:
 
 
 def get_logger():
-    """获取日志器"""
+    """获取日志器（使用统一的 utils/logger 格式）"""
     global LOGGER
     if LOGGER is None:
-        config = get_config()
-        LOGGER = setup_logger(
-            level=config.logging.level,
-            log_file=config.logging.file,
-            log_format=config.logging.format
-        )
+        LOGGER = setup_logger("cli")
     return LOGGER
 
 
@@ -638,26 +633,24 @@ def process(ctx, video_id, process_all, playlist, stages, gpu, force, dry_run, c
     video_ids = list(dict.fromkeys(video_ids))
     
     # 显示执行计划
-    click.echo(f"\n执行计划:")
-    click.echo(f"  视频数量: {len(video_ids)}")
-    click.echo(f"  执行阶段: {', '.join(s.value for s in target_steps)}")
-    click.echo(f"  GPU 设备: {gpu}")
-    click.echo(f"  强制模式: {'是' if force else '否'}")
-    click.echo(f"  并发数量: {concurrency}")
+    plan_lines = [
+        f"执行计划: 视频={len(video_ids)}, "
+        f"阶段={','.join(s.value for s in target_steps)}, "
+        f"GPU={gpu}, force={'是' if force else '否'}, 并发={concurrency}"
+    ]
+    logger.info(plan_lines[0])
     
     if dry_run:
-        click.echo(f"\n[DRY-RUN] 以下视频将被处理:")
+        logger.info("[DRY-RUN] 以下视频将被处理:")
         for vid in video_ids[:10]:
             video = db.get_video(vid)
             title = video.title[:40] if video and video.title else vid
-            click.echo(f"  - {title}")
+            logger.info(f"  - {title}")
         if len(video_ids) > 10:
-            click.echo(f"  ... 还有 {len(video_ids) - 10} 个视频")
+            logger.info(f"  ... 还有 {len(video_ids) - 10} 个视频")
         
-        # 生成等价 CLI 命令
         cli_cmd = _generate_process_cli(video_ids, stages, gpu, force)
-        click.echo(f"\n等价 CLI 命令:")
-        click.echo(f"  {cli_cmd}")
+        logger.info(f"等价 CLI 命令: {cli_cmd}")
         return
     
     # 设置 GPU
@@ -684,7 +677,7 @@ def process(ctx, video_id, process_all, playlist, stages, gpu, force, dry_run, c
             return vid, False, "视频不存在"
         
         title = video.title[:30] if video.title else vid
-        click.echo(f"\n[{idx + 1}/{total}] 处理: {title}")
+        logger.info(f"[{idx + 1}/{total}] 开始处理: {title}")
         
         try:
             processor = VideoProcessor(
@@ -692,20 +685,18 @@ def process(ctx, video_id, process_all, playlist, stages, gpu, force, dry_run, c
                 config=config,
                 gpu_id=gpu_id,
                 force=force,
-                progress_callback=lambda msg, v=vid: click.echo(f"  [{v}] {msg}"),
                 video_index=idx,
                 total_videos=total
             )
             success = processor.process(steps=step_names)
             if success:
-                click.echo(f"  ✓ [{idx + 1}/{total}] 完成: {title}")
+                logger.info(f"[{idx + 1}/{total}] 完成: {title}")
                 return vid, True, None
             else:
-                click.echo(f"  ✗ [{idx + 1}/{total}] 失败: {title}")
+                logger.warning(f"[{idx + 1}/{total}] 失败: {title}")
                 return vid, False, "处理返回失败"
         except Exception as e:
-            logger.error(f"处理失败: {vid} - {e}")
-            click.echo(f"  ✗ [{idx + 1}/{total}] 失败: {title} - {e}")
+            logger.error(f"[{idx + 1}/{total}] 失败: {title} - {e}")
             return vid, False, str(e)
     
     def _run_batch(video_list):
@@ -734,21 +725,21 @@ def process(ctx, video_id, process_all, playlist, stages, gpu, force, dry_run, c
     
     # 执行处理（失败的视频放到队尾重试，最多重试2轮）
     max_retry_rounds = 2
-    click.echo(f"\n开始处理 {total} 个视频（并发: {concurrency}）...")
+    logger.info(f"开始处理 {total} 个视频（并发: {concurrency}）")
     
     failed_vids = _run_batch(list(enumerate(video_ids)))
     
     for retry_round in range(1, max_retry_rounds + 1):
         if not failed_vids:
             break
-        click.echo(f"\n--- 第 {retry_round} 轮重试: {len(failed_vids)} 个失败视频 ---")
+        logger.info(f"第 {retry_round} 轮重试: {len(failed_vids)} 个失败视频")
         retry_list = [(video_ids.index(vid), vid) for vid in failed_vids]
         failed_vids = _run_batch(retry_list)
     
     if failed_vids:
-        click.echo(f"\n处理完成，{len(failed_vids)} 个视频最终失败: {', '.join(failed_vids[:5])}")
+        logger.warning(f"处理完成，{len(failed_vids)} 个视频最终失败: {', '.join(failed_vids[:5])}")
     else:
-        click.echo(f"\n处理完成，全部成功")
+        logger.info("处理完成，全部成功")
 
 
 def _generate_process_cli(video_ids: List[str], stages: str, gpu: str, force: bool) -> str:

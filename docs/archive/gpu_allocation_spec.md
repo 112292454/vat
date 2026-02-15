@@ -117,9 +117,11 @@ def select_best_gpu(
 - **位置**: `vat/asr/whisper_wrapper.py::_resolve_device`
 - **状态**: 符合规范
 - **行为**:
-  - 尊重外部 `CUDA_VISIBLE_DEVICES` 设置
+  - 尊重外部 `CUDA_VISIBLE_DEVICES` 设置（如 scheduler 子进程）
   - `device="auto"` 时使用 `select_best_gpu()` 选择最优GPU
   - 最小显存要求: 8GB
+  - `_resolve_device` 不再设置 `CUDA_VISIBLE_DEVICES` 环境变量，避免多线程/多视频环境污染
+  - 模型加载通过 faster-whisper 的 `device_index` 参数指定目标 GPU
 
 ### 5.2 vocal_separation/separator.py ✓ (已修复)
 - **位置**: `vat/asr/vocal_separation/separator.py::_resolve_device`
@@ -131,6 +133,15 @@ def select_best_gpu(
 - **位置**: `vat/pipeline/scheduler.py::MultiGPUScheduler`
 - **状态**: 符合规范
 - **行为**: 预先分配GPU给子进程，通过 `CUDA_VISIBLE_DEVICES` 控制
+
+### 5.4 chunked_asr.py ✓ (已重构)
+- **位置**: `vat/asr/chunked_asr.py::_asr_chunks_multiprocess`
+- **原问题**: 使用 ProcessPoolExecutor + 轮询分配 GPU，不检查显存；多视频并发时同 GPU 叠加多个模型导致 OOM
+- **修复**: 重构为 per-GPU worker 模型
+  - 每个 GPU 一个持久 worker 进程，模型只加载一次
+  - 共享 Queue 天然负载均衡
+  - worker 加载模型前检查显存是否满足 `min_free_memory_mb`，不足时等待
+  - OOM 时 chunk 重回队列重试（最多 3 次），不丢失内容
 
 ---
 

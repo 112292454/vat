@@ -4,16 +4,22 @@
 使用装饰器模式实现关注点分离。
 
 多 GPU 支持：
-- 单 GPU：使用线程池（避免进程开销）
-- 多 GPU：使用进程池，每个 chunk 分配到不同 GPU
+- 单 GPU：使用线程池（共享模型，避免重复加载）
+- 多 GPU：per-GPU worker 进程模型
+  - 每个 GPU 一个持久 worker 进程，模型只加载一次
+  - 所有 chunk 放入共享队列，worker 自行取任务（天然负载均衡）
+  - worker 加载模型前检查显存是否满足 min_free_memory_mb
+  - OOM 时 chunk 重回队列重试，不丢失内容
 """
 
 import io
 import multiprocessing
 import os
+import queue
 import tempfile
 import threading
-from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable, List, Optional, Tuple, Dict, Any
 
 # CUDA 多进程必须使用 spawn 方法（fork 会导致死锁）
@@ -37,6 +43,13 @@ DEFAULT_CHUNK_LENGTH_SEC = 60 * 10  # 10分钟
 DEFAULT_CHUNK_OVERLAP_SEC = 10  # 10秒重叠
 DEFAULT_CHUNK_CONCURRENCY = 3  # 3个并发
 
+# 多 GPU worker 常量
+_MEMORY_CHECK_INTERVAL_SEC = 5   # 显存不足时的重试间隔（秒）
+_MEMORY_CHECK_MAX_WAIT_SEC = 300  # 显存等待最长时间（秒）
+_OOM_MAX_RETRIES = 3              # 单个 chunk OOM 最大重试次数
+_OOM_COOLDOWN_SEC = 10            # OOM 后冷却等待时间（秒）
+_WORKER_QUEUE_TIMEOUT_SEC = 2     # worker 从队列取任务的超时时间（秒）
+
 
 def _get_available_gpu_count() -> int:
     """获取可用 GPU 数量"""
@@ -48,65 +61,202 @@ def _get_available_gpu_count() -> int:
         return 0
 
 
-def _worker_transcribe_chunk(args: Dict[str, Any]) -> Dict[str, Any]:
+def _gpu_worker_loop(
+    gpu_id: int,
+    chunk_queue: multiprocessing.Queue,
+    result_queue: multiprocessing.Queue,
+    whisper_kwargs: Dict[str, Any],
+    language: str,
+    min_free_memory_mb: int,
+):
     """
-    子进程 worker 函数：转录单个音频块
+    Per-GPU 持久 worker 函数：在独立进程中运行
     
-    注意：此函数在独立进程中运行，需要重新加载模型。
+    每个 GPU 对应一个 worker 进程。worker 加载模型一次后循环处理 chunk。
+    - 加载模型前检查显存是否满足 min_free_memory_mb
+    - 显存不足时等待（有最大等待时间）
+    - OOM 时清理 CUDA cache，将 chunk 重回队列重试
+    - 收到 None 哨兵值时退出
     
     Args:
-        args: 包含所有需要的参数的字典
-            - chunk_idx: chunk 索引
-            - chunk_file: 临时音频文件路径
-            - gpu_id: 分配的 GPU ID（None 表示使用默认）
-            - whisper_kwargs: WhisperASR 初始化参数
-            - language: 语言
-            
-    Returns:
-        包含结果的字典：
-            - chunk_idx: chunk 索引
-            - segments: 转录结果片段列表
-            - error: 错误信息（如果有）
+        gpu_id: 物理 GPU 索引
+        chunk_queue: 共享 chunk 队列，元素为 (chunk_idx, chunk_file, retry_count) 或 None（哨兵）
+        result_queue: 结果队列，元素为 dict(chunk_idx, segments, error)
+        whisper_kwargs: WhisperASR 初始化参数
+        language: 转录语言
+        min_free_memory_mb: 加载模型所需的最低空闲显存 (MB)
     """
-    chunk_idx = args['chunk_idx']
-    chunk_file = args['chunk_file']
-    gpu_id = args['gpu_id']
-    whisper_kwargs = args['whisper_kwargs']
-    language = args['language']
+    # 设置 CUDA_VISIBLE_DEVICES：子进程隔离，不影响主进程
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
     
+    # 子进程中重新初始化 logger
+    from ..utils.logger import setup_logger as _setup_logger
+    worker_logger = _setup_logger(f"chunked_asr.gpu{gpu_id}")
+    worker_logger.info(f"Worker GPU {gpu_id} 启动")
+    
+    asr_model = None  # 延迟加载
+    
+    while True:
+        # 从共享队列取任务
+        try:
+            item = chunk_queue.get(timeout=_WORKER_QUEUE_TIMEOUT_SEC)
+        except queue.Empty:
+            continue
+        
+        # 哨兵值：退出
+        if item is None:
+            worker_logger.info(f"Worker GPU {gpu_id} 收到退出信号")
+            break
+        
+        chunk_idx, chunk_file, retry_count = item
+        worker_logger.info(
+            f"GPU {gpu_id} 开始处理 Chunk {chunk_idx}"
+            + (f" (重试 #{retry_count})" if retry_count > 0 else "")
+        )
+        
+        try:
+            # 延迟加载模型：首次处理 chunk 时加载
+            if asr_model is None:
+                asr_model = _load_model_with_memory_check(
+                    gpu_id, whisper_kwargs, min_free_memory_mb, worker_logger
+                )
+                if asr_model is None:
+                    # 等待超时仍无法加载，将 chunk 放回队列
+                    worker_logger.error(
+                        f"GPU {gpu_id} 显存等待超时，无法加载模型。"
+                        f"Chunk {chunk_idx} 放回队列"
+                    )
+                    chunk_queue.put((chunk_idx, chunk_file, retry_count))
+                    break  # 退出此 worker（显存长期不足，避免死循环）
+            
+            # 执行转录
+            asr_data = asr_model.asr_audio(chunk_file, language=language)
+            
+            # 序列化结果（ASRData 不能直接跨进程传递）
+            segments = [
+                {'text': seg.text, 'start_time': seg.start_time, 'end_time': seg.end_time}
+                for seg in asr_data.segments
+            ]
+            
+            result_queue.put({
+                'chunk_idx': chunk_idx,
+                'segments': segments,
+                'error': None,
+            })
+            
+        except RuntimeError as e:
+            error_msg = str(e).lower()
+            if 'out of memory' in error_msg or 'cuda' in error_msg and 'memory' in error_msg:
+                # OOM：清理 CUDA cache，卸载模型，chunk 重回队列
+                worker_logger.warning(
+                    f"GPU {gpu_id} Chunk {chunk_idx} OOM (重试 {retry_count}/{_OOM_MAX_RETRIES})"
+                )
+                _cleanup_cuda(asr_model, worker_logger)
+                asr_model = None  # 下次循环会重新加载
+                
+                if retry_count < _OOM_MAX_RETRIES:
+                    chunk_queue.put((chunk_idx, chunk_file, retry_count + 1))
+                    worker_logger.info(
+                        f"Chunk {chunk_idx} 已放回队列，等待 {_OOM_COOLDOWN_SEC}s 后继续"
+                    )
+                    time.sleep(_OOM_COOLDOWN_SEC)
+                else:
+                    worker_logger.error(
+                        f"Chunk {chunk_idx} 达到最大重试次数 {_OOM_MAX_RETRIES}，标记为失败"
+                    )
+                    result_queue.put({
+                        'chunk_idx': chunk_idx,
+                        'segments': [],
+                        'error': f"OOM after {_OOM_MAX_RETRIES} retries: {e}",
+                    })
+            else:
+                # 其他 RuntimeError
+                worker_logger.error(f"GPU {gpu_id} Chunk {chunk_idx} 转录失败: {e}")
+                result_queue.put({
+                    'chunk_idx': chunk_idx,
+                    'segments': [],
+                    'error': str(e),
+                })
+                
+        except Exception as e:
+            worker_logger.error(f"GPU {gpu_id} Chunk {chunk_idx} 转录异常: {e}")
+            result_queue.put({
+                'chunk_idx': chunk_idx,
+                'segments': [],
+                'error': str(e),
+            })
+    
+    # 退出前清理
+    _cleanup_cuda(asr_model, worker_logger)
+    worker_logger.info(f"Worker GPU {gpu_id} 已退出")
+
+
+def _load_model_with_memory_check(
+    gpu_id: int,
+    whisper_kwargs: Dict[str, Any],
+    min_free_memory_mb: int,
+    worker_logger,
+):
+    """
+    在加载模型前检查 GPU 显存，显存不足时等待。
+    
+    Args:
+        gpu_id: 物理 GPU 索引
+        whisper_kwargs: WhisperASR 初始化参数
+        min_free_memory_mb: 最低空闲显存要求
+        worker_logger: worker 专属 logger
+        
+    Returns:
+        加载成功的 WhisperASR 实例，或 None（等待超时）
+    """
+    from ..utils.gpu import check_gpu_free_memory
+    
+    waited = 0
+    while waited < _MEMORY_CHECK_MAX_WAIT_SEC:
+        if check_gpu_free_memory(gpu_id, min_free_memory_mb):
+            break
+        worker_logger.info(
+            f"GPU {gpu_id} 显存不足 {min_free_memory_mb}MB，"
+            f"等待 {_MEMORY_CHECK_INTERVAL_SEC}s... (已等待 {waited}s/{_MEMORY_CHECK_MAX_WAIT_SEC}s)"
+        )
+        time.sleep(_MEMORY_CHECK_INTERVAL_SEC)
+        waited += _MEMORY_CHECK_INTERVAL_SEC
+    else:
+        # while 正常结束（未 break）= 等待超时
+        return None
+    
+    # 显存满足，加载模型
+    worker_logger.info(f"GPU {gpu_id} 显存充足，开始加载模型")
+    from .whisper_wrapper import WhisperASR
+    asr = WhisperASR(**whisper_kwargs)
+    # 触发模型加载（_ensure_model_loaded 在 asr_audio 中调用，但这里提前加载以尽早发现问题）
+    asr._ensure_model_loaded()
+    worker_logger.info(f"GPU {gpu_id} 模型加载完成")
+    return asr
+
+
+def _cleanup_cuda(asr_model, worker_logger):
+    """
+    清理 CUDA 资源：删除模型引用并清空 CUDA cache
+    
+    Args:
+        asr_model: WhisperASR 实例（可为 None）
+        worker_logger: worker 专属 logger
+    """
     try:
-        # 设置 GPU 环境变量（在模型加载前）
-        if gpu_id is not None:
-            os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
-            logger.info(f"Chunk {chunk_idx}: 使用 GPU {gpu_id}")
+        if asr_model is not None:
+            # 清除模型引用
+            if hasattr(asr_model, 'model') and asr_model.model is not None:
+                del asr_model.model
+                asr_model.model = None
+            del asr_model
         
-        # 延迟导入，避免在主进程中加载模型
-        from .whisper_wrapper import WhisperASR
-        
-        # 创建 ASR 实例（会在此进程中加载模型）
-        asr = WhisperASR(**whisper_kwargs)
-        
-        # 执行转录
-        asr_data = asr.asr_audio(chunk_file, language=language)
-        
-        # 序列化结果（ASRData 不能直接跨进程传递）
-        segments = [
-            {'text': seg.text, 'start_time': seg.start_time, 'end_time': seg.end_time}
-            for seg in asr_data.segments
-        ]
-        
-        return {
-            'chunk_idx': chunk_idx,
-            'segments': segments,
-            'error': None
-        }
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            worker_logger.debug("CUDA cache 已清理")
     except Exception as e:
-        logger.error(f"Chunk {chunk_idx} 转录失败: {e}")
-        return {
-            'chunk_idx': chunk_idx,
-            'segments': [],
-            'error': str(e)
-        }
+        worker_logger.warning(f"CUDA 清理时出错: {e}")
 
 
 class ChunkedASR:
@@ -155,10 +305,6 @@ class ChunkedASR:
         self.chunk_overlap_ms = chunk_overlap * MS_PER_SECOND
         self.chunk_concurrency = chunk_concurrency
 
-        # 读取完整音频文件（用于分块）
-        with open(audio_path, "rb") as f:
-            self.file_binary = f.read()
-
     def run(self, callback: Optional[Callable[[int, str], None]] = None) -> ASRData:
         """执行分块转录
 
@@ -195,11 +341,9 @@ class ChunkedASR:
             List[(chunk_bytes, offset_ms), ...]
             每个元素包含音频块的字节数据和时间偏移（毫秒）
         """
-        # 从字节数据加载音频
-        if self.file_binary is None:
-            raise ValueError("file_binary is None, cannot split audio")
-
-        audio = AudioSegment.from_file(io.BytesIO(self.file_binary))
+        # 直接从文件路径加载音频（不使用 BytesIO）
+        # pydub 需要文件扩展名来正确识别格式，BytesIO 无扩展名会导致大 WAV 文件时长误判
+        audio = AudioSegment.from_file(self.audio_path)
         total_duration_ms = len(audio)
 
         logger.info(
@@ -274,11 +418,16 @@ class ChunkedASR:
     ) -> List[ASRData]:
         """使用多进程转录（多 GPU 场景）
         
-        每个 chunk 分配到不同的 GPU，轮询分配。
+        Per-GPU worker 模型：
+        - 每个 GPU 启动一个持久 worker 进程，模型只加载一次
+        - 所有 chunk 放入共享队列，worker 自行取任务（天然负载均衡）
+        - worker 加载模型前检查 GPU 空闲显存是否满足 min_free_memory_mb
+        - OOM 时 chunk 重回队列重试（最多 _OOM_MAX_RETRIES 次）
         """
         total_chunks = len(chunks)
         results: List[Optional[ASRData]] = [None] * total_chunks
         temp_files = []
+        workers: List[multiprocessing.Process] = []
         
         try:
             # 1. 将 chunk 写入临时文件（进程间通过文件传递）
@@ -290,75 +439,135 @@ class ChunkedASR:
                 temp_file.close()
                 temp_files.append(temp_file.name)
             
-            # 2. 准备 worker 参数
-            # 从 asr_kwargs 中提取 whisper 初始化参数
-            whisper_kwargs = self.asr_kwargs.get('whisper_asr', None)
-            if whisper_kwargs is None:
-                # 如果没有 whisper_asr 参数，尝试从 WhisperASRAdapter 的 kwargs 构建
-                # 这种情况下需要获取完整的 Whisper 配置
+            # 2. 准备 whisper 初始化参数
+            whisper_instance = self.asr_kwargs.get('whisper_asr', None)
+            if whisper_instance is None:
                 raise ValueError("多进程模式需要 whisper_asr 实例的配置参数")
             
-            # 获取 WhisperASR 的初始化参数（需要从实例重建）
-            whisper_instance = whisper_kwargs
             init_kwargs = self._extract_whisper_init_kwargs(whisper_instance)
             language = self.asr_kwargs.get('language', whisper_instance.language)
             
-            worker_args = []
-            for i, temp_file in enumerate(temp_files):
-                gpu_id = i % gpu_count  # 轮询分配 GPU
-                worker_args.append({
-                    'chunk_idx': i,
-                    'chunk_file': temp_file,
-                    'gpu_id': gpu_id,
-                    'whisper_kwargs': init_kwargs,
-                    'language': language,
-                })
+            # min_free_memory_mb: 使用 ASR 模型的显存要求（与 whisper_wrapper._resolve_device 一致）
+            # TODO: 应从 config.gpu.min_free_memory_mb 统一传入，而非硬编码
+            min_free_memory_mb = 8000
             
-            # 3. 使用进程池执行
-            # 限制并发数为 GPU 数量（每个 GPU 同时只跑一个任务）
-            max_workers = min(gpu_count, total_chunks)
+            # 3. 创建共享队列
+            ctx = multiprocessing.get_context('spawn')
+            chunk_queue = ctx.Queue()
+            result_queue = ctx.Queue()
+            
+            # 将所有 chunk 放入队列（retry_count=0）
+            for i, temp_file in enumerate(temp_files):
+                chunk_queue.put((i, temp_file, 0))
+            
+            # 4. 为每个 GPU 启动一个 worker 进程
+            active_gpu_count = min(gpu_count, total_chunks)
             
             if callback:
-                callback(0, f"开始多 GPU 并行转录 ({gpu_count} GPUs, {total_chunks} chunks)")
+                callback(0, f"开始多 GPU 并行转录 ({active_gpu_count} GPUs, {total_chunks} chunks)")
             
-            # 必须使用 spawn 上下文，否则 CUDA 会死锁（fork 与 CUDA 不兼容）
-            ctx = multiprocessing.get_context('spawn')
-            with ProcessPoolExecutor(max_workers=max_workers, mp_context=ctx) as executor:
-                futures = {
-                    executor.submit(_worker_transcribe_chunk, args): args['chunk_idx']
-                    for args in worker_args
-                }
+            logger.info(
+                f"启动 {active_gpu_count} 个 GPU worker，"
+                f"处理 {total_chunks} 个 chunk，"
+                f"min_free_memory_mb={min_free_memory_mb}"
+            )
+            
+            for gpu_idx in range(active_gpu_count):
+                p = ctx.Process(
+                    target=_gpu_worker_loop,
+                    args=(
+                        gpu_idx,
+                        chunk_queue,
+                        result_queue,
+                        init_kwargs,
+                        language,
+                        min_free_memory_mb,
+                    ),
+                    name=f"asr-worker-gpu{gpu_idx}",
+                )
+                p.start()
+                workers.append(p)
+            
+            # 5. 收集结果
+            completed = 0
+            failed_chunks = []
+            
+            while completed < total_chunks:
+                try:
+                    result = result_queue.get(timeout=600)  # 10分钟超时（单个 chunk 最长处理时间）
+                except queue.Empty:
+                    # 检查是否所有 worker 都已退出
+                    alive_workers = [w for w in workers if w.is_alive()]
+                    if not alive_workers:
+                        logger.error(
+                            f"所有 worker 已退出，但只收到 {completed}/{total_chunks} 个结果"
+                        )
+                        break
+                    logger.warning(
+                        f"等待结果超时，已完成 {completed}/{total_chunks}，"
+                        f"存活 worker: {len(alive_workers)}"
+                    )
+                    continue
                 
-                completed = 0
-                for future in as_completed(futures):
-                    result = future.result()
-                    idx = result['chunk_idx']
-                    completed += 1
-                    
-                    if result['error']:
-                        logger.error(f"Chunk {idx} 失败: {result['error']}")
-                        results[idx] = ASRData([])
-                    else:
-                        # 反序列化结果
-                        segments = [
-                            ASRDataSeg(
-                                text=seg['text'],
-                                start_time=seg['start_time'],
-                                end_time=seg['end_time']
-                            )
-                            for seg in result['segments']
-                        ]
-                        results[idx] = ASRData(segments)
-                        logger.info(f"Chunk {idx+1}/{total_chunks} 完成 ({len(segments)} 片段)")
-                    
-                    if callback:
-                        progress = int(completed / total_chunks * 100)
-                        callback(progress, f"已完成 {completed}/{total_chunks} 块")
+                idx = result['chunk_idx']
+                completed += 1
+                
+                if result['error']:
+                    logger.error(f"Chunk {idx} 最终失败: {result['error']}")
+                    results[idx] = ASRData([])
+                    failed_chunks.append(idx)
+                else:
+                    segments = [
+                        ASRDataSeg(
+                            text=seg['text'],
+                            start_time=seg['start_time'],
+                            end_time=seg['end_time']
+                        )
+                        for seg in result['segments']
+                    ]
+                    results[idx] = ASRData(segments)
+                    logger.info(f"Chunk {idx+1}/{total_chunks} 完成 ({len(segments)} 片段)")
+                
+                if callback:
+                    progress = int(completed / total_chunks * 100)
+                    callback(progress, f"已完成 {completed}/{total_chunks} 块")
+            
+            # 6. 发送哨兵值通知 worker 退出
+            for _ in workers:
+                chunk_queue.put(None)
+            
+            # 等待 worker 进程结束
+            for w in workers:
+                w.join(timeout=30)
+                if w.is_alive():
+                    logger.warning(f"Worker {w.name} 未在30s内退出，强制终止")
+                    w.terminate()
+                    w.join(timeout=5)
+            
+            # 7. 检查完整性：是否有 chunk 失败或丢失
+            missing_chunks = [i for i, r in enumerate(results) if r is None]
+            if missing_chunks:
+                raise RuntimeError(
+                    f"多 GPU 转录不完整: {len(missing_chunks)} 个 chunk 未收到结果 "
+                    f"(chunk 索引: {missing_chunks})。"
+                    f"可能原因: 所有 worker 显存等待超时退出"
+                )
+            if failed_chunks:
+                raise RuntimeError(
+                    f"多 GPU 转录失败: {len(failed_chunks)}/{total_chunks} 个 chunk 失败 "
+                    f"(chunk 索引: {failed_chunks})"
+                )
             
             logger.info(f"多进程转录完成，共 {total_chunks} 块")
             return [r for r in results if r is not None]
             
         finally:
+            # 确保所有 worker 进程被清理
+            for w in workers:
+                if w.is_alive():
+                    w.terminate()
+                    w.join(timeout=5)
+            
             # 清理临时文件
             for temp_file in temp_files:
                 try:

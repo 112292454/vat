@@ -168,15 +168,17 @@ class WhisperASR:
             device: 设备标识符
         
         注意：
-            如果 CUDA_VISIBLE_DEVICES 已被外部设置且非空，将尊重该设置。
-            否则使用 resolve_gpu_device 自动选择最佳 GPU。
+            此方法只解析设备并存储 gpu_id，不设置 CUDA_VISIBLE_DEVICES 环境变量。
+            模型加载时通过 device_index 参数指定目标 GPU，避免环境变量污染。
+            如果 CUDA_VISIBLE_DEVICES 已被外部设置（如 scheduler 子进程），
+            表示当前进程已被限制到特定 GPU，直接使用 cuda 设备即可。
         """
-        # 检查是否已有外部设置的 CUDA_VISIBLE_DEVICES
+        # 检查是否已有外部设置的 CUDA_VISIBLE_DEVICES（如 scheduler 子进程）
+        # 此时当前进程只能看到被限定的 GPU，device_index 应为 0
         external_cuda_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
         if external_cuda_devices is not None and external_cuda_devices != "":
-            # 外部已设置GPU，直接使用cuda
             self.device = "cuda"
-            self.gpu_id = None  # 由CUDA_VISIBLE_DEVICES控制
+            self.gpu_id = None  # 由 CUDA_VISIBLE_DEVICES 控制，device_index=0
             logger.info(f"ASR 将使用外部指定的 GPU (CUDA_VISIBLE_DEVICES={external_cuda_devices})")
             return
         
@@ -193,9 +195,9 @@ class WhisperASR:
             self.device = device_str
             self.gpu_id = gpu_id
             
-            # 如果选择了 GPU，设置环境变量限制可见设备
+            # 不再设置 CUDA_VISIBLE_DEVICES，避免多线程/多视频环境下的环境变量污染
+            # 模型加载时通过 WhisperModel 的 device_index 参数指定目标 GPU
             if gpu_id is not None:
-                os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
                 logger.info(f"ASR 自动选择 GPU {gpu_id}")
             elif device_str == "cpu":
                 logger.info("ASR 将使用 CPU 模式")
@@ -240,8 +242,9 @@ class WhisperASR:
 
     def _load_faster_whisper_model(self):
         """加载faster-whisper模型（原有逻辑）"""
-        # 生成缓存键
-        cache_key = (self.model_name, self.device, self.compute_type, self.download_root)
+        # 生成缓存键（包含 gpu_id，因为不同 GPU 上的模型实例不能共享）
+        device_index = self.gpu_id if self.gpu_id is not None else 0
+        cache_key = (self.model_name, self.device, device_index, self.compute_type, self.download_root)
         
         # 先检查缓存
         with self._model_cache_lock:
@@ -279,6 +282,12 @@ class WhisperASR:
                 }
                 if self.download_root:
                     model_kwargs["download_root"] = self.download_root
+                
+                # 通过 device_index 指定目标 GPU，不依赖 CUDA_VISIBLE_DEVICES
+                # 当 CUDA_VISIBLE_DEVICES 已由外部设置时（如 scheduler 子进程），
+                # gpu_id 为 None，device_index 默认为 0（即可见设备中的第一个）
+                if self.device == "cuda":
+                    model_kwargs["device_index"] = self.gpu_id if self.gpu_id is not None else 0
                 
                 # 加载模型
                 model = WhisperModel(

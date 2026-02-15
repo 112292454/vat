@@ -294,6 +294,37 @@ def get_gpu_for_subprocess(
     return env
 
 
+def check_gpu_free_memory(gpu_id: int, min_free_memory_mb: int) -> bool:
+    """
+    检查指定 GPU 的空闲显存是否满足最低要求
+    
+    用于多进程/多 worker 场景下，在加载模型或处理任务前检查显存。
+    通过 nvidia-smi 查询（不受 CUDA_VISIBLE_DEVICES 影响），反映物理 GPU 的真实状态。
+    
+    Args:
+        gpu_id: 物理 GPU 索引（nvidia-smi 中的 index）
+        min_free_memory_mb: 最低空闲显存要求 (MB)
+        
+    Returns:
+        True 如果空闲显存 >= min_free_memory_mb，否则 False
+    """
+    try:
+        gpu_info = get_gpu_info(gpu_id)
+        if gpu_info is None:
+            logger.warning(f"GPU {gpu_id} 不存在，无法检查显存")
+            return False
+        
+        has_enough = gpu_info.memory_free_mb >= min_free_memory_mb
+        if not has_enough:
+            logger.debug(
+                f"GPU {gpu_id} 显存不足: 空闲 {gpu_info.memory_free_mb}MB < 要求 {min_free_memory_mb}MB"
+            )
+        return has_enough
+    except RuntimeError as e:
+        logger.warning(f"检查 GPU {gpu_id} 显存失败: {e}")
+        return False
+
+
 def log_gpu_status():
     """打印所有 GPU 的状态信息（用于调试）"""
     try:

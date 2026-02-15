@@ -149,13 +149,16 @@ class BaseTranslator(ABC):
                     data.translated_text = data.original_text  # 标记为未翻译
                 translated_list.extend(chunk)
 
-        # 如果所有块都失败了，抛出异常
-        if failed_chunks and len(failed_chunks) == len(chunks):
-            error_messages = [f"块 {i+1}: {err}" for i, (_, err) in enumerate(failed_chunks)]
-            raise RuntimeError(f"所有翻译块都失败了:\n" + "\n".join(error_messages))
-        
-        # 如果部分块失败，记录警告但继续
+        # 失败比例检查：超过半数失败说明 API/配置有系统性问题，应整体失败
         if failed_chunks:
+            fail_ratio = len(failed_chunks) / len(chunks)
+            if fail_ratio >= 0.5:
+                error_messages = [f"块 {i+1}: {err}" for i, (_, err) in enumerate(failed_chunks[:5])]
+                raise RuntimeError(
+                    f"翻译失败比例过高: {len(failed_chunks)}/{len(chunks)} 个批次失败 "
+                    f"({fail_ratio:.0%})，可能存在 API 配置问题:\n" + "\n".join(error_messages)
+                )
+            # 少量失败：记录警告但继续（保留原文）
             logger.warning(f"{len(failed_chunks)}/{len(chunks)} 个翻译块失败，已保留原文")
 
         return translated_list

@@ -1053,6 +1053,67 @@ def playlist_sync(ctx, playlist_id):
         click.echo(f"✗ 同步失败: {e}", err=True)
 
 
+@playlist.command('refresh')
+@click.argument('playlist_id')
+@click.option('--force-refetch', is_flag=True, help='强制重新获取所有字段（覆盖已有值，但保留翻译结果）')
+@click.option('--force-retranslate', is_flag=True, help='强制重新翻译标题/简介（需配合 --force-refetch）')
+@click.pass_context
+def playlist_refresh(ctx, playlist_id, force_refetch, force_retranslate):
+    """刷新 Playlist 视频信息（补全缺失的封面、时长、日期等）
+    
+    默认 merge 模式：仅补全缺失字段，不破坏已有数据。
+    
+    示例:
+    
+      # 补全缺失信息（默认 merge）
+      vat playlist refresh PLAYLIST_ID
+      
+      # 强制重新获取所有信息
+      vat playlist refresh PLAYLIST_ID --force-refetch
+      
+      # 强制重新获取 + 重新翻译
+      vat playlist refresh PLAYLIST_ID --force-refetch --force-retranslate
+    """
+    config = get_config(ctx.obj.get('config_path'))
+    logger = get_logger()
+    db = Database(config.storage.database_path)
+    
+    pl = db.get_playlist(playlist_id)
+    if not pl:
+        click.echo(f"错误: Playlist 不存在: {playlist_id}", err=True)
+        return
+    
+    if force_retranslate and not force_refetch:
+        click.echo("提示: --force-retranslate 需配合 --force-refetch 使用。"
+                    "如只需重新翻译，请使用 'vat playlist retranslate'", err=True)
+        return
+    
+    downloader = YouTubeDownloader(
+        proxy=config.proxy.get_proxy(),
+        video_format=config.downloader.youtube.format,
+        cookies_file=config.downloader.youtube.cookies_file,
+        remote_components=config.downloader.youtube.remote_components,
+    )
+    
+    playlist_service = PlaylistService(db, downloader)
+    
+    try:
+        result = playlist_service.refresh_videos(
+            playlist_id,
+            force_refetch=force_refetch,
+            force_retranslate=force_retranslate,
+            callback=lambda msg: click.echo(msg)
+        )
+        
+        click.echo(f"\n✓ 刷新完成")
+        click.echo(f"  成功: {result['refreshed']}")
+        click.echo(f"  失败: {result['failed']}")
+        click.echo(f"  跳过: {result['skipped']}")
+        
+    except Exception as e:
+        click.echo(f"✗ 刷新失败: {e}", err=True)
+
+
 @playlist.command('show')
 @click.argument('playlist_id')
 @click.pass_context

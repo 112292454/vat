@@ -96,18 +96,18 @@ class TestPlaylistProgress:
         assert p['unavailable'] == 1
 
     def test_pending_is_truly_unprocessed(self, db):
-        """pending = processable - completed - partial_completed（failed 不从 pending 中扣除）"""
+        """pending = processable - completed - partial_completed - failed"""
         self._setup(db)
         p = PlaylistService(db).get_playlist_progress("PL1")
-        # processable=4, completed=1, partial=1 -> pending=2 (v_fail + v_pend)
-        assert p['pending'] == 2
+        # processable=4, completed=1, partial=1, failed=1 -> pending=1 (v_pend)
+        assert p['pending'] == 1
 
     def test_consistency(self, db):
-        """processable = completed + partial_completed + pending; total = processable + unavailable"""
+        """processable = completed + partial_completed + failed + pending; total = processable + unavailable"""
         self._setup(db)
         p = PlaylistService(db).get_playlist_progress("PL1")
         processable = p['total'] - p['unavailable']
-        assert processable == p['completed'] + p['partial_completed'] + p['pending']
+        assert processable == p['completed'] + p['partial_completed'] + p['failed'] + p['pending']
 
     def test_by_step_present(self, db):
         self._setup(db)

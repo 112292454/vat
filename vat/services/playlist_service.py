@@ -761,6 +761,192 @@ class PlaylistService:
         callback(f"重新翻译任务已提交: {submitted} 个, 跳过 {skipped} 个")
         return {'submitted': submitted, 'skipped': skipped}
     
+    def refresh_videos(
+        self,
+        playlist_id: str,
+        force_refetch: bool = False,
+        force_retranslate: bool = False,
+        callback: Callable[[str], None] = lambda x: None
+    ) -> Dict[str, Any]:
+        """
+        刷新 Playlist 中视频的元信息（封面、时长、日期等）
+        
+        默认 merge 模式：仅补全缺失字段，不破坏已有数据（尤其是翻译结果）。
+        
+        Args:
+            playlist_id: Playlist ID
+            force_refetch: 强制重新获取所有字段（覆盖已有值，但默认保留 translated）
+            force_retranslate: 强制重新翻译（仅在 force_refetch 时有意义）
+            callback: 进度回调
+            
+        Returns:
+            {'refreshed': N, 'skipped': N, 'failed': N}
+        """
+        videos = self.get_playlist_videos(playlist_id)
+        if not videos:
+            callback("没有视频需要刷新")
+            return {'refreshed': 0, 'skipped': 0, 'failed': 0}
+        
+        # 筛选需要刷新的视频
+        _METADATA_FIELDS = ['thumbnail', 'duration', 'upload_date', 'uploader', 'view_count', 'like_count']
+        
+        videos_to_refresh = []
+        for v in videos:
+            metadata = v.metadata or {}
+            if force_refetch:
+                # 强制模式：所有非 unavailable 的视频
+                if not metadata.get('unavailable', False):
+                    videos_to_refresh.append(v)
+            else:
+                # merge 模式：只刷新有缺失字段的视频
+                missing = []
+                for field in _METADATA_FIELDS:
+                    val = metadata.get(field)
+                    if val is None or val == '' or val == 0:
+                        missing.append(field)
+                # 也检查 title
+                if not v.title:
+                    missing.append('title')
+                if missing and not metadata.get('unavailable', False):
+                    videos_to_refresh.append(v)
+        
+        if not videos_to_refresh:
+            callback("所有视频信息已完整，无需刷新")
+            return {'refreshed': 0, 'skipped': len(videos), 'failed': 0}
+        
+        mode_label = "强制重新获取" if force_refetch else "补全缺失信息"
+        callback(f"开始刷新 ({mode_label}): {len(videos_to_refresh)}/{len(videos)} 个视频")
+        
+        refreshed = 0
+        failed = 0
+        completed_count = 0
+        results_lock = threading.Lock()
+        
+        def refresh_single_video(video: 'Video') -> bool:
+            """刷新单个视频的元信息"""
+            nonlocal completed_count
+            try:
+                video_info = self.downloader.get_video_info(
+                    f"https://www.youtube.com/watch?v={video.id}"
+                )
+                if not video_info:
+                    logger.warning(f"视频 {video.id} 信息获取失败（返回空）")
+                    return False
+                
+                metadata = video.metadata or {}
+                new_title = video_info.get('title', '')
+                
+                if force_refetch:
+                    # 强制模式：覆盖所有字段
+                    metadata['upload_date'] = video_info.get('upload_date', '') or metadata.get('upload_date', '')
+                    metadata['duration'] = video_info.get('duration', 0) or metadata.get('duration', 0)
+                    metadata['thumbnail'] = video_info.get('thumbnail', '') or metadata.get('thumbnail', '')
+                    metadata['uploader'] = video_info.get('uploader', '') or metadata.get('uploader', '')
+                    metadata['view_count'] = video_info.get('view_count', 0)
+                    metadata['like_count'] = video_info.get('like_count', 0)
+                    # 清除 interpolated 标记（如果获取到了真实日期）
+                    if video_info.get('upload_date'):
+                        metadata.pop('upload_date_interpolated', None)
+                    # 更新缓存的 _video_info
+                    metadata['_video_info'] = {
+                        'video_id': video_info.get('id', video.id),
+                        'url': video_info.get('webpage_url', f"https://www.youtube.com/watch?v={video.id}"),
+                        'title': new_title,
+                        'uploader': video_info.get('uploader', ''),
+                        'description': video_info.get('description', ''),
+                        'duration': video_info.get('duration', 0),
+                        'upload_date': video_info.get('upload_date', ''),
+                        'thumbnail': video_info.get('thumbnail', ''),
+                        'tags': video_info.get('tags', []),
+                    }
+                    # 保留 translated，除非 force_retranslate
+                    if force_retranslate:
+                        metadata.pop('translated', None)
+                    
+                    title_to_save = new_title or video.title
+                    self.db.update_video(video.id, title=title_to_save, metadata=metadata)
+                    
+                    # 重新翻译
+                    if force_retranslate:
+                        self._submit_translate_task(video.id, video_info, force=True)
+                    elif 'translated' not in metadata:
+                        # 没有翻译结果，自动翻译
+                        self._submit_translate_task(video.id, video_info, force=False)
+                else:
+                    # merge 模式：仅填充缺失字段
+                    changed = False
+                    if not metadata.get('upload_date') and video_info.get('upload_date'):
+                        metadata['upload_date'] = video_info['upload_date']
+                        metadata.pop('upload_date_interpolated', None)
+                        changed = True
+                    if not metadata.get('duration') and video_info.get('duration'):
+                        metadata['duration'] = video_info['duration']
+                        changed = True
+                    if not metadata.get('thumbnail') and video_info.get('thumbnail'):
+                        metadata['thumbnail'] = video_info['thumbnail']
+                        changed = True
+                    if not metadata.get('uploader') and video_info.get('uploader'):
+                        metadata['uploader'] = video_info['uploader']
+                        changed = True
+                    if metadata.get('view_count') is None:
+                        metadata['view_count'] = video_info.get('view_count', 0)
+                        changed = True
+                    if metadata.get('like_count') is None:
+                        metadata['like_count'] = video_info.get('like_count', 0)
+                        changed = True
+                    # 补全 _video_info 缓存
+                    if '_video_info' not in metadata:
+                        metadata['_video_info'] = {
+                            'video_id': video_info.get('id', video.id),
+                            'url': video_info.get('webpage_url', f"https://www.youtube.com/watch?v={video.id}"),
+                            'title': new_title or video.title or '',
+                            'uploader': video_info.get('uploader', ''),
+                            'description': video_info.get('description', ''),
+                            'duration': video_info.get('duration', 0),
+                            'upload_date': video_info.get('upload_date', ''),
+                            'thumbnail': video_info.get('thumbnail', ''),
+                            'tags': video_info.get('tags', []),
+                        }
+                        changed = True
+                    
+                    title_to_save = video.title or new_title or None
+                    if changed or (not video.title and new_title):
+                        self.db.update_video(video.id, title=title_to_save, metadata=metadata)
+                    
+                    # 如果没有翻译结果且有 video_info，自动翻译
+                    if 'translated' not in metadata:
+                        self._submit_translate_task(video.id, video_info, force=False)
+                
+                return True
+            except Exception as e:
+                logger.warning(f"刷新视频 {video.id} 失败: {e}")
+                return False
+            finally:
+                with results_lock:
+                    completed_count += 1
+                    if completed_count % 5 == 0 or completed_count == len(videos_to_refresh):
+                        callback(f"已处理 {completed_count}/{len(videos_to_refresh)} 个视频...")
+        
+        # 并行获取
+        max_workers = 10
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(refresh_single_video, v): v for v in videos_to_refresh}
+            for future in futures:
+                try:
+                    success = future.result(timeout=60)
+                    if success:
+                        refreshed += 1
+                    else:
+                        failed += 1
+                except Exception as e:
+                    vid = futures[future].id
+                    logger.warning(f"刷新视频 {vid} 超时或异常: {e}")
+                    failed += 1
+        
+        skipped = len(videos) - len(videos_to_refresh)
+        callback(f"刷新完成: 成功 {refreshed}, 失败 {failed}, 跳过 {skipped}")
+        return {'refreshed': refreshed, 'skipped': skipped, 'failed': failed}
+    
     def get_playlist_progress(self, playlist_id: str) -> Dict[str, Any]:
         """
         获取 Playlist 处理进度统计
@@ -833,7 +1019,7 @@ class PlaylistService:
             'total': total,
             'completed': completed,
             'partial_completed': partial_completed,
-            'pending': processable - completed - partial_completed,
+            'pending': processable - completed - partial_completed - failed,
             'failed': failed,
             'unavailable': unavailable,
             'by_step': by_step

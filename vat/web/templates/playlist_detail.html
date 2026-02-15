@@ -21,6 +21,30 @@
                 <button onclick="syncPlaylist()" class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700">
                     同步
                 </button>
+                <div class="relative" x-data="{ open: false }">
+                    <button @click="open = !open" class="px-4 py-2 bg-teal-600 text-white rounded-lg hover:bg-teal-700 flex items-center space-x-1">
+                        <span>刷新信息</span>
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+                    </button>
+                    <div x-show="open" @click.away="open = false" x-transition
+                         class="absolute right-0 mt-1 w-64 bg-white rounded-lg shadow-lg border z-20">
+                        <button @click="open = false; refreshPlaylist(false, false)"
+                                class="w-full text-left px-4 py-3 hover:bg-gray-50 rounded-t-lg border-b">
+                            <div class="font-medium text-gray-800 text-sm">补全缺失信息</div>
+                            <div class="text-xs text-gray-500">仅补全缺失的封面、时长、日期等（不覆盖已有数据）</div>
+                        </button>
+                        <button @click="open = false; refreshPlaylist(true, false)"
+                                class="w-full text-left px-4 py-3 hover:bg-gray-50 border-b">
+                            <div class="font-medium text-orange-700 text-sm">强制重新获取</div>
+                            <div class="text-xs text-gray-500">重新获取所有字段（保留翻译结果）</div>
+                        </button>
+                        <button @click="open = false; refreshPlaylist(true, true)"
+                                class="w-full text-left px-4 py-3 hover:bg-gray-50 rounded-b-lg">
+                            <div class="font-medium text-red-700 text-sm">强制获取 + 重新翻译</div>
+                            <div class="text-xs text-gray-500">重新获取所有字段并重新翻译标题/简介</div>
+                        </button>
+                    </div>
+                </div>
                 <button onclick="retranslateAll()" class="px-4 py-2 bg-yellow-600 text-white rounded-lg hover:bg-yellow-700" title="重新翻译所有视频的标题/简介">
                     重新翻译
                 </button>
@@ -485,6 +509,63 @@ async function confirmDelete() {
     } catch (e) {
         showToast('请求失败: ' + e.message, 'error');
     }
+}
+
+// 刷新视频信息
+async function refreshPlaylist(forceRefetch, forceRetranslate) {
+    const modeLabel = forceRetranslate ? '强制获取 + 重新翻译' : (forceRefetch ? '强制重新获取' : '补全缺失信息');
+    
+    if (forceRefetch && !confirm(`确定要「${modeLabel}」吗？\n\n${forceRetranslate ? '这会覆盖已有的翻译结果。' : '已有的翻译结果不会被影响。'}`)) return;
+    
+    try {
+        const response = await fetch(`/api/playlists/${playlistId}/refresh`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                force_refetch: forceRefetch,
+                force_retranslate: forceRetranslate
+            })
+        });
+        
+        if (response.ok) {
+            const result = await response.json();
+            if (result.status === 'refreshing') {
+                showToast(result.message, 'info');
+            } else {
+                showToast(`${modeLabel}已启动，后台处理中...`, 'info');
+                pollRefreshStatus();
+            }
+        } else {
+            const error = await response.json();
+            showToast('启动失败: ' + (error.detail || '未知错误'), 'error');
+        }
+    } catch (e) {
+        showToast('请求失败: ' + e.message, 'error');
+    }
+}
+
+function pollRefreshStatus() {
+    const interval = setInterval(async () => {
+        try {
+            const resp = await fetch(`/api/playlists/${playlistId}/refresh-status`);
+            const data = await resp.json();
+            if (data.status === 'refreshing') {
+                showToast(data.message || '刷新中...', 'info');
+            } else if (data.status === 'completed') {
+                clearInterval(interval);
+                showToast(data.message || '刷新完成', 'success');
+                setTimeout(() => location.reload(), 1500);
+            } else if (data.status === 'failed') {
+                clearInterval(interval);
+                showToast('刷新失败: ' + (data.message || '未知错误'), 'error');
+            } else {
+                clearInterval(interval);
+            }
+        } catch (e) {
+            clearInterval(interval);
+            showToast('轮询状态失败: ' + e.message, 'error');
+        }
+    }, 3000);
 }
 
 // 重新翻译所有视频

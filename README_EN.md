@@ -259,6 +259,7 @@ vat status
 | `vat upload VIDEO_ID` | Upload to Bilibili |
 | `vat process -v ID -s upload --upload-cron "0 12,18 * * *"` | Scheduled upload (daily 12/18) |
 | `vat playlist sync URL` | Sync playlist |
+| `vat playlist refresh ID` | Refresh video info (fill missing covers, duration, etc.) |
 | `vat status` | View processing status |
 | `vat clean -v ID` | Clean intermediate files |
 | `vat bilibili login` | Bilibili login for cookies |

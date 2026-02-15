@@ -294,6 +294,100 @@ async def update_playlist_prompt(
     return {"status": "updated", "playlist_id": playlist_id}
 
 
+class RefreshPlaylistRequest(BaseModel):
+    """刷新 Playlist 视频信息请求"""
+    force_refetch: bool = False  # 强制重新获取所有字段
+    force_retranslate: bool = False  # 强制重新翻译
+
+
+# 全局刷新状态存储（与 sync 独立）
+_refresh_status = {}  # playlist_id -> {status, message, result}
+
+
+def _update_refresh_message(playlist_id: str, message: str):
+    """更新刷新进度消息"""
+    if playlist_id in _refresh_status:
+        _refresh_status[playlist_id]["message"] = message
+
+
+def _run_refresh_in_background(
+    playlist_id: str,
+    force_refetch: bool,
+    force_retranslate: bool
+):
+    """后台执行刷新任务"""
+    from vat.config import load_config
+    from vat.downloaders import YouTubeDownloader
+    
+    config = load_config()
+    db = Database(config.storage.database_path)
+    downloader = YouTubeDownloader(
+        proxy=config.proxy.get_proxy(),
+        video_format=config.downloader.youtube.format,
+        cookies_file=config.downloader.youtube.cookies_file,
+        remote_components=config.downloader.youtube.remote_components,
+    )
+    service = PlaylistService(db, downloader)
+    
+    _refresh_status[playlist_id] = {"status": "refreshing", "message": "正在刷新..."}
+    
+    try:
+        result = service.refresh_videos(
+            playlist_id,
+            force_refetch=force_refetch,
+            force_retranslate=force_retranslate,
+            callback=lambda msg: _update_refresh_message(playlist_id, msg)
+        )
+        _refresh_status[playlist_id] = {
+            "status": "completed",
+            "message": f"刷新完成: 成功 {result['refreshed']}, 失败 {result['failed']}, 跳过 {result['skipped']}",
+            "result": result
+        }
+    except Exception as e:
+        logger.error(f"刷新 Playlist {playlist_id} 失败: {e}")
+        _refresh_status[playlist_id] = {"status": "failed", "message": str(e)}
+
+
+@router.post("/{playlist_id}/refresh")
+async def refresh_playlist_videos(
+    playlist_id: str,
+    request: RefreshPlaylistRequest = None,
+    background_tasks: BackgroundTasks = None,
+    db: Database = Depends(get_db)
+):
+    """
+    刷新 Playlist 视频信息（补全缺失的封面、时长、日期等）
+    
+    默认 merge 模式：仅补全缺失字段，不破坏已有翻译结果。
+    """
+    pl = db.get_playlist(playlist_id)
+    if not pl:
+        raise HTTPException(404, "Playlist not found")
+    
+    # 检查是否已在刷新中
+    if playlist_id in _refresh_status and _refresh_status[playlist_id].get("status") == "refreshing":
+        return {"status": "refreshing", "message": "刷新已在进行中"}
+    
+    force_refetch = request.force_refetch if request else False
+    force_retranslate = request.force_retranslate if request else False
+    
+    background_tasks.add_task(
+        _run_refresh_in_background,
+        playlist_id,
+        force_refetch,
+        force_retranslate
+    )
+    
+    return {"status": "started", "message": "已启动后台刷新"}
+
+
+@router.get("/{playlist_id}/refresh-status")
+async def get_refresh_status(playlist_id: str):
+    """获取刷新状态"""
+    status = _refresh_status.get(playlist_id, {"status": "idle", "message": ""})
+    return status
+
+
 @router.post("/{playlist_id}/retranslate")
 async def retranslate_playlist_videos(
     playlist_id: str,

@@ -135,6 +135,8 @@ class LLMTranslator(BaseTranslator):
             futures.append((future, chunk))
 
         # 收集结果
+        failed_optimize_chunks = 0
+        last_optimize_error = None
         for idx, (future, chunk) in enumerate(futures, 1):
             if not self.is_running:
                 break
@@ -144,12 +146,24 @@ class LLMTranslator(BaseTranslator):
             except Exception as e:
                 logger.error(f"优化批次失败: {e}")
                 optimized_dict.update(chunk)  # 失败时保留原文
+                failed_optimize_chunks += 1
+                last_optimize_error = e
             
             msg = f"优化进度: {idx}/{total_chunks} 批次完成"
             # if idx % max(1, total_chunks // 10) == 0:
             #     logger.info(msg)
             if self.progress_callback:
                 self.progress_callback(msg)
+
+        # 失败比例检查：超过半数失败说明 API/配置有系统性问题，应整体失败
+        if failed_optimize_chunks > 0:
+            fail_ratio = failed_optimize_chunks / total_chunks
+            if fail_ratio >= 0.5:
+                raise RuntimeError(
+                    f"优化失败比例过高: {failed_optimize_chunks}/{total_chunks} 个批次失败 "
+                    f"({fail_ratio:.0%})，可能存在 API 配置问题: {last_optimize_error}"
+                )
+            logger.warning(f"{failed_optimize_chunks}/{total_chunks} 个优化批次失败，已保留原文")
 
         # 验证数量一致性
         assert len(optimized_dict) == len(subtitle_dict), \
@@ -240,6 +254,9 @@ class LLMTranslator(BaseTranslator):
                               f"Please fix the errors and output ONLY a valid JSON dictionary.DO NOT REPLY ANY ADDITIONEL EXPLANATION OR OTHER PREVIOUS TEXT."
                 })
                 
+            except (openai.BadRequestError, openai.AuthenticationError, openai.NotFoundError) as e:
+                # 不可重试的配置错误（地区限制、认证失败、模型不存在），立即失败
+                raise RuntimeError(f"优化 API 不可用: {e}") from e
             except Exception as e:
                 logger.warning(f"优化批次尝试 {step+1} 失败: {e}")
                 if step == self.MAX_STEPS - 1:
@@ -456,6 +473,10 @@ class LLMTranslator(BaseTranslator):
             logger.error(f"OpenAI NotFound Error: {str(e)}")
             # 模型不存在错误应该立即失败
             raise RuntimeError(f"模型不存在: {str(e)}") from e
+        except openai.BadRequestError as e:
+            # 400 错误（地区不支持、参数无效等）是配置问题，不可重试
+            logger.error(f"OpenAI BadRequest Error: {str(e)}")
+            raise RuntimeError(f"API 请求被拒绝（可能是地区限制或参数错误）: {str(e)}") from e
         except Exception as e:
             import traceback
             logger.error(f"翻译块失败: {str(e)}, 尝试降级处理,traceback: {traceback.format_exc()}")
@@ -570,11 +591,17 @@ class LLMTranslator(BaseTranslator):
     def _translate_chunk_single(
         self, subtitle_chunk: List[SubtitleProcessData]
     ) -> List[SubtitleProcessData]:
-        """单条翻译模式（降级方案）"""
+        """单条翻译模式（降级方案）
+        
+        逐条翻译字幕。如果全部失败则抛出异常（表示 API 本身不可用），
+        部分失败则记录警告并继续（保留原文）。
+        """
         single_prompt = get_prompt(
             "translate/single", target_language=self.target_language
         )
 
+        failed_count = 0
+        last_error = None
         for data in subtitle_chunk:
             try:
                 response = call_llm(
@@ -591,6 +618,20 @@ class LLMTranslator(BaseTranslator):
                 data.translated_text = translated_text
             except Exception as e:
                 logger.error(f"单条翻译失败 {data.index}: {str(e)}")
+                failed_count += 1
+                last_error = e
+
+        # 全部失败说明 API 本身不可用，必须 fail-fast
+        if failed_count == len(subtitle_chunk):
+            raise RuntimeError(
+                f"降级单条翻译全部失败 ({failed_count}/{len(subtitle_chunk)})，"
+                f"API 可能不可用: {last_error}"
+            )
+        
+        if failed_count > 0:
+            logger.warning(
+                f"降级单条翻译部分失败: {failed_count}/{len(subtitle_chunk)} 条，已保留原文"
+            )
 
         return subtitle_chunk
 

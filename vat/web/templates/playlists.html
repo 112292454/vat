@@ -41,14 +41,26 @@
                             <div class="w-20 bg-gray-200 rounded-full h-2">
                                 <div class="bg-green-500 h-2 rounded-full" style="width: {{ pl.progress_percent }}%"></div>
                             </div>
-                            <div class="flex items-center space-x-1 text-sm">
+                            <div class="flex items-center space-x-1 text-xs whitespace-nowrap">
+                                <a href="/?playlist_id={{ pl.id }}" class="text-gray-600 hover:underline" title="总数">{{ pl.video_count }}</a>
+                                <span class="text-gray-300">=</span>
                                 <a href="/?playlist_id={{ pl.id }}&status=completed" class="text-green-600 hover:underline" title="已完成">{{ pl.completed }}</a>
-                                <span class="text-gray-400">/</span>
-                                {% if pl.failed is defined and pl.failed > 0 %}
-                                <a href="/?playlist_id={{ pl.id }}&status=failed" class="text-red-600 hover:underline" title="失败">{{ pl.failed }}失败</a>
-                                <span class="text-gray-400">/</span>
+                                {% if pl.partial_completed > 0 %}
+                                <span class="text-gray-300">+</span>
+                                <a href="/?playlist_id={{ pl.id }}&status=partial_completed" class="text-orange-500 hover:underline" title="部分完成">{{ pl.partial_completed }}</a>
                                 {% endif %}
-                                <a href="/?playlist_id={{ pl.id }}" class="text-gray-600 hover:underline" title="全部">{{ pl.video_count }}</a>
+                                {% if pl.failed > 0 %}
+                                <span class="text-gray-300">+</span>
+                                <a href="/?playlist_id={{ pl.id }}&status=failed" class="text-red-600 hover:underline" title="失败">{{ pl.failed }}</a>
+                                {% endif %}
+                                {% if pl.pending > 0 %}
+                                <span class="text-gray-300">+</span>
+                                <a href="/?playlist_id={{ pl.id }}&status=pending" class="text-yellow-600 hover:underline" title="待处理">{{ pl.pending }}</a>
+                                {% endif %}
+                                {% if pl.unavailable > 0 %}
+                                <span class="text-gray-300">+</span>
+                                <span class="text-gray-400" title="不可用">{{ pl.unavailable }}</span>
+                                {% endif %}
                             </div>
                         </div>
                     </td>
@@ -57,6 +69,8 @@
                         <div class="flex space-x-2">
                             <button onclick="syncPlaylist('{{ pl.id }}')" 
                                     class="text-blue-600 hover:text-blue-800">同步</button>
+                            <button onclick="refreshPlaylist('{{ pl.id }}')" 
+                                    class="text-teal-600 hover:text-teal-800">刷新</button>
                             <button onclick="processPlaylist('{{ pl.id }}')" 
                                     class="text-green-600 hover:text-green-800">处理</button>
                             <button onclick="deletePlaylist('{{ pl.id }}', '{{ pl.title|e }}')" 
@@ -222,6 +236,49 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     });
 });
+
+async function refreshPlaylist(playlistId) {
+    try {
+        const response = await fetch(`/api/playlists/${playlistId}/refresh`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({force_refetch: false, force_retranslate: false})
+        });
+        if (response.ok) {
+            showToast('刷新已启动（补全缺失信息），等待完成...', 'info');
+            const row = document.querySelector(`[data-playlist-id="${playlistId}"]`);
+            const statusCell = row?.querySelector('.sync-status');
+            if (statusCell) {
+                pollRefreshStatus(playlistId, statusCell, statusCell.innerHTML);
+            }
+        } else {
+            const error = await response.json();
+            showToast('刷新失败: ' + (error.detail || '未知错误'), 'error');
+        }
+    } catch (e) {
+        showToast('请求失败: ' + e.message, 'error');
+    }
+}
+
+async function pollRefreshStatus(playlistId, statusCell, originalContent) {
+    try {
+        const response = await fetch(`/api/playlists/${playlistId}/refresh-status`);
+        if (response.ok) {
+            const status = await response.json();
+            if (status.status === 'refreshing') {
+                statusCell.innerHTML = `<span class="text-teal-600">🔄 ${status.message}</span>`;
+                setTimeout(() => pollRefreshStatus(playlistId, statusCell, originalContent), 3000);
+            } else if (status.status === 'completed') {
+                statusCell.innerHTML = `<span class="text-green-600">✓ ${status.message}</span>`;
+                setTimeout(() => location.reload(), 2000);
+            } else if (status.status === 'failed') {
+                statusCell.innerHTML = `<span class="text-red-600">✗ ${status.message}</span>`;
+            }
+        }
+    } catch (e) {
+        console.error('检查刷新状态失败:', e);
+    }
+}
 
 function processPlaylist(playlistId) {
     location.href = `/tasks/new?playlist=${playlistId}`;

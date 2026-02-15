@@ -276,6 +276,7 @@ vat status
 | `vat upload VIDEO_ID` | 上传到 B 站 |
 | `vat process -v ID -s upload --upload-cron "0 12,18 * * *"` | 定时上传（每天 12/18 点） |
 | `vat playlist sync URL` | 同步播放列表 |
+| `vat playlist refresh ID` | 刷新视频信息（补全缺失的封面、时长等） |
 | `vat status` | 查看处理状态 |
 | `vat clean -v ID` | 清理中间产物 |
 | `vat bilibili login` | B 站登录获取 Cookie |

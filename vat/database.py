@@ -1161,7 +1161,7 @@ class Database:
                     'partial_completed': partial_completed,
                     'failed': failed,
                     'unavailable': unavailable,
-                    'pending': processable - completed - partial_completed,
+                    'pending': processable - completed - partial_completed - failed,
                 }
             return result
     

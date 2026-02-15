@@ -367,15 +367,15 @@ class TestBatchGetPlaylistProgress:
         assert p['partial_completed'] == 1
         assert p['failed'] == 1
         assert p['unavailable'] == 1
-        assert p['pending'] == 2  # processable(4) - completed(1) - partial(1) = 2 (failed 不从 pending 中扣除)
+        assert p['pending'] == 1  # processable(4) - completed(1) - partial(1) - failed(1) = 1
 
     def test_consistency(self, db):
-        """processable = completed + partial_completed + pending; total = processable + unavailable"""
+        """processable = completed + partial_completed + failed + pending; total = processable + unavailable"""
         self._setup_playlist_with_videos(db)
         progress = db.batch_get_playlist_progress()
         p = progress["PL1"]
         processable = p['total'] - p['unavailable']
-        assert processable == p['completed'] + p['partial_completed'] + p['pending']
+        assert processable == p['completed'] + p['partial_completed'] + p['failed'] + p['pending']
 
 
 # ==================== DB Version ====================

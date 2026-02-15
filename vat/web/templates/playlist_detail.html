@@ -221,6 +221,9 @@
                         {% if video.unavailable %}
                         <span class="ml-2 px-1.5 py-0.5 text-xs bg-gray-200 text-gray-600 rounded">不可用</span>
                         {% endif %}
+                        {% if video.has_warnings %}
+                        <span class="ml-1 text-amber-500" title="处理过程中存在非致命问题">⚠</span>
+                        {% endif %}
                     </td>
                     <td class="px-6 py-4 text-sm text-gray-500" data-sort-value="{{ video.upload_date or '' }}">
                         {% if video.upload_date %}

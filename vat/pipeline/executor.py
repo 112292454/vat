@@ -333,6 +333,9 @@ class VideoProcessor:
                     self.db.update_task_status(self.video_id, step, TaskStatus.COMPLETED)
             return True
         
+        # 重新处理时清空之前的 processing_notes（避免累积旧警告）
+        self.db.clear_processing_notes(self.video_id)
+        
         # 初始化直通阶段集合
         self._passthrough_stages = set()
         self._config_backup = None
@@ -876,10 +879,14 @@ class VideoProcessor:
                         self._progress_with_tracker(f"⚠️ {w}")
                     if len(warnings) > 5:
                         self._progress_with_tracker(f"⚠️ ...还有 {len(warnings) - 5} 条警告")
-                # 如果有片段被移除，重建 ASRData
+                # 如果有片段被移除，重建 ASRData 并记录 processing_note
                 if len(validated_segments) < len(asr_data.segments):
                     removed_count = len(asr_data.segments) - len(validated_segments)
                     self._progress_with_tracker(f"移除 {removed_count} 个崩溃片段")
+                    self.db.add_processing_note(
+                        self.video_id, "whisper",
+                        f"ASR 输出中移除了 {removed_count} 个崩溃片段（模型幻觉/重复）"
+                    )
                     # validated_segments 中时间戳是秒，转回毫秒给 ASRDataSeg
                     new_segments = [
                         ASRDataSeg(text=s['text'], start_time=int(s['start'] * 1000), end_time=int(s['end'] * 1000))
@@ -1005,6 +1012,10 @@ class VideoProcessor:
                 if not self.config.llm.is_available():
                     self.logger.warning("LLM 配置不完整，跳过智能断句")
                     self.progress_callback("警告: LLM 配置不完整，使用原始 ASR 输出")
+                    self.db.add_processing_note(
+                        self.video_id, "split",
+                        "LLM 配置不完整，智能断句被跳过（使用原始 ASR 输出，字幕质量可能受影响）"
+                    )
                 else:
                     # 获取场景特定的断句提示词
                     split_scene_prompt = ""
@@ -1204,6 +1215,10 @@ class VideoProcessor:
             
             # 调用内部优化方法（OPTIMIZE 阶段独立执行）
             optimized_data = translator._optimize_subtitle(asr_data)
+            
+            # 检查优化过程中的非致命警告，写入 processing_notes
+            for warn_msg in translator._processing_warnings:
+                self.db.add_processing_note(self.video_id, "optimize", warn_msg)
             
             optimized_data.save(str(optimized_srt))
             self.progress_callback(f"字幕优化完成，共 {len(optimized_data)} 条")
@@ -1832,8 +1847,16 @@ class VideoProcessor:
                         self.progress_callback("✓ 已添加到合集")
                     else:
                         self.progress_callback("⚠ 添加到合集失败")
+                        self.db.add_processing_note(
+                            self.video_id, "upload",
+                            f"视频已上传但添加到合集 {bilibili_config.season_id} 失败"
+                        )
                 except Exception as e:
                     self.progress_callback(f"⚠ 添加到合集异常: {e}")
+                    self.db.add_processing_note(
+                        self.video_id, "upload",
+                        f"视频已上传但添加到合集异常: {e}"
+                    )
             
             return True
                 

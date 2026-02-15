@@ -118,10 +118,12 @@ class BaseTranslator(ABC):
     def _parallel_translate(
         self, chunks: List[List[SubtitleProcessData]]
     ) -> List[SubtitleProcessData]:
-        """并行翻译所有块"""
+        """并行翻译所有块
+        
+        翻译零容忍：任何一个批次失败即整体失败，不允许部分翻译缺失。
+        """
         futures = []
         translated_list = []
-        failed_chunks = []
         total_chunks = len(chunks)
 
         logger.info(f"开始翻译，共 {total_chunks} 个批次")
@@ -142,24 +144,10 @@ class BaseTranslator(ABC):
                 if self.progress_callback:
                     self.progress_callback(msg)
             except Exception as e:
-                logger.error(f"翻译块失败：{str(e)}")
-                failed_chunks.append((chunk, str(e)))
-                # 失败时保留原文，但标记为未翻译
-                for data in chunk:
-                    data.translated_text = data.original_text  # 标记为未翻译
-                translated_list.extend(chunk)
-
-        # 失败比例检查：超过半数失败说明 API/配置有系统性问题，应整体失败
-        if failed_chunks:
-            fail_ratio = len(failed_chunks) / len(chunks)
-            if fail_ratio >= 0.5:
-                error_messages = [f"块 {i+1}: {err}" for i, (_, err) in enumerate(failed_chunks[:5])]
+                # 翻译零容忍：任何批次失败即整体失败
                 raise RuntimeError(
-                    f"翻译失败比例过高: {len(failed_chunks)}/{len(chunks)} 个批次失败 "
-                    f"({fail_ratio:.0%})，可能存在 API 配置问题:\n" + "\n".join(error_messages)
-                )
-            # 少量失败：记录警告但继续（保留原文）
-            logger.warning(f"{len(failed_chunks)}/{len(chunks)} 个翻译块失败，已保留原文")
+                    f"翻译批次 {idx}/{total_chunks} 失败: {e}"
+                ) from e
 
         return translated_list
 

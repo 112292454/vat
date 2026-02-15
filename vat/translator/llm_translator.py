@@ -84,6 +84,8 @@ class LLMTranslator(BaseTranslator):
         
         # 存储前一个 batch 的翻译结果（用于上下文）
         self._previous_batch_result: Optional[Dict[str, str]] = None
+        # 处理过程中的非致命警告（由 pipeline 读取并写入 processing_notes）
+        self._processing_warnings: List[str] = []
 
     def translate_subtitle(self, subtitle_data: ASRData) -> ASRData:
         """翻译字幕文件（集成可选的优化前置步骤）"""
@@ -155,15 +157,19 @@ class LLMTranslator(BaseTranslator):
             if self.progress_callback:
                 self.progress_callback(msg)
 
-        # 失败比例检查：超过半数失败说明 API/配置有系统性问题，应整体失败
+        # 失败容忍：仅容忍偶发网络抖动级别的失败
+        # 阈值：最多容忍 max(2, total*5%) 个批次失败，超过则判定为系统性问题
         if failed_optimize_chunks > 0:
-            fail_ratio = failed_optimize_chunks / total_chunks
-            if fail_ratio >= 0.5:
+            tolerance = max(2, int(total_chunks * 0.05))
+            if failed_optimize_chunks > tolerance:
                 raise RuntimeError(
-                    f"优化失败比例过高: {failed_optimize_chunks}/{total_chunks} 个批次失败 "
-                    f"({fail_ratio:.0%})，可能存在 API 配置问题: {last_optimize_error}"
+                    f"优化失败过多: {failed_optimize_chunks}/{total_chunks} 个批次失败"
+                    f"（容忍上限 {tolerance}），可能存在 API/网络问题: {last_optimize_error}"
                 )
-            logger.warning(f"{failed_optimize_chunks}/{total_chunks} 个优化批次失败，已保留原文")
+            # 少量失败（网络抖动级别）：记录为 processing_warning（pipeline 读取后写入 DB）
+            warn_msg = f"{failed_optimize_chunks}/{total_chunks} 个优化批次失败，已保留原文"
+            logger.warning(warn_msg)
+            self._processing_warnings.append(warn_msg)
 
         # 验证数量一致性
         assert len(optimized_dict) == len(subtitle_dict), \
@@ -593,15 +599,12 @@ class LLMTranslator(BaseTranslator):
     ) -> List[SubtitleProcessData]:
         """单条翻译模式（降级方案）
         
-        逐条翻译字幕。如果全部失败则抛出异常（表示 API 本身不可用），
-        部分失败则记录警告并继续（保留原文）。
+        逐条翻译字幕。翻译不允许部分失败：任何一条失败即立即抛出异常。
         """
         single_prompt = get_prompt(
             "translate/single", target_language=self.target_language
         )
 
-        failed_count = 0
-        last_error = None
         for data in subtitle_chunk:
             try:
                 response = call_llm(
@@ -617,21 +620,10 @@ class LLMTranslator(BaseTranslator):
                 translated_text = response.choices[0].message.content.strip()
                 data.translated_text = translated_text
             except Exception as e:
-                logger.error(f"单条翻译失败 {data.index}: {str(e)}")
-                failed_count += 1
-                last_error = e
-
-        # 全部失败说明 API 本身不可用，必须 fail-fast
-        if failed_count == len(subtitle_chunk):
-            raise RuntimeError(
-                f"降级单条翻译全部失败 ({failed_count}/{len(subtitle_chunk)})，"
-                f"API 可能不可用: {last_error}"
-            )
-        
-        if failed_count > 0:
-            logger.warning(
-                f"降级单条翻译部分失败: {failed_count}/{len(subtitle_chunk)} 条，已保留原文"
-            )
+                # 翻译零容忍：任何一条失败即立报错，不允许部分翻译缺失
+                raise RuntimeError(
+                    f"字幕 {data.index} 翻译失败: {e}"
+                ) from e
 
         return subtitle_chunk
 

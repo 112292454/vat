@@ -22,7 +22,7 @@ from .utils.logger import setup_logger
 logger = setup_logger("database")
 
 # 当前数据库版本
-DB_VERSION = 3
+DB_VERSION = 4
 
 
 class Database:
@@ -217,6 +217,15 @@ class Database:
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_pv_video ON playlist_videos(video_id)")
             
             logger.info("数据库迁移 v2 -> v3 完成")
+        
+        if from_version < 4:
+            # 迁移 v3 -> v4: 添加 processing_notes 字段
+            logger.info("执行数据库迁移 v3 -> v4: 添加 processing_notes 字段")
+            try:
+                cursor.execute("ALTER TABLE videos ADD COLUMN processing_notes TEXT DEFAULT '[]'")
+            except sqlite3.OperationalError:
+                pass  # 字段已存在
+            logger.info("数据库迁移 v3 -> v4 完成")
     
     def add_video(self, video: Video) -> None:
         """添加视频记录"""
@@ -224,8 +233,8 @@ class Database:
             cursor = conn.cursor()
             cursor.execute("""
                 INSERT OR REPLACE INTO videos 
-                (id, source_type, source_url, title, output_dir, metadata, created_at, updated_at, playlist_id, playlist_index)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (id, source_type, source_url, title, output_dir, metadata, created_at, updated_at, playlist_id, playlist_index, processing_notes)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 video.id,
                 video.source_type.value,
@@ -236,7 +245,8 @@ class Database:
                 video.created_at,
                 video.updated_at,
                 video.playlist_id,
-                video.playlist_index
+                video.playlist_index,
+                json.dumps(video.processing_notes, ensure_ascii=False),
             ))
     
     def get_video(self, video_id: str) -> Optional[Video]:
@@ -261,13 +271,14 @@ class Database:
             metadata=json.loads(row['metadata']) if row['metadata'] else {},
             created_at=datetime.fromisoformat(row['created_at']),
             updated_at=datetime.fromisoformat(row['updated_at']),
+            processing_notes=json.loads(row['processing_notes']) if 'processing_notes' in row.keys() and row['processing_notes'] else [],
             playlist_id=row['playlist_id'] if 'playlist_id' in row.keys() else None,
             playlist_index=row['playlist_index'] if 'playlist_index' in row.keys() else None
         )
     
     def update_video(self, video_id: str, **kwargs) -> None:
         """更新视频记录"""
-        allowed_fields = {'title', 'output_dir', 'metadata', 'playlist_id', 'playlist_index'}
+        allowed_fields = {'title', 'output_dir', 'metadata', 'processing_notes', 'playlist_id', 'playlist_index'}
         updates = {k: v for k, v in kwargs.items() if k in allowed_fields}
         
         if not updates:
@@ -275,9 +286,11 @@ class Database:
         
         updates['updated_at'] = datetime.now()
         
-        # 处理metadata字段
+        # 处理 JSON 字段
         if 'metadata' in updates:
             updates['metadata'] = json.dumps(updates['metadata'], ensure_ascii=False)
+        if 'processing_notes' in updates:
+            updates['processing_notes'] = json.dumps(updates['processing_notes'], ensure_ascii=False)
         
         set_clause = ', '.join(f"{k} = ?" for k in updates.keys())
         values = list(updates.values()) + [video_id]
@@ -285,6 +298,29 @@ class Database:
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(f"UPDATE videos SET {set_clause} WHERE id = ?", values)
+    
+    def add_processing_note(self, video_id: str, stage: str, message: str) -> None:
+        """追加一条处理警告到视频的 processing_notes
+        
+        用于记录非致命但影响质量的问题（如优化阶段部分片段失败）。
+        
+        Args:
+            video_id: 视频 ID
+            stage: 发生问题的阶段名（如 'optimize'）
+            message: 警告信息
+        """
+        video = self.get_video(video_id)
+        if video is None:
+            logger.warning(f"add_processing_note: 视频 {video_id} 不存在")
+            return
+        
+        notes = list(video.processing_notes)
+        notes.append({"stage": stage, "message": message})
+        self.update_video(video_id, processing_notes=notes)
+    
+    def clear_processing_notes(self, video_id: str) -> None:
+        """清空视频的 processing_notes（重新处理时调用）"""
+        self.update_video(video_id, processing_notes=[])
     
     def list_videos(self, source_type: Optional[SourceType] = None, playlist_id: Optional[str] = None) -> List[Video]:
         """列出视频

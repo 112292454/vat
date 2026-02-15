@@ -130,6 +130,22 @@ Based on [biliup](https://github.com/biliup/biliup):
 - Config snapshot caching: changing segmentation params only re-runs segmentation, not ASR
 - Multi-video parallel processing (configurable concurrency)
 
+### Error Handling & Quality Assurance
+
+The pipeline classifies processing errors into three severity levels:
+
+| Level | Behavior | Applies To |
+|-------|----------|-----------|
+| **Fatal** | Stage marked FAILED, stops pipeline | Any translation segment failure, API config errors (auth/region restrictions) |
+| **Warning** | Continues, video marked with ⚠ | Optimization batch failures (network-jitter level), ASR crash segments removed, collection add failure |
+| **Normal** | Log only | ASR silence gap detection (normal for livestreams) |
+
+Core principles:
+- **Translation zero-tolerance**: No missing segments allowed in translation output. Batch failures fall back to single-item retry, but any single failure marks the entire stage as FAILED
+- **Optimization tolerates jitter**: Tolerates up to max(2, total×5%) batch failures, keeping original text for failed batches. Beyond that threshold → FAILED
+- **Non-retryable errors fail-fast**: Auth failures, region restrictions etc. are never retried
+- **Non-fatal issues are traceable**: Warning-level issues are stored in the database `processing_notes` field and displayed as ⚠ indicators in the Web UI video detail page
+
 ---
 
 ## Quick Start

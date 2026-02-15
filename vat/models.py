@@ -147,6 +147,9 @@ class Video:
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
+    # 处理过程中的非致命警告（如优化阶段部分片段失败）
+    # 格式: [{"stage": "optimize", "message": "3/83 个优化批次失败"}]
+    processing_notes: List[Dict[str, str]] = field(default_factory=list)
     # Playlist 关联
     playlist_id: Optional[str] = None  # 所属 Playlist ID
     playlist_index: Optional[int] = None  # 在 Playlist 中的索引（按时间排序，最早=1）

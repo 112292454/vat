@@ -353,9 +353,12 @@ def validate_asr_segments(
                 warnings.extend(result.warnings)
             filtered.append(seg)
     
-    # 检测静默异常
+    # 静默检测：仅记录日志（直播间正常现象），不加入 warnings 返回给上层
     silence_warnings = warn_silence_gaps(segments)
-    warnings.extend(silence_warnings)
+    if silence_warnings:
+        logger.info(f"[ASR] 检测到 {len(silence_warnings)} 段静默间隙（属正常现象）")
+        for sw in silence_warnings:
+            logger.debug(f"[ASR] {sw}")
     
     if catastrophic_count > 0:
         logger.warning(f"[ASR] 移除 {catastrophic_count} 个灾难性崩溃片段")

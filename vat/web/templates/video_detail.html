@@ -58,6 +58,26 @@
             </div>
         </div>
         
+        <!-- 处理警告（非致命问题） -->
+        {% if video.processing_notes %}
+        <div class="bg-amber-50 border border-amber-200 rounded-lg shadow p-4">
+            <div class="flex items-start space-x-2">
+                <span class="text-amber-500 text-lg flex-shrink-0">⚠</span>
+                <div class="flex-1 min-w-0">
+                    <h3 class="text-sm font-semibold text-amber-800 mb-1">处理过程中存在非致命问题</h3>
+                    <ul class="text-sm text-amber-700 space-y-1">
+                        {% for note in video.processing_notes %}
+                        <li>
+                            <span class="font-medium">[{{ note.stage }}]</span>
+                            {{ note.message }}
+                        </li>
+                        {% endfor %}
+                    </ul>
+                </div>
+            </div>
+        </div>
+        {% endif %}
+        
         <!-- 任务时间线 -->
         <div class="bg-white rounded-lg shadow p-6">
             <div class="flex items-center justify-between mb-4">

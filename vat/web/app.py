@@ -428,7 +428,8 @@ async def playlist_detail_page(
             "upload_date_interpolated": metadata.get("upload_date_interpolated", False),
             "unavailable": metadata.get("unavailable", False),
             "duration": duration,
-            "duration_formatted": duration_formatted
+            "duration_formatted": duration_formatted,
+            "has_warnings": bool(v.processing_notes),
         })
     
     return templates.TemplateResponse("playlist_detail.html", {

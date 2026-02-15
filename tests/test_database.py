@@ -429,6 +429,57 @@ class TestBatchGetVideoProgressRunning:
         assert progress["v1"]["has_failed"] is True
 
 
+class TestProcessingNotes:
+    """processing_notes 字段的 CRUD 测试"""
+
+    def test_default_empty(self, db):
+        """新视频的 processing_notes 默认为空列表"""
+        _add_video(db, "v_notes_1")
+        video = db.get_video("v_notes_1")
+        assert video.processing_notes == []
+
+    def test_add_note(self, db):
+        """add_processing_note 追加一条警告"""
+        _add_video(db, "v_notes_2")
+        db.add_processing_note("v_notes_2", "optimize", "3/10 个优化批次失败")
+        video = db.get_video("v_notes_2")
+        assert len(video.processing_notes) == 1
+        assert video.processing_notes[0]["stage"] == "optimize"
+        assert "3/10" in video.processing_notes[0]["message"]
+
+    def test_add_multiple_notes(self, db):
+        """可以追加多条警告"""
+        _add_video(db, "v_notes_3")
+        db.add_processing_note("v_notes_3", "optimize", "warning 1")
+        db.add_processing_note("v_notes_3", "translate", "warning 2")
+        video = db.get_video("v_notes_3")
+        assert len(video.processing_notes) == 2
+        assert video.processing_notes[0]["stage"] == "optimize"
+        assert video.processing_notes[1]["stage"] == "translate"
+
+    def test_clear_notes(self, db):
+        """clear_processing_notes 清空所有警告"""
+        _add_video(db, "v_notes_4")
+        db.add_processing_note("v_notes_4", "optimize", "some warning")
+        db.clear_processing_notes("v_notes_4")
+        video = db.get_video("v_notes_4")
+        assert video.processing_notes == []
+
+    def test_add_note_nonexistent_video(self, db):
+        """对不存在的视频添加 note 不应崩溃"""
+        # 不应抛异常，只 log warning
+        db.add_processing_note("nonexistent_id", "optimize", "test")
+
+    def test_update_video_with_notes(self, db):
+        """update_video 可以直接设置 processing_notes"""
+        _add_video(db, "v_notes_5")
+        notes = [{"stage": "optimize", "message": "test msg"}]
+        db.update_video("v_notes_5", processing_notes=notes)
+        video = db.get_video("v_notes_5")
+        assert len(video.processing_notes) == 1
+        assert video.processing_notes[0]["message"] == "test msg"
+
+
 class TestDatabaseVersion:
 
     def test_fresh_db_has_version(self, db):

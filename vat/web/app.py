@@ -681,7 +681,7 @@ def _auto_sync_stale_playlists():
         try:
             sync_db = Database(config.storage.database_path)
             downloader = YouTubeDownloader(
-                proxy=config.proxy.get_proxy(),
+                proxy=config.get_stage_proxy("downloader"),
                 video_format=config.downloader.youtube.format,
                 cookies_file=config.downloader.youtube.cookies_file,
                 remote_components=config.downloader.youtube.remote_components,

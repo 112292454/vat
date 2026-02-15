@@ -88,7 +88,7 @@ def download(ctx, url, playlist, file):
     if playlist:
         logger.info(f"获取播放列表: {playlist}")
         downloader = YouTubeDownloader(
-            proxy=config.proxy.get_proxy(),
+            proxy=config.get_stage_proxy("downloader"),
             video_format=config.downloader.youtube.format,
             cookies_file=config.downloader.youtube.cookies_file,
             remote_components=config.downloader.youtube.remote_components,
@@ -268,7 +268,7 @@ def pipeline(ctx, url, playlist, file, gpus, force):
     if playlist:
         logger.info(f"获取播放列表: {playlist}")
         downloader = YouTubeDownloader(
-            proxy=config.proxy.get_proxy(),
+            proxy=config.get_stage_proxy("downloader"),
             video_format=config.downloader.youtube.format,
             cookies_file=config.downloader.youtube.cookies_file,
             remote_components=config.downloader.youtube.remote_components,
@@ -964,7 +964,7 @@ def playlist_add(ctx, url, sync):
     db = Database(config.storage.database_path)
     
     downloader = YouTubeDownloader(
-        proxy=config.proxy.get_proxy(),
+        proxy=config.get_stage_proxy("downloader"),
         video_format=config.downloader.youtube.format,
         cookies_file=config.downloader.youtube.cookies_file,
         remote_components=config.downloader.youtube.remote_components,
@@ -1030,7 +1030,7 @@ def playlist_sync(ctx, playlist_id):
         return
     
     downloader = YouTubeDownloader(
-        proxy=config.proxy.get_proxy(),
+        proxy=config.get_stage_proxy("downloader"),
         video_format=config.downloader.youtube.format,
         cookies_file=config.downloader.youtube.cookies_file,
         remote_components=config.downloader.youtube.remote_components,
@@ -1089,7 +1089,7 @@ def playlist_refresh(ctx, playlist_id, force_refetch, force_retranslate):
         return
     
     downloader = YouTubeDownloader(
-        proxy=config.proxy.get_proxy(),
+        proxy=config.get_stage_proxy("downloader"),
         video_format=config.downloader.youtube.format,
         cookies_file=config.downloader.youtube.cookies_file,
         remote_components=config.downloader.youtube.remote_components,

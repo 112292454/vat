@@ -60,7 +60,7 @@ def get_playlist_service(db: Database = Depends(get_db)) -> PlaylistService:
     from vat.config import load_config
     config = load_config()
     downloader = YouTubeDownloader(
-        proxy=config.proxy.get_proxy(),
+        proxy=config.get_stage_proxy("downloader"),
         video_format=config.downloader.youtube.format,
         cookies_file=config.downloader.youtube.cookies_file,
         remote_components=config.downloader.youtube.remote_components,
@@ -133,7 +133,7 @@ def _run_sync_in_background(
     config = load_config()
     db = Database(config.storage.database_path)
     downloader = YouTubeDownloader(
-        proxy=config.proxy.get_proxy(),
+        proxy=config.get_stage_proxy("downloader"),
         video_format=config.downloader.youtube.format,
         cookies_file=config.downloader.youtube.cookies_file,
         remote_components=config.downloader.youtube.remote_components,
@@ -189,7 +189,7 @@ async def add_playlist(
     
     config = load_config()
     downloader = YouTubeDownloader(
-        proxy=config.proxy.get_proxy(),
+        proxy=config.get_stage_proxy("downloader"),
         video_format=config.downloader.youtube.format,
         cookies_file=config.downloader.youtube.cookies_file,
         remote_components=config.downloader.youtube.remote_components,
@@ -322,7 +322,7 @@ def _run_refresh_in_background(
     config = load_config()
     db = Database(config.storage.database_path)
     downloader = YouTubeDownloader(
-        proxy=config.proxy.get_proxy(),
+        proxy=config.get_stage_proxy("downloader"),
         video_format=config.downloader.youtube.format,
         cookies_file=config.downloader.youtube.cookies_file,
         remote_components=config.downloader.youtube.remote_components,

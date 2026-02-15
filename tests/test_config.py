@@ -153,6 +153,100 @@ class TestYouTubeDownloaderConfig:
         assert config.downloader.youtube.remote_components == ['ejs:github']
 
 
+class TestProxyConfig:
+    """ProxyConfig 及 get_stage_proxy fallback 链测试"""
+
+    def test_global_only(self):
+        """无 override 时所有环节都使用全局代理"""
+        config = Config.from_dict(_minimal_config_dict(
+            proxy={'http_proxy': 'http://global:7890'}
+        ))
+        assert config.get_stage_proxy("downloader") == "http://global:7890"
+        assert config.get_stage_proxy("translate") == "http://global:7890"
+        assert config.get_stage_proxy("optimize") == "http://global:7890"
+        assert config.get_stage_proxy("split") == "http://global:7890"
+        assert config.get_stage_proxy("scene_identify") == "http://global:7890"
+
+    def test_no_proxy(self):
+        """全局代理为空时返回 None"""
+        config = Config.from_dict(_minimal_config_dict(
+            proxy={'http_proxy': ''}
+        ))
+        assert config.get_stage_proxy("downloader") is None
+        assert config.get_stage_proxy("translate") is None
+
+    def test_downloader_override(self):
+        """downloader 独立覆盖"""
+        config = Config.from_dict(_minimal_config_dict(
+            proxy={'http_proxy': 'http://global:7890', 'downloader': 'http://dl:1111'}
+        ))
+        assert config.get_stage_proxy("downloader") == "http://dl:1111"
+        assert config.get_stage_proxy("translate") == "http://global:7890"
+
+    def test_llm_override_affects_all_llm_stages(self):
+        """llm override 影响所有 LLM 环节"""
+        config = Config.from_dict(_minimal_config_dict(
+            proxy={'http_proxy': 'http://global:7890', 'llm': 'http://llm:2222'}
+        ))
+        assert config.get_stage_proxy("translate") == "http://llm:2222"
+        assert config.get_stage_proxy("optimize") == "http://llm:2222"
+        assert config.get_stage_proxy("split") == "http://llm:2222"
+        assert config.get_stage_proxy("scene_identify") == "http://llm:2222"
+        assert config.get_stage_proxy("video_info_translate") == "http://llm:2222"
+        # downloader 不受 llm override 影响
+        assert config.get_stage_proxy("downloader") == "http://global:7890"
+
+    def test_stage_override_over_llm(self):
+        """环节专属覆盖优先于 llm"""
+        config = Config.from_dict(_minimal_config_dict(
+            proxy={
+                'http_proxy': 'http://global:7890',
+                'llm': 'http://llm:2222',
+                'translate': 'http://google:3333',
+            }
+        ))
+        assert config.get_stage_proxy("translate") == "http://google:3333"
+        assert config.get_stage_proxy("split") == "http://llm:2222"
+
+    def test_optimize_fallback_to_translate(self):
+        """optimize fallback: optimize → translate → llm → global"""
+        config = Config.from_dict(_minimal_config_dict(
+            proxy={
+                'http_proxy': 'http://global:7890',
+                'translate': 'http://google:3333',
+            }
+        ))
+        # optimize 无专属，fallback 到 translate
+        assert config.get_stage_proxy("optimize") == "http://google:3333"
+
+    def test_optimize_own_override(self):
+        """optimize 有自己的覆盖时不走 translate"""
+        config = Config.from_dict(_minimal_config_dict(
+            proxy={
+                'http_proxy': 'http://global:7890',
+                'translate': 'http://google:3333',
+                'optimize': 'http://opt:4444',
+            }
+        ))
+        assert config.get_stage_proxy("optimize") == "http://opt:4444"
+        assert config.get_stage_proxy("translate") == "http://google:3333"
+
+    def test_proxy_config_overrides_field(self):
+        """ProxyConfig.overrides 正确解析"""
+        config = Config.from_dict(_minimal_config_dict(
+            proxy={'http_proxy': 'http://g:1', 'llm': 'http://l:2', 'downloader': 'http://d:3'}
+        ))
+        assert config.proxy.overrides == {'llm': 'http://l:2', 'downloader': 'http://d:3'}
+
+    def test_empty_override_ignored(self):
+        """空字符串的 override 被忽略（在 from_dict 中过滤）"""
+        config = Config.from_dict(_minimal_config_dict(
+            proxy={'http_proxy': 'http://g:1', 'llm': ''}
+        ))
+        assert 'llm' not in config.proxy.overrides
+        assert config.get_stage_proxy("translate") == "http://g:1"
+
+
 class TestConfigLoadFromFile:
     """从真实配置文件加载"""
 

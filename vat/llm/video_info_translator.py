@@ -213,7 +213,7 @@ class VideoInfoTranslator:
     并优化为适合B站的内容格式，同时推荐合适的分区。
     """
     
-    def __init__(self, model: str = "gpt-4o-mini", api_key: str = "", base_url: str = ""):
+    def __init__(self, model: str = "gpt-4o-mini", api_key: str = "", base_url: str = "", proxy: str = ""):
         """
         初始化翻译器
         
@@ -221,16 +221,18 @@ class VideoInfoTranslator:
             model: 使用的LLM模型
             api_key: API Key 覆写（空=使用全局配置）
             base_url: Base URL 覆写（空=使用全局配置）
+            proxy: 代理地址覆写（空=使用环境变量）
         """
         self.model = model
         self.api_key = api_key
         self.base_url = base_url
+        self.proxy = proxy
         self.client = None
     
     def _get_client(self):
         """获取LLM客户端（延迟初始化，支持 per-stage credentials）"""
         if self.client is None:
-            self.client = get_or_create_client(self.api_key, self.base_url)
+            self.client = get_or_create_client(self.api_key, self.base_url, self.proxy)
         return self.client
     
     def _build_zones_info(self) -> str:

@@ -465,14 +465,22 @@ class LoggingConfig:
 @dataclass
 class ProxyConfig:
     """
-    全局代理配置（统一管理，用于下载器、HuggingFace 模型加载、LLM API 调用等）
+    代理配置（全局默认 + 各环节独立覆盖）
+    
+    全局 http_proxy 设置环境变量，供 HuggingFace、requests 等库自动使用。
+    各环节可在 overrides 中指定独立代理，不设置则回退到全局。
+    
+    支持的 override key:
+        downloader, llm, split, translate, optimize,
+        scene_identify, video_info_translate
     """
-    http_proxy: str  # HTTP/HTTPS 代理地址，空字符串表示不使用代理
+    http_proxy: str  # 全局默认代理地址，空字符串表示不使用代理
+    overrides: Dict[str, str] = field(default_factory=dict)  # 各环节代理覆盖
     
     _initialized: bool = field(default=False, repr=False)
     
     def __post_init__(self):
-        """设置代理环境变量"""
+        """设置全局代理环境变量（仅 http_proxy，不含各环节覆盖）"""
         if self._initialized:
             return
         
@@ -491,11 +499,30 @@ class ProxyConfig:
                 os.environ.pop(var, None)
             logger.debug("代理未配置，已清除代理环境变量")
         
+        if self.overrides:
+            active = {k: v for k, v in self.overrides.items() if v}
+            if active:
+                logger.debug(f"各环节代理覆盖: {active}")
+        
         object.__setattr__(self, '_initialized', True)
     
     def get_proxy(self) -> Optional[str]:
-        """获取代理地址，空字符串返回 None"""
+        """获取全局代理地址，空字符串返回 None"""
         return self.http_proxy if self.http_proxy else None
+    
+    def get_proxy_for(self, stage: str) -> Optional[str]:
+        """获取特定环节的代理地址（环节覆盖 > 全局默认）
+        
+        Args:
+            stage: 环节名称（如 "downloader", "translate" 等）
+            
+        Returns:
+            代理地址字符串，None 表示不使用代理
+        """
+        override = self.overrides.get(stage, "")
+        if override:
+            return override
+        return self.get_proxy()
 
 
 @dataclass
@@ -676,10 +703,15 @@ class Config:
             model=llm_data.get('model', ''),
         )
         
-        # 代理配置（全局统一管理，自动设置环境变量）
+        # 代理配置（全局默认 + 各环节独立覆盖，自动设置环境变量）
         proxy_data = data.get('proxy', {})
+        proxy_overrides = {
+            k: str(v) for k, v in proxy_data.items()
+            if k != 'http_proxy' and isinstance(v, str) and v
+        }
         proxy = ProxyConfig(
-            http_proxy=proxy_data.get('http_proxy', '')
+            http_proxy=proxy_data.get('http_proxy', ''),
+            overrides=proxy_overrides,
         )
         
         # Web UI 配置（可选，有默认值）
@@ -804,6 +836,45 @@ class Config:
         }
 
 
+    def get_stage_proxy(self, stage: str) -> Optional[str]:
+        """获取指定阶段的有效代理地址
+        
+        Resolve 优先级：
+        - downloader:            proxy.downloader → proxy.http_proxy
+        - split:                 proxy.split → proxy.llm → proxy.http_proxy
+        - translate:             proxy.translate → proxy.llm → proxy.http_proxy
+        - optimize:              proxy.optimize → proxy.translate → proxy.llm → proxy.http_proxy
+        - scene_identify:        proxy.scene_identify → proxy.llm → proxy.http_proxy
+        - video_info_translate:  proxy.video_info_translate → proxy.llm → proxy.http_proxy
+        
+        Args:
+            stage: 阶段名称
+            
+        Returns:
+            代理地址字符串，None 表示不使用代理
+        """
+        overrides = self.proxy.overrides
+        
+        # 各阶段的 fallback 链（从高优先级到低优先级）
+        fallback_chains = {
+            "downloader":            ["downloader"],
+            "split":                 ["split", "llm"],
+            "translate":             ["translate", "llm"],
+            "optimize":              ["optimize", "translate", "llm"],
+            "scene_identify":        ["scene_identify", "llm"],
+            "video_info_translate":  ["video_info_translate", "llm"],
+        }
+        
+        chain = fallback_chains.get(stage, [stage, "llm"])
+        
+        for key in chain:
+            value = overrides.get(key, "")
+            if value:
+                return value
+        
+        # 最终回退到全局 http_proxy
+        return self.proxy.get_proxy()
+    
     def apply_playlist_prompts(self, playlist_metadata: dict) -> None:
         """应用 playlist 级别的 custom prompt 覆写
         

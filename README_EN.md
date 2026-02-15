@@ -205,7 +205,11 @@ Key configuration items:
 | `translator.llm.model` | LLM model for translation |
 | `translator.llm.enable_reflect` | Enable reflective translation |
 
-Each stage (split, translate, optimize) supports independent `api_key` / `base_url` / `model` overrides; empty values inherit from global config. See [`config/default.yaml`](config/default.yaml) for full reference.
+Each stage (split, translate, optimize) supports independent `api_key` / `base_url` / `model` overrides; empty values inherit from global config.
+
+Proxy also supports per-stage overrides: `proxy.http_proxy` is the global default; use `proxy.llm`, `proxy.translate`, `proxy.downloader`, etc. to specify independent proxies per component. LLM stage fallback chain: stage-specific → `proxy.llm` → `proxy.http_proxy`.
+
+See [`config/default.yaml`](config/default.yaml) for full reference.
 
 ---
 

@@ -5,6 +5,7 @@ import threading
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse, urlunparse
 
+import httpx
 import openai
 from openai import OpenAI
 from tenacity import (
@@ -104,20 +105,21 @@ def get_llm_client() -> OpenAI:
     return _global_client
 
 
-def get_or_create_client(api_key: str = "", base_url: str = "") -> OpenAI:
+def get_or_create_client(api_key: str = "", base_url: str = "", proxy: str = "") -> OpenAI:
     """Get or create an OpenAI client for specific credentials.
     
-    If both api_key and base_url are empty, returns the global client.
+    If both api_key and base_url are empty and no proxy override, returns the global client.
     For missing params, falls back to the corresponding environment variable.
     
     Args:
         api_key: API key (empty string = use global)
         base_url: Base URL (empty string = use global)
+        proxy: Proxy URL override for this client (empty string = use env vars)
     
     Returns:
-        OpenAI client instance (cached per unique credentials)
+        OpenAI client instance (cached per unique credentials + proxy)
     """
-    if not api_key and not base_url:
+    if not api_key and not base_url and not proxy:
         return get_llm_client()
     
     # Fill missing with global env vars
@@ -131,15 +133,20 @@ def get_or_create_client(api_key: str = "", base_url: str = "") -> OpenAI:
             f"base_url={'设置' if effective_url else '缺失'}"
         )
     
-    registry_key = (effective_url, effective_key)
+    # proxy 为空时不纳入 registry_key（使用环境变量，与无 proxy 等效）
+    registry_key = (effective_url, effective_key, proxy)
     
     if registry_key not in _client_registry:
         with _registry_lock:
             if registry_key not in _client_registry:
-                _client_registry[registry_key] = OpenAI(
-                    base_url=effective_url, api_key=effective_key
-                )
-                logger.debug(f"Created LLM client for: {effective_url}")
+                client_kwargs = dict(base_url=effective_url, api_key=effective_key)
+                if proxy:
+                    # 显式指定代理，覆盖环境变量
+                    client_kwargs["http_client"] = httpx.Client(proxy=proxy)
+                    logger.debug(f"Created LLM client for: {effective_url} (proxy: {proxy})")
+                else:
+                    logger.debug(f"Created LLM client for: {effective_url}")
+                _client_registry[registry_key] = OpenAI(**client_kwargs)
     
     return _client_registry[registry_key]
 
@@ -163,6 +170,7 @@ def call_llm(
     temperature: float = 1,
     api_key: str = "",
     base_url: str = "",
+    proxy: str = "",
     **kwargs: Any,
 ) -> Any:
     """Call LLM API with automatic caching.
@@ -173,6 +181,7 @@ def call_llm(
         temperature: Sampling temperature
         api_key: Per-call API key override (empty = use global)
         base_url: Per-call base URL override (empty = use global)
+        proxy: Per-call proxy override (empty = use env vars)
         **kwargs: Additional parameters for API call
 
     Returns:
@@ -181,7 +190,7 @@ def call_llm(
     Raises:
         ValueError: If response is invalid (empty choices or content)
     """
-    client = get_or_create_client(api_key, base_url)
+    client = get_or_create_client(api_key, base_url, proxy)
     # logger.trace(f"Calling LLM API: {model}, {messages}, {temperature}, {kwargs}")
 
     response = client.chat.completions.create(

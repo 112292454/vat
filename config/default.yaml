@@ -269,12 +269,20 @@ llm:
   model: "gemini-3-flash-preview"                  # 全局默认模型（各阶段未指定 model 时的 fallback）
 
 # =============================================================================
-# 代理配置（全局统一管理）
+# 代理配置（全局默认 + 各环节独立覆盖）
 # =============================================================================
 proxy:
-  http_proxy: "http://localhost:7890"       # HTTP/HTTPS 代理地址
+  http_proxy: "http://localhost:7890"       # 全局默认代理（用于下载器、HuggingFace 模型加载、LLM API 等）
                                             # 留空字符串 "" 表示不使用代理
-                                            # 用于：下载器、HuggingFace 模型加载、LLM API 调用等
+  # 各环节代理覆盖（留空或不设置 = 使用全局 http_proxy）
+  # 解析优先级：环节专属 → llm（LLM环节共用） → http_proxy
+  # downloader: ""                          # 下载器（YouTube 访问）
+  # llm: ""                                 # 所有 LLM API 调用的默认代理
+  # translate: ""                           # 翻译 LLM（如 Google API 需特定地区代理）
+  # optimize: ""                            # 优化 LLM（fallback: translate → llm → http_proxy）
+  # split: ""                               # 断句 LLM
+  # scene_identify: ""                      # 场景识别 LLM
+  # video_info_translate: ""                # 视频信息翻译 LLM
 
 # =============================================================================
 # Web UI 配置

@@ -13,7 +13,7 @@ SCENES_CONFIG_PATH = Path(__file__).parent / "scenes.yaml"
 class SceneIdentifier:
     """场景识别器，基于 LLM 判断视频场景"""
     
-    def __init__(self, model: str = "gpt-4o-mini", api_key: str = "", base_url: str = ""):
+    def __init__(self, model: str = "gpt-4o-mini", api_key: str = "", base_url: str = "", proxy: str = ""):
         """
         初始化场景识别器
         
@@ -21,10 +21,12 @@ class SceneIdentifier:
             model: LLM 模型名称
             api_key: API Key 覆写（空=使用全局配置）
             base_url: Base URL 覆写（空=使用全局配置）
+            proxy: 代理地址覆写（空=使用环境变量）
         """
         self.model = model
         self.api_key = api_key
         self.base_url = base_url
+        self.proxy = proxy
         self.scenes_config = self._load_scenes_config()
     
     def _load_scenes_config(self) -> Dict[str, Any]:
@@ -82,6 +84,7 @@ Output: """
             response = call_llm(
                 messages=messages, model=self.model, temperature=0.1,
                 api_key=self.api_key, base_url=self.base_url,
+                proxy=self.proxy,
             )
             
             if not response or not response.choices:

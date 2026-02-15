@@ -155,7 +155,7 @@ class VideoProcessor:
         """延迟初始化下载器"""
         if self._downloader is None:
             self._downloader = YouTubeDownloader(
-                proxy=self.config.proxy.get_proxy(),
+                proxy=self.config.get_stage_proxy("downloader"),
                 video_format=self.config.downloader.youtube.format,
                 cookies_file=self.config.downloader.youtube.cookies_file,
                 remote_components=self.config.downloader.youtube.remote_components,
@@ -587,6 +587,7 @@ class VideoProcessor:
                             model=si_cfg.model or self.config.llm.model,
                             api_key=si_cfg.api_key,
                             base_url=si_cfg.base_url,
+                            proxy=self.config.get_stage_proxy("scene_identify") or "",
                         )
                         description = metadata.get('description', '')
                         scene_info = identifier.detect_scene(title, description)
@@ -647,6 +648,7 @@ class VideoProcessor:
                                 model=vit_cfg.model or self.config.llm.model,
                                 api_key=vit_cfg.api_key,
                                 base_url=vit_cfg.base_url,
+                                proxy=self.config.get_stage_proxy("video_info_translate") or "",
                             )
                             description = metadata.get('description', '')
                             tags = metadata.get('tags', [])
@@ -1157,6 +1159,8 @@ class VideoProcessor:
             optimize_model=optimize_model_override,
             optimize_api_key=optimize_api_key_override,
             optimize_base_url=optimize_base_url_override,
+            proxy=self.config.get_stage_proxy("translate") or "",
+            optimize_proxy=self.config.get_stage_proxy("optimize") or "",
             progress_callback=self._make_component_progress_callback("subtitle_translator"),
         )
     
@@ -1465,6 +1469,7 @@ class VideoProcessor:
                 model_upgrade_chain=self.config.asr.split.model_upgrade_chain,
                 api_key=split_creds["api_key"],
                 base_url=split_creds["base_url"],
+                proxy=self.config.get_stage_proxy("split") or "",
             )
             return self._realign_timestamps(asr_data, split_texts)
         
@@ -1492,6 +1497,7 @@ class VideoProcessor:
                 model_upgrade_chain=self.config.asr.split.model_upgrade_chain,
                 api_key=split_creds["api_key"],
                 base_url=split_creds["base_url"],
+                proxy=self.config.get_stage_proxy("split") or "",
             )
             
             # 为该说话人的片段重新分配时间戳

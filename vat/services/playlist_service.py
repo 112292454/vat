@@ -491,6 +491,7 @@ class PlaylistService:
                     model=vit_cfg.model or config.llm.model,
                     api_key=vit_cfg.api_key,
                     base_url=vit_cfg.base_url,
+                    proxy=config.get_stage_proxy("video_info_translate") or "",
                 )
                 
                 title = video_info.get('title', '')

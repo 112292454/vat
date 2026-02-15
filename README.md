@@ -222,7 +222,11 @@ nano config/config.yaml
 | `translator.llm.model` | 翻译使用的 LLM 模型 |
 | `translator.llm.enable_reflect` | 是否启用反思翻译 |
 
-各阶段（断句、翻译、优化）支持独立覆写 `api_key` / `base_url` / `model`，留空则继承全局配置。完整说明参见 [`config/default.yaml`](config/default.yaml) 中的注释。
+各阶段（断句、翻译、优化）支持独立覆写 `api_key` / `base_url` / `model`，留空则继承全局配置。
+
+代理同样支持分阶段覆盖：`proxy.http_proxy` 为全局默认，可通过 `proxy.llm`、`proxy.translate`、`proxy.downloader` 等为各环节指定独立代理。LLM 环节的 fallback 链为：环节专属 → `proxy.llm` → `proxy.http_proxy`。
+
+完整说明参见 [`config/default.yaml`](config/default.yaml) 中的注释。
 
 ---
 

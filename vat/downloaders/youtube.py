@@ -137,7 +137,7 @@ class YouTubeDownloader(BaseDownloader):
         初始化YouTube下载器
         
         Args:
-            proxy: 代理地址（可选，由调用方从全局配置 config.proxy.get_proxy() 传入）
+            proxy: 代理地址（可选，由调用方从 config.get_stage_proxy("downloader") 传入）
             video_format: 视频格式选择
             cookies_file: cookie 文件路径（Netscape 格式），解决 YouTube bot 检测
             remote_components: yt-dlp 远程组件列表，如 ["ejs:github"]，解决 JS challenge

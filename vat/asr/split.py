@@ -47,6 +47,7 @@ def split_by_llm(
     model_upgrade_chain: List[str] | None = None,
     api_key: str = "",
     base_url: str = "",
+    proxy: str = "",
 ) -> List[str]:
     """使用LLM进行文本断句
 
@@ -63,6 +64,7 @@ def split_by_llm(
         mode: 断句模式，"sentence"（句子级）或 "semantic"（语义级）
         allow_model_upgrade: 是否允许在失败时升级到更强模型
         model_upgrade_chain: 模型升级顺序列表（从弱到强），仅在 allow_model_upgrade=True 时生效
+        proxy: LLM 代理地址（空字符串=使用环境变量）
 
     Returns:
         断句后的文本列表
@@ -79,7 +81,7 @@ def split_by_llm(
                 min_word_count_cjk, min_word_count_english, 
                 recommend_word_count_cjk, recommend_word_count_english,
                 scene_prompt, mode,
-                api_key=api_key, base_url=base_url,
+                api_key=api_key, base_url=base_url, proxy=proxy,
             )
             
             if success:
@@ -121,6 +123,7 @@ def _split_with_agent_loop(
     mode: str = "sentence",
     api_key: str = "",
     base_url: str = "",
+    proxy: str = "",
 ) -> Tuple[List[str], bool]:
     """使用agent loop 建立反馈循环进行文本断句，自动验证和修正
     
@@ -171,6 +174,7 @@ def _split_with_agent_loop(
             temperature=0.1,
             api_key=api_key,
             base_url=base_url,
+            proxy=proxy,
         )
 
         if not response or not response.choices:

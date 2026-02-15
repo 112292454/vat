@@ -40,6 +40,8 @@ class LLMTranslator(BaseTranslator):
         optimize_model: str = "",
         optimize_api_key: str = "",
         optimize_base_url: str = "",
+        proxy: str = "",
+        optimize_proxy: str = "",
         update_callback: Optional[Callable] = None,
         progress_callback: Optional[Callable] = None,
     ):
@@ -57,6 +59,8 @@ class LLMTranslator(BaseTranslator):
             enable_optimize: 是否启用字幕优化（前置步骤）
             custom_optimize_prompt: 优化自定义提示词
             enable_context: 是否启用前文上下文
+            proxy: 翻译 LLM 代理地址（空字符串=使用环境变量）
+            optimize_proxy: 优化 LLM 代理地址（空字符串=使用 proxy）
             update_callback: 数据回调（每批翻译结果）
             progress_callback: 进度消息回调
         """
@@ -77,10 +81,12 @@ class LLMTranslator(BaseTranslator):
         self.enable_context = enable_context
         self.api_key = api_key
         self.base_url = base_url
+        self.proxy = proxy
         # optimize 可独立覆写，留空则使用 translate 的凭据
         self.optimize_model = optimize_model or model
         self.optimize_api_key = optimize_api_key if optimize_api_key else api_key
         self.optimize_base_url = optimize_base_url if optimize_base_url else base_url
+        self.optimize_proxy = optimize_proxy if optimize_proxy else proxy
         
         # 存储前一个 batch 的翻译结果（用于上下文）
         self._previous_batch_result: Optional[Dict[str, str]] = None
@@ -230,6 +236,7 @@ class LLMTranslator(BaseTranslator):
                 response = call_llm(
                     messages=messages, model=self.optimize_model, temperature=0.2,
                     api_key=self.optimize_api_key, base_url=self.optimize_base_url,
+                    proxy=self.optimize_proxy,
                 )
                 
                 result_text = response.choices[0].message.content
@@ -514,6 +521,7 @@ class LLMTranslator(BaseTranslator):
             response = call_llm(
                 messages=messages, model=self.model,
                 api_key=self.api_key, base_url=self.base_url,
+                proxy=self.proxy,
             )
             if not response or not response.choices:
                 raise RuntimeError("LLM 未返回有效响应")
@@ -616,6 +624,7 @@ class LLMTranslator(BaseTranslator):
                     temperature=0.7,
                     api_key=self.api_key,
                     base_url=self.base_url,
+                    proxy=self.proxy,
                 )
                 translated_text = response.choices[0].message.content.strip()
                 data.translated_text = translated_text

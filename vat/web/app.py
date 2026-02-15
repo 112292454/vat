@@ -316,7 +316,7 @@ async def playlist_detail_page(
     # 进度统计（单次批量 SQL，替代逐视频 N+1 查询）
     progress_map_all = db.batch_get_playlist_progress()
     progress = progress_map_all.get(playlist_id, {
-        'total': len(all_videos), 'completed': 0, 'failed': 0, 'unavailable': 0, 'pending': len(all_videos)
+        'total': len(all_videos), 'completed': 0, 'partial_completed': 0, 'failed': 0, 'unavailable': 0, 'pending': len(all_videos)
     })
     
     # 全量 ID 列表（供 JS 批量操作使用）
@@ -368,13 +368,15 @@ async def playlist_detail_page(
         duration = metadata.get("duration", 0)
         duration_formatted = format_duration(duration) if duration else ""
         
-        # 状态判定：failed > running > completed > pending
+        # 状态判定：failed > running > completed > partial_completed > pending
         if vp.get("has_failed"):
             status = "failed"
         elif vp.get("has_running"):
             status = "running"
         elif pending_count == 0:
             status = "completed"
+        elif vp.get("completed", 0) > 0:
+            status = "partial_completed"
         else:
             status = "pending"
         
@@ -643,7 +645,9 @@ def _auto_sync_stale_playlists():
             sync_db = Database(config.storage.database_path)
             downloader = YouTubeDownloader(
                 proxy=config.proxy.get_proxy(),
-                video_format=config.downloader.youtube.format
+                video_format=config.downloader.youtube.format,
+                cookies_file=config.downloader.youtube.cookies_file,
+                remote_components=config.downloader.youtube.remote_components,
             )
             service = PlaylistService(sync_db, downloader)
             result = service.sync_playlist(

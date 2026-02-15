@@ -94,10 +94,15 @@ class YouTubeDownloaderConfig:
     download_subtitles: bool = True
     subtitle_languages: List[str] = None  # 默认在 __post_init__ 中设置
     subtitle_format: str = "vtt"
+    cookies_file: str = ""                # cookie 文件路径（Netscape 格式），解决 YouTube bot 检测
+    remote_components: List[str] = None   # yt-dlp 远程组件列表，如 ["ejs:github"]，解决 JS challenge
+    download_delay: float = 0             # 批量处理时视频间的延迟（秒），防止 YouTube 限流。0 表示不延迟
     
     def __post_init__(self):
         if self.subtitle_languages is None:
             self.subtitle_languages = ["ja", "zh", "en"]
+        if self.remote_components is None:
+            self.remote_components = []
 
 
 @dataclass

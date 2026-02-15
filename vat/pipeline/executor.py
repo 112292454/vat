@@ -156,7 +156,9 @@ class VideoProcessor:
         if self._downloader is None:
             self._downloader = YouTubeDownloader(
                 proxy=self.config.proxy.get_proxy(),
-                video_format=self.config.downloader.youtube.format
+                video_format=self.config.downloader.youtube.format,
+                cookies_file=self.config.downloader.youtube.cookies_file,
+                remote_components=self.config.downloader.youtube.remote_components,
             )
         return self._downloader
     
@@ -811,7 +813,9 @@ class VideoProcessor:
                     asr_audio_file = audio_file
                 
                 # 直接使用音频文件进行 ASR（支持分块处理）
-                self.asr._ensure_model_loaded()
+                # 注意：不在此处调用 _ensure_model_loaded()
+                # 分块路径：worker 进程各自加载模型，主进程不需要
+                # 非分块路径：asr_audio 内部会自行调用 _ensure_model_loaded
                 asr_data = self.asr._asr_with_chunking(
                     asr_audio_file, 
                     progress_callback=whisper_progress

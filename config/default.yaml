@@ -28,6 +28,14 @@ downloader:
     subtitle_languages: ["ja", "zh"]  # 字幕语言优先级（按顺序尝试）
                                             # 常用语言代码: ja=日语, zh=中文, en=英语, ko=韩语
     subtitle_format: "vtt"                  # 字幕格式: vtt/srt/ass
+    
+    # YouTube 反爬配置
+    cookies_file: "cookies/www.youtube.com_cookies.txt"  # 当youtube直接下载失败时配置，参考yt-dlp官方文档导出cookie。Cookie文件路径（Netscape格式），解决 YouTube bot 检测
+                                            # 留空字符串 "" 表示不使用 cookie
+                                            # 获取方式: 浏览器插件导出 Netscape 格式 cookie
+    remote_components: ["ejs:github"]       # yt-dlp 远程组件，解决 YouTube JS challenge
+                                            # 推荐 ["ejs:github"]，留空列表 [] 表示不启用
+    download_delay: 30                       # 批量下载视频间的延迟（秒），防止 YouTube 限流。0 表示不延迟
   
   # 场景识别（下载时根据标题/简介判断视频场景，极简单的分类任务）
   # 留空则继承全局 llm 配置

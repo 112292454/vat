@@ -190,9 +190,18 @@ class SingleGPUScheduler:
         
         logger.info(f"使用 GPU {self.gpu_id} 顺序处理 {len(video_ids)} 个视频")
         
+        # 视频间延迟（从配置读取）
+        download_delay = self.config.downloader.youtube.download_delay
+        
         # 逐个处理
         for i, video_id in enumerate(video_ids):
             assert video_id, f"第 {i+1} 个视频ID为空"
+            
+            if i > 0 and download_delay > 0:
+                logger.info(f"等待 {download_delay:.0f} 秒后处理下一个视频...")
+                import time
+                time.sleep(download_delay)
+            
             logger.info(f"处理视频 [{i+1}/{len(video_ids)}]: {video_id}")
             
             try:

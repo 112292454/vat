@@ -57,6 +57,10 @@
                 <span class="text-gray-500">执行阶段:</span>
                 <span class="ml-2 font-medium">{{ task.steps|join(', ') }}</span>
             </div>
+            <div>
+                <span class="text-gray-500">强制模式:</span>
+                <span class="ml-2 font-medium">{% if task.force %}是{% else %}否{% endif %}</span>
+            </div>
             <div class="col-span-2">
                 <span class="text-gray-500">处理视频:</span>
                 <span class="ml-2 font-medium">

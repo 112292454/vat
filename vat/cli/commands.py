@@ -89,7 +89,9 @@ def download(ctx, url, playlist, file):
         logger.info(f"获取播放列表: {playlist}")
         downloader = YouTubeDownloader(
             proxy=config.proxy.get_proxy(),
-            video_format=config.downloader.youtube.format
+            video_format=config.downloader.youtube.format,
+            cookies_file=config.downloader.youtube.cookies_file,
+            remote_components=config.downloader.youtube.remote_components,
         )
         playlist_urls = downloader.get_playlist_urls(playlist)
         urls.extend(playlist_urls)
@@ -267,7 +269,9 @@ def pipeline(ctx, url, playlist, file, gpus, force):
         logger.info(f"获取播放列表: {playlist}")
         downloader = YouTubeDownloader(
             proxy=config.proxy.get_proxy(),
-            video_format=config.downloader.youtube.format
+            video_format=config.downloader.youtube.format,
+            cookies_file=config.downloader.youtube.cookies_file,
+            remote_components=config.downloader.youtube.remote_components,
         )
         playlist_urls = downloader.get_playlist_urls(playlist)
         urls.extend(playlist_urls)
@@ -559,8 +563,9 @@ def parse_stages(stages_str: str) -> List[TaskStep]:
 @click.option('--force', '-f', is_flag=True, help='强制重新处理（即使已完成）')
 @click.option('--dry-run', is_flag=True, help='仅显示将要执行的操作，不实际执行')
 @click.option('--concurrency', '-c', default=1, type=int, help='并发处理的视频数量（默认1，即串行）')
+@click.option('--delay', '-d', default=None, type=float, help='视频间处理延迟（秒），防止 YouTube 限流。默认从配置读取')
 @click.pass_context
-def process(ctx, video_id, process_all, playlist, stages, gpu, force, dry_run, concurrency):
+def process(ctx, video_id, process_all, playlist, stages, gpu, force, dry_run, concurrency, delay):
     """
     处理视频（支持细粒度阶段控制）
     
@@ -675,6 +680,9 @@ def process(ctx, video_id, process_all, playlist, stages, gpu, force, dry_run, c
     step_names = [s.value for s in target_steps]
     total = len(video_ids)
     
+    # 确定视频间延迟：CLI 参数优先，否则从配置读取
+    download_delay = delay if delay is not None else config.downloader.youtube.download_delay
+    
     def process_one_video(args):
         """处理单个视频（可在线程池中并发调用）"""
         idx, vid = args
@@ -710,7 +718,11 @@ def process(ctx, video_id, process_all, playlist, stages, gpu, force, dry_run, c
         """执行一批视频处理，返回失败的视频ID列表"""
         failed_vids = []
         if concurrency <= 1:
-            for idx, vid in video_list:
+            for i, (idx, vid) in enumerate(video_list):
+                if i > 0 and download_delay > 0:
+                    logger.info(f"等待 {download_delay:.0f} 秒后处理下一个视频...")
+                    import time
+                    time.sleep(download_delay)
                 _, success, _ = process_one_video((idx, vid))
                 if not success:
                     failed_vids.append(vid)
@@ -791,7 +803,9 @@ def playlist_add(ctx, url, sync):
     
     downloader = YouTubeDownloader(
         proxy=config.proxy.get_proxy(),
-        video_format=config.downloader.youtube.format
+        video_format=config.downloader.youtube.format,
+        cookies_file=config.downloader.youtube.cookies_file,
+        remote_components=config.downloader.youtube.remote_components,
     )
     
     playlist_service = PlaylistService(db, downloader)
@@ -855,7 +869,9 @@ def playlist_sync(ctx, playlist_id):
     
     downloader = YouTubeDownloader(
         proxy=config.proxy.get_proxy(),
-        video_format=config.downloader.youtube.format
+        video_format=config.downloader.youtube.format,
+        cookies_file=config.downloader.youtube.cookies_file,
+        remote_components=config.downloader.youtube.remote_components,
     )
     
     playlist_service = PlaylistService(db, downloader)

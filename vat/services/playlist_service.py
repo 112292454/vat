@@ -54,8 +54,13 @@ class PlaylistService:
     
     @property
     def downloader(self) -> YouTubeDownloader:
-        """延迟初始化下载器"""
+        """延迟初始化下载器
+        
+        注意：裸初始化不带 cookies/remote_components，仅用于 Playlist URL 解析等轻量操作。
+        完整功能（下载视频等）应由调用方传入已配置的 downloader。
+        """
         if self._downloader is None:
+            logger.warning("PlaylistService 使用裸初始化的 YouTubeDownloader（无 cookies/remote_components）")
             self._downloader = YouTubeDownloader()
         return self._downloader
     
@@ -763,9 +768,11 @@ class PlaylistService:
         Returns:
             {
                 'total': 总视频数,
-                'completed': 完成数,
-                'pending': 待处理数,
-                'failed': 失败数,
+                'completed': 全部完成数,
+                'partial_completed': 部分完成数（有已完成阶段但未全部完成，且无失败）,
+                'pending': 完全未处理数,
+                'failed': 有失败阶段的视频数,
+                'unavailable': 不可用视频数,
                 'by_step': {step: {'completed': N, 'pending': N, 'failed': N}}
             }
         """
@@ -774,6 +781,7 @@ class PlaylistService:
         videos = self.get_playlist_videos(playlist_id)
         total = len(videos)
         completed = 0
+        partial_completed = 0
         failed = 0
         unavailable = 0
         by_step = {}
@@ -795,8 +803,15 @@ class PlaylistService:
             
             # 检查是否全部完成
             pending_steps = self.db.get_pending_steps(video.id)
+            has_completed_step = any(t.status == TaskStatus.COMPLETED for t in tasks)
+            has_failed_step = any(t.status == TaskStatus.FAILED for t in tasks)
+            
             if not pending_steps:
                 completed += 1
+            elif has_failed_step:
+                failed += 1
+            elif has_completed_step:
+                partial_completed += 1
             
             # 统计每个阶段
             for step in DEFAULT_STAGE_SEQUENCE:
@@ -806,7 +821,6 @@ class PlaylistService:
                         by_step[step.value]['completed'] += 1
                     elif task.status == TaskStatus.FAILED:
                         by_step[step.value]['failed'] += 1
-                        failed += 1
                     else:
                         by_step[step.value]['pending'] += 1
                 else:
@@ -818,7 +832,8 @@ class PlaylistService:
         return {
             'total': total,
             'completed': completed,
-            'pending': processable - completed,
+            'partial_completed': partial_completed,
+            'pending': processable - completed - partial_completed,
             'failed': failed,
             'unavailable': unavailable,
             'by_step': by_step

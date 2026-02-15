@@ -37,7 +37,7 @@
         </div>
         
         <!-- 进度统计（可点击跳转首页筛选） -->
-        <div class="grid grid-cols-5 gap-3 mb-4">
+        <div class="grid grid-cols-6 gap-3 mb-4">
             <a href="/?playlist_id={{ playlist.id }}" class="text-center p-3 bg-gray-50 rounded-lg hover:bg-gray-100 transition">
                 <div class="text-2xl font-bold text-gray-800">{{ progress.total }}</div>
                 <div class="text-sm text-gray-500">总视频</div>
@@ -45,6 +45,10 @@
             <a href="/?playlist_id={{ playlist.id }}&status=completed" class="text-center p-3 bg-green-50 rounded-lg hover:bg-green-100 transition">
                 <div class="text-2xl font-bold text-green-600">{{ progress.completed }}</div>
                 <div class="text-sm text-gray-500">已完成</div>
+            </a>
+            <a href="/?playlist_id={{ playlist.id }}&status=partial_completed" class="text-center p-3 bg-orange-50 rounded-lg hover:bg-orange-100 transition">
+                <div class="text-2xl font-bold text-orange-600">{{ progress.partial_completed|default(0, true) }}</div>
+                <div class="text-sm text-gray-500">部分完成</div>
             </a>
             <a href="/?playlist_id={{ playlist.id }}&status=pending" class="text-center p-3 bg-yellow-50 rounded-lg hover:bg-yellow-100 transition">
                 <div class="text-2xl font-bold text-yellow-600">{{ progress.pending }}</div>
@@ -136,6 +140,7 @@
         <span class="text-gray-600 text-sm">状态:</span>
         <button onclick="filterPlVideos('')" class="filter-tag px-3 py-1 rounded-full text-sm bg-gray-800 text-white" data-filter-value="" data-active-class="bg-gray-800 text-white">全部</button>
         <button onclick="filterPlVideos('completed')" class="filter-tag px-3 py-1 rounded-full text-sm bg-gray-200 text-gray-700" data-filter-value="completed" data-active-class="bg-green-600 text-white">已完成</button>
+        <button onclick="filterPlVideos('partial_completed')" class="filter-tag px-3 py-1 rounded-full text-sm bg-gray-200 text-gray-700" data-filter-value="partial_completed" data-active-class="bg-orange-600 text-white">部分完成</button>
         <button onclick="filterPlVideos('pending')" class="filter-tag px-3 py-1 rounded-full text-sm bg-gray-200 text-gray-700" data-filter-value="pending" data-active-class="bg-yellow-600 text-white">待处理</button>
         <button onclick="filterPlVideos('failed')" class="filter-tag px-3 py-1 rounded-full text-sm bg-gray-200 text-gray-700" data-filter-value="failed" data-active-class="bg-red-600 text-white">失败</button>
         <button onclick="filterPlVideos('running')" class="filter-tag px-3 py-1 rounded-full text-sm bg-gray-200 text-gray-700" data-filter-value="running" data-active-class="bg-blue-600 text-white">进行中</button>
@@ -219,6 +224,10 @@
                         <span class="px-2 py-1 text-xs bg-red-100 text-red-800 rounded-full">失败</span>
                         {% elif video.status == 'running' %}
                         <span class="px-2 py-1 text-xs bg-blue-100 text-blue-800 rounded-full">进行中</span>
+                        {% elif video.status == 'partial_completed' %}
+                        <span class="px-2 py-1 text-xs bg-orange-100 text-orange-800 rounded-full">
+                            部分完成 (剩 {{ video.pending_count }} 阶段)
+                        </span>
                         {% else %}
                         <span class="px-2 py-1 text-xs bg-yellow-100 text-yellow-800 rounded-full">
                             待处理 ({{ video.pending_count }} 阶段)

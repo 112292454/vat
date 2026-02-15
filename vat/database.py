@@ -408,6 +408,7 @@ class Database:
                             f"vs.completed_count >= {total_steps}" if status == 'completed' else
                             "vs.failed_count > 0" if status == 'failed' else
                             "vs.running_count > 0" if status == 'running' else
+                            f"vs.completed_count > 0 AND vs.completed_count < {total_steps} AND vs.failed_count = 0 AND vs.running_count = 0" if status == 'partial_completed' else
                             f"vs.completed_count < {total_steps} AND vs.failed_count = 0 AND vs.running_count = 0" if status == 'pending' else "1=1"
                         }
                     )
@@ -868,13 +869,17 @@ class Database:
                 SELECT 
                     SUM(CASE WHEN completed_count >= {total_steps} THEN 1 ELSE 0 END) as completed_videos,
                     SUM(CASE WHEN failed_count > 0 THEN 1 ELSE 0 END) as failed_videos,
-                    SUM(CASE WHEN running_count > 0 THEN 1 ELSE 0 END) as running_videos
+                    SUM(CASE WHEN running_count > 0 THEN 1 ELSE 0 END) as running_videos,
+                    SUM(CASE WHEN completed_count > 0 AND completed_count < {total_steps}
+                                  AND failed_count = 0 AND running_count = 0
+                         THEN 1 ELSE 0 END) as partial_completed_videos
                 FROM video_stats
             """)
             row = cursor.fetchone()
             completed_videos = row['completed_videos'] or 0
             failed_videos = row['failed_videos'] or 0
             running_videos = row['running_videos'] or 0
+            partial_completed_videos = row['partial_completed_videos'] or 0
             
             # 各步骤状态统计
             cursor.execute("""
@@ -888,6 +893,7 @@ class Database:
                 'completed_videos': completed_videos,
                 'failed_videos': failed_videos,
                 'running_videos': running_videos,
+                'partial_completed_videos': partial_completed_videos,
                 'tasks_by_status': {}
             }
             
@@ -1128,7 +1134,12 @@ class Database:
                     SUM(CASE WHEN COALESCE(JSON_EXTRACT(v.metadata, '$.unavailable'), 0) != 1
                                   AND COALESCE(vts.completed_steps, 0) >= {total_steps} THEN 1 ELSE 0 END) as completed,
                     SUM(CASE WHEN COALESCE(JSON_EXTRACT(v.metadata, '$.unavailable'), 0) != 1
-                                  AND COALESCE(vts.failed_steps, 0) > 0 THEN 1 ELSE 0 END) as failed
+                                  AND COALESCE(vts.failed_steps, 0) > 0 THEN 1 ELSE 0 END) as failed,
+                    SUM(CASE WHEN COALESCE(JSON_EXTRACT(v.metadata, '$.unavailable'), 0) != 1
+                                  AND COALESCE(vts.completed_steps, 0) > 0
+                                  AND COALESCE(vts.completed_steps, 0) < {total_steps}
+                                  AND COALESCE(vts.failed_steps, 0) = 0
+                         THEN 1 ELSE 0 END) as partial_completed
                 FROM playlist_videos pv
                 JOIN videos v ON v.id = pv.video_id
                 LEFT JOIN video_task_summary vts ON vts.video_id = pv.video_id
@@ -1142,13 +1153,15 @@ class Database:
                 unavailable = row['unavailable'] or 0
                 completed = row['completed'] or 0
                 failed = row['failed'] or 0
+                partial_completed = row['partial_completed'] or 0
                 processable = total - unavailable
                 result[pid] = {
                     'total': total,
                     'completed': completed,
+                    'partial_completed': partial_completed,
                     'failed': failed,
                     'unavailable': unavailable,
-                    'pending': processable - completed,
+                    'pending': processable - completed - partial_completed,
                 }
             return result
     

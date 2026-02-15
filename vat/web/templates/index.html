@@ -4,7 +4,7 @@
 
 {% block content %}
 <!-- 统计卡片 -->
-<div class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
+<div class="grid grid-cols-1 md:grid-cols-5 gap-4 mb-6">
     <div class="bg-white rounded-lg shadow p-4">
         <div class="text-2xl font-bold text-gray-800">{{ stats.total_videos }}</div>
         <div class="text-sm text-gray-500">视频总数</div>
@@ -12,6 +12,10 @@
     <a href="?status=completed" class="bg-white rounded-lg shadow p-4 hover:bg-green-50 transition">
         <div class="text-2xl font-bold text-green-600">{{ stats.completed_videos }}</div>
         <div class="text-sm text-gray-500">已完成</div>
+    </a>
+    <a href="?status=partial_completed" class="bg-white rounded-lg shadow p-4 hover:bg-orange-50 transition">
+        <div class="text-2xl font-bold text-orange-600">{{ stats.partial_completed_videos }}</div>
+        <div class="text-sm text-gray-500">部分完成</div>
     </a>
     <a href="?status=running" class="bg-white rounded-lg shadow p-4 hover:bg-blue-50 transition">
         <div class="text-2xl font-bold text-blue-600">{{ stats.running_videos }}</div>
@@ -77,6 +81,8 @@
            class="px-3 py-1 rounded-full text-sm {% if not status_filter %}bg-gray-800 text-white{% else %}bg-gray-200 text-gray-700 hover:bg-gray-300{% endif %}">全部</a>
         <a href="/?status=completed{% if search_query %}&q={{ search_query }}{% endif %}{% if playlist_filter %}&playlist_id={{ playlist_filter }}{% endif %}{{ sf_params }}" 
            class="px-3 py-1 rounded-full text-sm {% if status_filter == 'completed' %}bg-green-600 text-white{% else %}bg-gray-200 text-gray-700 hover:bg-gray-300{% endif %}">已完成</a>
+        <a href="/?status=partial_completed{% if search_query %}&q={{ search_query }}{% endif %}{% if playlist_filter %}&playlist_id={{ playlist_filter }}{% endif %}{{ sf_params }}" 
+           class="px-3 py-1 rounded-full text-sm {% if status_filter == 'partial_completed' %}bg-orange-600 text-white{% else %}bg-gray-200 text-gray-700 hover:bg-gray-300{% endif %}">部分完成</a>
         <a href="/?status=running{% if search_query %}&q={{ search_query }}{% endif %}{% if playlist_filter %}&playlist_id={{ playlist_filter }}{% endif %}{{ sf_params }}" 
            class="px-3 py-1 rounded-full text-sm {% if status_filter == 'running' %}bg-blue-600 text-white{% else %}bg-gray-200 text-gray-700 hover:bg-gray-300{% endif %}">进行中</a>
         <a href="/?status=failed{% if search_query %}&q={{ search_query }}{% endif %}{% if playlist_filter %}&playlist_id={{ playlist_filter }}{% endif %}{{ sf_params }}" 

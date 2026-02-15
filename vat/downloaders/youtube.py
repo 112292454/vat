@@ -2,6 +2,7 @@
 YouTube下载器实现
 """
 import re
+import time
 import hashlib
 from pathlib import Path
 from typing import List, Dict, Optional, Any
@@ -11,6 +12,79 @@ from .base import BaseDownloader
 from vat.utils.logger import setup_logger
 
 logger = setup_logger("downloader.youtube")
+
+# ==================== 网络错误分类与重试 ====================
+
+# 可重试的瞬态网络错误关键词（VPN/proxy 故障、临时网络中断）
+# 这类错误等一会通常能自行恢复
+_RETRYABLE_ERROR_PATTERNS = [
+    r'Connection reset by peer',
+    r'Connection refused',
+    r'Connection aborted',
+    r'Unable to connect to proxy',
+    r'Failed to establish a new connection',
+    r'ProxyError',
+    r'NewConnectionError',
+    r'Remote end closed connection',
+    r'Network is unreachable',
+    r'No route to host',
+    r'HTTP Error 503',
+    r'HTTP Error 502',
+    r'503.*Service',
+    r'502.*Bad Gateway',
+    r'TimeoutError',
+    r'Read timed out',
+    r'Connection timed out',
+    r'SSLError',
+    r'EOF occurred',
+]
+
+# 不可重试的错误关键词（YouTube 限制、需要用户操作）
+# 等待无法解决，需要更换 IP/cookie 等
+_NON_RETRYABLE_ERROR_PATTERNS = [
+    r'Sign in to confirm',
+    r'rate[\-\s]?limit',
+    r'Video unavailable',
+    r'This video is private',
+    r'copyright',
+    r'removed by',
+    r'not available.*try again later',
+    r'confirm you.re not a bot',
+    r'This content isn.t available',
+    r'been terminated',
+    r'This video has been removed',
+]
+
+# 重试参数
+_RETRY_INITIAL_WAIT_SEC = 30     # 首次重试等待（秒）
+_RETRY_MAX_WAIT_SEC = 300        # 单次最大等待（秒）
+_RETRY_BACKOFF_FACTOR = 2        # 退避倍数
+_RETRY_MAX_TOTAL_SEC = 1800      # 最大总等待时间（30分钟）
+
+
+def _is_retryable_network_error(error_msg: str) -> bool:
+    """判断错误是否为可重试的瞬态网络问题
+    
+    优先检查不可重试模式（YouTube 限制），再检查可重试模式（网络瞬态故障）。
+    未匹配任何模式时返回 False（不重试，正常报错）。
+    
+    Args:
+        error_msg: 错误信息字符串
+        
+    Returns:
+        True = 可重试（VPN/proxy 故障等），False = 不可重试（立即失败）
+    """
+    # 先排除不可重试的错误（优先级更高）
+    for pattern in _NON_RETRYABLE_ERROR_PATTERNS:
+        if re.search(pattern, error_msg, re.IGNORECASE):
+            return False
+    
+    # 再匹配可重试的网络错误
+    for pattern in _RETRYABLE_ERROR_PATTERNS:
+        if re.search(pattern, error_msg, re.IGNORECASE):
+            return True
+    
+    return False
 
 
 class YtDlpLogger:
@@ -153,84 +227,177 @@ class YouTubeDownloader(BaseDownloader):
         
         ydl_opts = self._get_ydl_opts(output_dir, download_subs=download_subs, sub_langs=sub_langs)
         
-        with YoutubeDL(ydl_opts) as ydl:
-            # 先提取信息
-            logger.info(f"正在提取视频信息: {url}")
-            info = ydl.extract_info(url, download=False)
-            
-            if info is None:
-                raise RuntimeError(f"无法获取视频信息: {url}")
-            
-            video_id = info.get('id', '')
-            if not video_id:
-                raise RuntimeError(f"视频信息中缺少ID: {url}")
-            
-            title = info.get('title', 'Unknown')
-            description = info.get('description', '')
-            duration = info.get('duration', 0)
-            uploader = info.get('uploader', '')
-            upload_date = info.get('upload_date', '')
-            
-            # 记录可用字幕信息
-            available_subs = list(info.get('subtitles', {}).keys())
-            available_auto_subs = list(info.get('automatic_captions', {}).keys())
-            
-            # 下载视频（和字幕）
-            logger.info(f"开始下载视频: {title}")
-            if download_subs and (available_subs or available_auto_subs):
-                logger.info(f"同时下载字幕 - 手动: {available_subs[:5]}, 自动: {available_auto_subs[:5]}...")
-            # 注意：ignoreerrors=True 时 yt-dlp 不抛异常，返回非零码表示有错误
-            ret_code = ydl.download([url])
-            
-            # 查找下载的视频文件
-            video_path = None
-            for ext in ['mp4', 'webm', 'mkv']:
-                potential_path = output_dir / f"{video_id}.{ext}"
-                if potential_path.exists():
-                    video_path = potential_path
-                    break
-            
-            if video_path is None:
-                # 区分：yt-dlp 报告了错误（网络/限流等）vs 文件格式不匹配
-                if ret_code != 0:
-                    raise RuntimeError(
-                        f"视频下载失败（yt-dlp 返回码 {ret_code}），"
-                        f"可能原因：网络连接被重置、YouTube 限流、代理问题。"
-                        f"视频: {video_id}"
-                    )
-                raise FileNotFoundError(
-                    f"yt-dlp 报告下载成功但找不到视频文件: {video_id} 在 {output_dir}，"
-                    f"可能是输出格式不匹配（当前查找: mp4/webm/mkv）"
-                )
-            
-            if video_path.stat().st_size == 0:
-                raise RuntimeError(f"下载的视频文件大小为0: {video_path}")
-            
-            # 查找下载的字幕文件
-            subtitles = {}
-            if download_subs:
-                for sub_file in output_dir.glob(f"{video_id}.*.vtt"):
-                    # 文件名格式: {video_id}.{lang}.vtt
-                    lang = sub_file.stem.replace(f"{video_id}.", "")
-                    subtitles[lang] = sub_file
-                    logger.info(f"已下载字幕: {lang} -> {sub_file.name}")
-            
-            return {
-                'video_path': video_path,
-                'title': title,
-                'subtitles': subtitles,  # {lang: Path}
-                'metadata': {
-                    'video_id': video_id,
-                    'description': description,
-                    'duration': duration,
-                    'uploader': uploader,
-                    'upload_date': upload_date,
-                    'thumbnail': info.get('thumbnail', ''),
-                    'url': url,
-                    'available_subtitles': available_subs,
-                    'available_auto_subtitles': available_auto_subs,
-                }
+        # ====== Phase 1: 提取视频信息（带网络重试） ======
+        info = self._extract_info_with_retry(url, ydl_opts)
+        
+        video_id = info.get('id', '')
+        if not video_id:
+            raise RuntimeError(f"视频信息中缺少ID: {url}")
+        
+        title = info.get('title', 'Unknown')
+        description = info.get('description', '')
+        duration = info.get('duration', 0)
+        uploader = info.get('uploader', '')
+        upload_date = info.get('upload_date', '')
+        
+        # 记录可用字幕信息
+        available_subs = list(info.get('subtitles', {}).keys())
+        available_auto_subs = list(info.get('automatic_captions', {}).keys())
+        
+        # ====== Phase 2: 下载视频和字幕（带网络重试） ======
+        logger.info(f"开始下载视频: {title}")
+        if download_subs and (available_subs or available_auto_subs):
+            logger.info(f"同时下载字幕 - 手动: {available_subs[:5]}, 自动: {available_auto_subs[:5]}...")
+        
+        self._download_with_retry(url, ydl_opts, video_id)
+        
+        # 查找下载的视频文件
+        video_path = None
+        for ext in ['mp4', 'webm', 'mkv']:
+            potential_path = output_dir / f"{video_id}.{ext}"
+            if potential_path.exists():
+                video_path = potential_path
+                break
+        
+        if video_path is None:
+            raise FileNotFoundError(
+                f"下载完成但找不到视频文件: {video_id} 在 {output_dir}，"
+                f"可能是输出格式不匹配（当前查找: mp4/webm/mkv）"
+            )
+        
+        if video_path.stat().st_size == 0:
+            raise RuntimeError(f"下载的视频文件大小为0: {video_path}")
+        
+        # 查找下载的字幕文件
+        subtitles = {}
+        if download_subs:
+            for sub_file in output_dir.glob(f"{video_id}.*.vtt"):
+                # 文件名格式: {video_id}.{lang}.vtt
+                lang = sub_file.stem.replace(f"{video_id}.", "")
+                subtitles[lang] = sub_file
+                logger.info(f"已下载字幕: {lang} -> {sub_file.name}")
+        
+        return {
+            'video_path': video_path,
+            'title': title,
+            'subtitles': subtitles,  # {lang: Path}
+            'metadata': {
+                'video_id': video_id,
+                'description': description,
+                'duration': duration,
+                'uploader': uploader,
+                'upload_date': upload_date,
+                'thumbnail': info.get('thumbnail', ''),
+                'url': url,
+                'available_subtitles': available_subs,
+                'available_auto_subtitles': available_auto_subs,
             }
+        }
+    
+    def _extract_info_with_retry(self, url: str, ydl_opts: dict) -> dict:
+        """提取视频信息，遇到瞬态网络错误时自动等待重试
+        
+        对于 VPN/proxy 故障等可重试错误，在当前线程内等待并重试，
+        而不是立即失败让调度器跳到下一个视频（因为下一个也会失败）。
+        
+        对于 YouTube 限流/风控等不可重试错误，立即抛出异常。
+        
+        Args:
+            url: 视频 URL
+            ydl_opts: yt-dlp 配置
+            
+        Returns:
+            视频信息字典
+            
+        Raises:
+            RuntimeError: 不可重试错误或重试耗尽
+        """
+        total_waited = 0
+        wait_sec = _RETRY_INITIAL_WAIT_SEC
+        
+        while True:
+            try:
+                with YoutubeDL(ydl_opts) as ydl:
+                    logger.info(f"正在提取视频信息: {url}")
+                    info = ydl.extract_info(url, download=False)
+                
+                if info is None:
+                    raise RuntimeError(f"无法获取视频信息: {url}")
+                
+                return info
+                
+            except Exception as e:
+                error_msg = str(e)
+                
+                if not _is_retryable_network_error(error_msg):
+                    # 不可重试（YouTube 限制等），立即失败
+                    raise RuntimeError(f"无法获取视频信息: {url}") from e
+                
+                # 可重试的网络错误
+                if total_waited >= _RETRY_MAX_TOTAL_SEC:
+                    raise RuntimeError(
+                        f"网络错误持续 {total_waited // 60} 分钟未恢复，放弃重试。"
+                        f"最后错误: {error_msg}"
+                    ) from e
+                
+                logger.warning(
+                    f"[网络瞬态错误] {error_msg[:120]}... "
+                    f"等待 {wait_sec}s 后重试（已等待 {total_waited}s/{_RETRY_MAX_TOTAL_SEC}s）"
+                )
+                time.sleep(wait_sec)
+                total_waited += wait_sec
+                wait_sec = min(wait_sec * _RETRY_BACKOFF_FACTOR, _RETRY_MAX_WAIT_SEC)
+    
+    def _download_with_retry(self, url: str, ydl_opts: dict, video_id: str) -> None:
+        """下载视频文件，遇到瞬态网络错误时自动等待重试
+        
+        逻辑与 _extract_info_with_retry 相同：可重试错误等待，不可重试错误立即失败。
+        
+        Args:
+            url: 视频 URL
+            ydl_opts: yt-dlp 配置
+            video_id: 视频 ID（用于日志）
+            
+        Raises:
+            RuntimeError: 不可重试错误或重试耗尽
+        """
+        total_waited = 0
+        wait_sec = _RETRY_INITIAL_WAIT_SEC
+        
+        while True:
+            try:
+                with YoutubeDL(ydl_opts) as ydl:
+                    ret_code = ydl.download([url])
+                
+                if ret_code != 0:
+                    # yt-dlp 返回非零码，检查是否有可重试的错误
+                    # 非零码可能是字幕下载失败（ignoreerrors=True 时不致命）
+                    # 检查视频文件是否已存在来判断是否真的失败
+                    # 这里先 return，让调用方检查文件是否存在
+                    logger.warning(f"yt-dlp 返回码 {ret_code}，检查文件是否已下载")
+                return
+                
+            except Exception as e:
+                error_msg = str(e)
+                
+                if not _is_retryable_network_error(error_msg):
+                    raise RuntimeError(
+                        f"视频下载失败: {error_msg}"
+                    ) from e
+                
+                if total_waited >= _RETRY_MAX_TOTAL_SEC:
+                    raise RuntimeError(
+                        f"下载网络错误持续 {total_waited // 60} 分钟未恢复，放弃重试。"
+                        f"视频: {video_id}，最后错误: {error_msg}"
+                    ) from e
+                
+                logger.warning(
+                    f"[下载网络错误] {error_msg[:120]}... "
+                    f"等待 {wait_sec}s 后重试（已等待 {total_waited}s/{_RETRY_MAX_TOTAL_SEC}s）"
+                )
+                time.sleep(wait_sec)
+                total_waited += wait_sec
+                wait_sec = min(wait_sec * _RETRY_BACKOFF_FACTOR, _RETRY_MAX_WAIT_SEC)
     
     def get_playlist_urls(self, playlist_url: str) -> List[str]:
         """

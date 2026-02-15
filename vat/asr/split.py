@@ -94,13 +94,18 @@ def split_by_llm(
                     current_model = next_model
                     continue
             
-            # 无法升级或不允许升级，返回最后结果
-            logger.warning(f"断句未通过验证，但无法继续升级模型，返回最后结果")
-            return result if result else [text]
+            # 无法升级或不允许升级
+            if result:
+                logger.warning(f"断句未通过验证，但无法继续升级模型，返回最后结果（降级）")
+                return result
+            else:
+                raise RuntimeError("断句失败：LLM 未返回有效结果，且无法升级模型")
             
         except Exception as e:
+            # 不静默 fallback：连接错误、API 错误等必须传播到上层
+            # 由 _run_split 统一处理为 ASRError，正确标记阶段失败
             logger.error(f"断句失败: {e}")
-            return [text]
+            raise
 
 
 def _split_with_agent_loop(

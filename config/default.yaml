@@ -278,7 +278,7 @@ proxy:
   # 解析优先级：环节专属 → llm（LLM环节共用） → http_proxy
   # downloader: ""                          # 下载器（YouTube 访问）
   # llm: ""                                 # 所有 LLM API 调用的默认代理
-  # translate: ""                           # 翻译 LLM（如 Google API 需特定地区代理）
+  translate: "http://localhost:7990"                           # 翻译 LLM（如 Google API 需特定地区代理）
   # optimize: ""                            # 优化 LLM（fallback: translate → llm → http_proxy）
   # split: ""                               # 断句 LLM
   # scene_identify: ""                      # 场景识别 LLM

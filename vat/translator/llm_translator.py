@@ -82,11 +82,11 @@ class LLMTranslator(BaseTranslator):
         self.api_key = api_key
         self.base_url = base_url
         self.proxy = proxy
-        # optimize 可独立覆写，留空则使用 translate 的凭据
+        self.optimize_proxy = optimize_proxy  # 由 config.get_stage_proxy 统一 resolve，无类内 fallback
+        # optimize 可独立覆写，留空则使用 translate 的凭据（api_key/base_url 的 fallback 由调用方处理）
         self.optimize_model = optimize_model or model
         self.optimize_api_key = optimize_api_key if optimize_api_key else api_key
         self.optimize_base_url = optimize_base_url if optimize_base_url else base_url
-        self.optimize_proxy = optimize_proxy if optimize_proxy else proxy
         
         # 存储前一个 batch 的翻译结果（用于上下文）
         self._previous_batch_result: Optional[Dict[str, str]] = None

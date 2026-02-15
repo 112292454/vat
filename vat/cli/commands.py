@@ -557,7 +557,7 @@ def parse_stages(stages_str: str) -> List[TaskStep]:
 @click.option('--all', 'process_all', is_flag=True, help='处理所有待处理的视频')
 @click.option('--playlist', '-p', help='处理指定 Playlist 中的视频')
 @click.option('--stages', '-s', default='all', 
-              help='要执行的阶段（逗号分隔）: download,whisper,split,optimize,translate,embed,upload 或阶段组 asr,translate 或 all')
+              help='要执行的阶段（逗号分隔）: download,whisper,split,optimize,translate,embed,upload 或阶段组 asr 或 all')
 @click.option('--gpu', '-g', default='auto',
               help='GPU 设备: auto（自动选择）, cpu, cuda:0, cuda:1 等')
 @click.option('--force', '-f', is_flag=True, help='强制重新处理（即使已完成）')

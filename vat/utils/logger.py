@@ -128,3 +128,33 @@ def setup_logger(
         logging.getLogger(lib).setLevel(logging.ERROR)
 
     return logger
+
+
+# 已注册的 logger 名称（用于 apply_log_level 批量更新）
+_registered_loggers: list = []
+
+
+def apply_log_level(level_str: str):
+    """
+    将配置文件中的日志级别应用到所有已创建的 logger 及其 handler。
+    
+    由于 setup_logger 在模块导入时执行（早于 config 加载），
+    需要在 config 加载后调用此函数来更新级别。
+    
+    Args:
+        level_str: 日志级别字符串，如 "DEBUG", "INFO", "WARNING", "ERROR"
+    """
+    numeric_level = getattr(logging, level_str.upper(), None)
+    if numeric_level is None:
+        logging.warning(f"无效的日志级别: {level_str}，保持默认 INFO")
+        return
+    
+    # 遍历 logging 管理器中所有已创建的 logger
+    for name, logger_obj in logging.Logger.manager.loggerDict.items():
+        if not isinstance(logger_obj, logging.Logger):
+            continue
+        # 只更新通过 setup_logger 创建的 logger（有 handler 的）
+        if logger_obj.handlers:
+            logger_obj.setLevel(numeric_level)
+            for handler in logger_obj.handlers:
+                handler.setLevel(numeric_level)

@@ -90,7 +90,12 @@ class TestExpandStageGroup:
 
     def test_expand_group_name(self):
         assert expand_stage_group("asr") == [TaskStep.WHISPER, TaskStep.SPLIT]
-        assert expand_stage_group("translate") == [TaskStep.OPTIMIZE, TaskStep.TRANSLATE]
+
+    def test_single_step_priority_over_group(self):
+        """当名称同时匹配单步和组时，优先匹配单步（解决 'translate' 歧义）"""
+        # 'translate' 既是 TaskStep.TRANSLATE 的值，也是 STAGE_GROUPS 的 key
+        # 应优先匹配单步，避免 -s translate 意外带上 optimize
+        assert expand_stage_group("translate") == [TaskStep.TRANSLATE]
 
     def test_expand_single_step(self):
         assert expand_stage_group("whisper") == [TaskStep.WHISPER]
@@ -104,11 +109,14 @@ class TestExpandStageGroup:
         with pytest.raises(ValueError, match="未知"):
             expand_stage_group("nonexistent")
 
-    def test_expand_all_group_names(self):
-        """所有已定义的组名都能正常展开"""
-        for group_name in STAGE_GROUPS:
-            result = expand_stage_group(group_name)
-            assert result == STAGE_GROUPS[group_name]
+    def test_expand_pure_group_names(self):
+        """无同名单步的组名能正常展开为整组"""
+        # 仅测试不与 TaskStep value 冲突的组名
+        step_values = {s.value for s in TaskStep}
+        for group_name, expected in STAGE_GROUPS.items():
+            if group_name not in step_values:
+                result = expand_stage_group(group_name)
+                assert result == expected, f"组 '{group_name}' 展开不符合预期"
 
     def test_expand_all_step_values(self):
         """所有 TaskStep 的 value 都能作为单阶段展开"""

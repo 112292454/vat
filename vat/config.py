@@ -904,23 +904,26 @@ def load_config(config_path: Optional[str] = None) -> Config:
     """
     加载配置
     优先级：指定路径 > ./config/config.yaml > ./config/default.yaml
+    
+    加载完成后自动将 config.logging.level 应用到所有已创建的 logger。
     """
+    config: Config
+    
     if config_path:
-        return Config.from_yaml(config_path)
+        config = Config.from_yaml(config_path)
+    elif Path("config/config.yaml").exists():
+        config = Config.from_yaml("config/config.yaml")
+    elif Path("config/default.yaml").exists():
+        config = Config.from_yaml("config/default.yaml")
+    else:
+        project_default = Path(__file__).parent.parent / "config" / "default.yaml"
+        if project_default.exists():
+            config = Config.from_yaml(str(project_default))
+        else:
+            raise RuntimeError("未找到配置文件")
     
-    # 尝试用户自定义配置
-    local_config = Path("config/config.yaml")
-    if local_config.exists():
-        return Config.from_yaml(str(local_config))
+    # 将配置文件中的日志级别应用到所有已创建的 logger
+    from vat.utils.logger import apply_log_level
+    apply_log_level(config.logging.level)
     
-    # 使用默认配置文件
-    default_config = Path("config/default.yaml")
-    if default_config.exists():
-        return Config.from_yaml(str(default_config))
-    
-    # 尝试项目目录的默认配置
-    project_default = Path(__file__).parent.parent / "config" / "default.yaml"
-    if project_default.exists():
-        return Config.from_yaml(str(project_default))
-    
-    raise RuntimeError("未找到配置文件")
+    return config

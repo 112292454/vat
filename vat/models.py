@@ -82,23 +82,32 @@ def expand_stage_group(stage_or_group: str) -> List[TaskStep]:
     """
     展开阶段组为子阶段列表
     
+    优先匹配单个阶段名，再匹配阶段组名。
+    这样 "translate" 解析为 [TRANSLATE]（单步），而非 [OPTIMIZE, TRANSLATE]（组）。
+    若需要整组，请显式指定 "optimize,translate"。
+    
     Args:
         stage_or_group: 阶段名或阶段组名
-            - "asr" -> [WHISPER, SPLIT]
+            - "asr" -> [WHISPER, SPLIT]（无同名单步，命中组）
+            - "translate" -> [TRANSLATE]（优先命中单步）
             - "whisper" -> [WHISPER]
             
     Returns:
         TaskStep 列表
     """
-    # 先尝试作为阶段组
-    if stage_or_group.lower() in STAGE_GROUPS:
-        return STAGE_GROUPS[stage_or_group.lower()]
+    key = stage_or_group.lower()
     
-    # 尝试作为单个阶段
+    # 先尝试作为单个阶段（优先级高于阶段组，避免 "translate" 等重名歧义）
     try:
-        return [TaskStep(stage_or_group.lower())]
+        return [TaskStep(key)]
     except ValueError:
-        raise ValueError(f"未知的阶段或阶段组: {stage_or_group}")
+        pass
+    
+    # 再尝试作为阶段组
+    if key in STAGE_GROUPS:
+        return STAGE_GROUPS[key]
+    
+    raise ValueError(f"未知的阶段或阶段组: {stage_or_group}")
 
 
 def get_required_stages(target_stages: List[TaskStep]) -> List[TaskStep]:

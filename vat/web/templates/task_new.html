@@ -288,11 +288,11 @@ async function submitTask(event) {
 }
 
 function generateCLI() {
-    const { videoIds, steps, gpuDevice, force } = getFormData();
+    const { videoIds, steps, gpuDevice, force, concurrency } = getFormData();
+    const playlistId = document.querySelector('input[name="playlist_id"]')?.value || null;
     
-    let cmd = 'vat process';
-    videoIds.slice(0, 5).forEach(vid => cmd += ` -v ${vid}`);
-    if (videoIds.length > 5) cmd += ' # ...更多视频';
+    let cmd = 'python -m vat process';
+    videoIds.forEach(vid => cmd += ` -v ${vid}`);
     
     if (steps.length > 0 && steps.join(',') !== 'download,asr,translate,embed') {
         cmd += ` -s ${steps.join(',')}`;
@@ -304,6 +304,14 @@ function generateCLI() {
     
     if (force) {
         cmd += ' -f';
+    }
+    
+    if (playlistId) {
+        cmd += ` -p ${playlistId}`;
+    }
+    
+    if (concurrency > 1) {
+        cmd += ` -c ${concurrency}`;
     }
     
     document.getElementById('cli-command').textContent = cmd;

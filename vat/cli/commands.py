@@ -763,13 +763,10 @@ def process(ctx, video_id, process_all, playlist, stages, gpu, force, dry_run, c
 
 def _generate_process_cli(video_ids: List[str], stages: str, gpu: str, force: bool) -> str:
     """生成等价的 CLI 命令"""
-    parts = ["vat", "process"]
+    parts = ["python -m vat process"]
     
-    for vid in video_ids[:3]:
+    for vid in video_ids:
         parts.append(f"-v {vid}")
-    
-    if len(video_ids) > 3:
-        parts.append(f"# ... 还有 {len(video_ids) - 3} 个视频")
     
     if stages != 'all':
         parts.append(f"-s {stages}")

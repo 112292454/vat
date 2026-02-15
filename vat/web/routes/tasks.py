@@ -175,15 +175,12 @@ async def execute_task(
 
 
 def _generate_cli_command(request: ExecuteRequest) -> str:
-    """生成等价的 CLI 命令"""
-    parts = ["vat", "process"]
+    """生成与 _start_job_process 完全等价的 CLI 命令"""
+    parts = ["python -m vat process"]
     
-    # 视频 ID
-    for vid in request.video_ids[:3]:
+    # 视频 ID（全部列出，不省略）
+    for vid in request.video_ids:
         parts.append(f"-v {vid}")
-    
-    if len(request.video_ids) > 3:
-        parts.append(f"# ... 还有 {len(request.video_ids) - 3} 个视频")
     
     # 步骤
     steps_str = ",".join(request.steps)
@@ -197,6 +194,14 @@ def _generate_cli_command(request: ExecuteRequest) -> str:
     # Force
     if request.force:
         parts.append("-f")
+    
+    # Playlist context
+    if request.playlist_id:
+        parts.append(f"-p {request.playlist_id}")
+    
+    # 并发
+    if request.concurrency > 1:
+        parts.append(f"-c {request.concurrency}")
     
     return " ".join(parts)
 

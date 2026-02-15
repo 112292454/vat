@@ -44,8 +44,8 @@ DEFAULT_CHUNK_OVERLAP_SEC = 10  # 10秒重叠
 DEFAULT_CHUNK_CONCURRENCY = 3  # 3个并发
 
 # 多 GPU worker 常量
-_MEMORY_CHECK_INTERVAL_SEC = 5   # 显存不足时的重试间隔（秒）
-_MEMORY_CHECK_MAX_WAIT_SEC = 300  # 显存等待最长时间（秒）
+_MEMORY_CHECK_INTERVAL_SEC = 20   # 显存不足时的重试间隔（秒）
+_MEMORY_CHECK_MAX_WAIT_SEC = 1200  # 显存等待最长时间（秒）
 _OOM_MAX_RETRIES = 3              # 单个 chunk OOM 最大重试次数
 _OOM_COOLDOWN_SEC = 10            # OOM 后冷却等待时间（秒）
 _WORKER_QUEUE_TIMEOUT_SEC = 2     # worker 从队列取任务的超时时间（秒）

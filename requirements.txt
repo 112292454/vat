@@ -41,6 +41,7 @@ biliup>=0.4.0
 
 # 工具库
 python-dateutil>=2.8.0
+croniter>=1.3.0            # Cron 表达式解析（定时上传）
 
 # GalTransl 依赖
 httpx<0.28

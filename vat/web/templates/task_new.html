@@ -118,10 +118,75 @@
                     
                     <!-- 上传 -->
                     <label class="flex items-center p-3 border rounded-lg hover:bg-gray-50 cursor-pointer">
-                        <input type="checkbox" name="steps" value="upload" class="mr-2">
+                        <input type="checkbox" name="steps" value="upload" class="mr-2"
+                               onchange="updateUploadScheduleVisibility()">
                         <span class="text-sm font-medium">上传到B站</span>
                         <span class="ml-2 text-xs text-gray-500">(需要先登录B站)</span>
                     </label>
+                    
+                    <!-- 定时上传设置（仅当 upload 是唯一选中的阶段时显示） -->
+                    <div id="upload-schedule-section" class="hidden mt-2 ml-6 p-4 bg-orange-50 border border-orange-200 rounded-lg">
+                        <label class="flex items-center mb-3">
+                            <input type="checkbox" id="enable-schedule" class="mr-2" onchange="toggleScheduleOptions()">
+                            <span class="text-sm font-medium text-orange-800">定时上传（每次触发上传一个视频）</span>
+                        </label>
+                        
+                        <div id="schedule-options" class="hidden space-y-3">
+                            <!-- 模式选择 -->
+                            <div>
+                                <select id="schedule-mode" class="border rounded-lg px-3 py-2 text-sm w-full max-w-xs"
+                                        onchange="updateScheduleMode()">
+                                    <option value="daily">每天在指定时刻</option>
+                                    <option value="interval">每隔 N 小时</option>
+                                    <option value="cron">高级 (cron 表达式)</option>
+                                </select>
+                            </div>
+                            
+                            <!-- 模式1: 每天指定时刻 -->
+                            <div id="mode-daily" class="space-y-2">
+                                <p class="text-xs text-gray-600">选择每天上传的时间点（可多选，每个时间点上传一个视频）：</p>
+                                <div id="time-slots" class="flex flex-wrap gap-2">
+                                    <input type="time" class="time-slot border rounded px-2 py-1 text-sm" value="12:00">
+                                </div>
+                                <button type="button" onclick="addTimeSlot()"
+                                        class="text-xs text-blue-600 hover:underline">+ 添加时间点</button>
+                                <p class="text-xs text-gray-500">生成的 cron: <code id="daily-cron-preview" class="bg-gray-100 px-1 rounded">-</code></p>
+                            </div>
+                            
+                            <!-- 模式2: 每隔N小时 -->
+                            <div id="mode-interval" class="hidden space-y-2">
+                                <div class="flex items-center space-x-2">
+                                    <span class="text-sm">每隔</span>
+                                    <select id="interval-hours" class="border rounded px-2 py-1 text-sm"
+                                            onchange="updateIntervalCron()">
+                                        <option value="1">1</option>
+                                        <option value="2">2</option>
+                                        <option value="3">3</option>
+                                        <option value="4">4</option>
+                                        <option value="6">6</option>
+                                        <option value="8">8</option>
+                                        <option value="12" selected>12</option>
+                                        <option value="24">24</option>
+                                        <option value="48">48</option>
+                                    </select>
+                                    <span class="text-sm">小时上传一个</span>
+                                </div>
+                                <p class="text-xs text-gray-500">生成的 cron: <code id="interval-cron-preview" class="bg-gray-100 px-1 rounded">-</code></p>
+                            </div>
+                            
+                            <!-- 模式3: 高级 cron -->
+                            <div id="mode-cron" class="hidden space-y-2">
+                                <input type="text" id="cron-input" placeholder="0 12,18 * * *"
+                                       class="border rounded-lg px-3 py-2 text-sm w-full max-w-xs font-mono"
+                                       oninput="validateCronInput()">
+                                <p class="text-xs text-gray-500">
+                                    格式: 分 时 日 月 星期。示例: <code>0 12,18 * * *</code> = 每天12点和18点；
+                                    <code>0 */6 * * *</code> = 每6小时
+                                </p>
+                                <p id="cron-validation" class="text-xs hidden"></p>
+                            </div>
+                        </div>
+                    </div>
                 </div>
             </div>
             
@@ -233,6 +298,124 @@ function updateGroupCheckbox(group) {
     }
 }
 
+// ========== 定时上传 UI 逻辑 ==========
+
+function updateUploadScheduleVisibility() {
+    // 定时上传区域仅在 upload 是唯一选中阶段时显示
+    const steps = Array.from(document.querySelectorAll('input[name="steps"]:checked')).map(cb => cb.value);
+    const section = document.getElementById('upload-schedule-section');
+    if (steps.length === 1 && steps[0] === 'upload') {
+        section.classList.remove('hidden');
+    } else {
+        section.classList.add('hidden');
+        // 隐藏时取消勾选，避免意外发送 cron
+        document.getElementById('enable-schedule').checked = false;
+        document.getElementById('schedule-options').classList.add('hidden');
+    }
+}
+
+// 监听所有 steps checkbox 的变化（包括组复选框）
+document.addEventListener('DOMContentLoaded', () => {
+    document.querySelectorAll('input[name="steps"]').forEach(cb => {
+        cb.addEventListener('change', updateUploadScheduleVisibility);
+    });
+    // 组复选框也要监听
+    ['asr-group', 'translate-group'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.addEventListener('change', () => setTimeout(updateUploadScheduleVisibility, 50));
+    });
+});
+
+function toggleScheduleOptions() {
+    const enabled = document.getElementById('enable-schedule').checked;
+    document.getElementById('schedule-options').classList.toggle('hidden', !enabled);
+    if (enabled) updateScheduleMode();
+}
+
+function updateScheduleMode() {
+    const mode = document.getElementById('schedule-mode').value;
+    document.getElementById('mode-daily').classList.toggle('hidden', mode !== 'daily');
+    document.getElementById('mode-interval').classList.toggle('hidden', mode !== 'interval');
+    document.getElementById('mode-cron').classList.toggle('hidden', mode !== 'cron');
+    if (mode === 'daily') updateDailyCron();
+    if (mode === 'interval') updateIntervalCron();
+}
+
+function addTimeSlot() {
+    const container = document.getElementById('time-slots');
+    const input = document.createElement('input');
+    input.type = 'time';
+    input.className = 'time-slot border rounded px-2 py-1 text-sm';
+    input.value = '18:00';
+    input.addEventListener('change', updateDailyCron);
+    container.appendChild(input);
+    updateDailyCron();
+}
+
+function updateDailyCron() {
+    const slots = document.querySelectorAll('.time-slot');
+    const hours = new Set();
+    const minutes = new Set();
+    slots.forEach(s => {
+        if (s.value) {
+            const [h, m] = s.value.split(':').map(Number);
+            hours.add(h);
+            minutes.add(m);
+        }
+    });
+    // 简化：如果所有时间点的分钟部分相同，用单一分钟值；否则用 0
+    const minVal = minutes.size === 1 ? [...minutes][0] : 0;
+    const hourStr = [...hours].sort((a,b) => a-b).join(',');
+    const cron = `${minVal} ${hourStr || '12'} * * *`;
+    document.getElementById('daily-cron-preview').textContent = cron;
+}
+
+// 绑定时间输入框 change 事件
+document.addEventListener('change', e => {
+    if (e.target.classList.contains('time-slot')) updateDailyCron();
+});
+
+function updateIntervalCron() {
+    const h = parseInt(document.getElementById('interval-hours').value);
+    let cron;
+    if (h >= 24) {
+        // 每 N 天
+        const days = Math.floor(h / 24);
+        cron = days === 1 ? '0 0 * * *' : `0 0 */${days} * *`;
+    } else {
+        cron = `0 */${h} * * *`;
+    }
+    document.getElementById('interval-cron-preview').textContent = cron;
+}
+
+function validateCronInput() {
+    const input = document.getElementById('cron-input').value.trim();
+    const el = document.getElementById('cron-validation');
+    if (!input) {
+        el.classList.add('hidden');
+        return;
+    }
+    // 基本格式检查：5 个字段
+    const parts = input.split(/\s+/);
+    if (parts.length === 5) {
+        el.textContent = '✓ 格式正确（服务端会进一步验证）';
+        el.className = 'text-xs text-green-600';
+    } else {
+        el.textContent = '✗ 格式错误：需要 5 个字段（分 时 日 月 星期）';
+        el.className = 'text-xs text-red-600';
+    }
+    el.classList.remove('hidden');
+}
+
+function getUploadCron() {
+    if (!document.getElementById('enable-schedule').checked) return null;
+    const mode = document.getElementById('schedule-mode').value;
+    if (mode === 'daily') return document.getElementById('daily-cron-preview').textContent;
+    if (mode === 'interval') return document.getElementById('interval-cron-preview').textContent;
+    if (mode === 'cron') return document.getElementById('cron-input').value.trim() || null;
+    return null;
+}
+
 function getFormData() {
     const form = document.getElementById('task-form');
     const videoIds = Array.from(form.querySelectorAll('input[name="video_ids"]:checked'))
@@ -242,14 +425,15 @@ function getFormData() {
     const gpuDevice = form.querySelector('select[name="gpu_device"]').value;
     const force = form.querySelector('input[name="force"]').checked;
     const concurrency = parseInt(form.querySelector('select[name="concurrency"]').value) || 1;
+    const uploadCron = getUploadCron();
     
-    return { videoIds, steps, gpuDevice, force, concurrency };
+    return { videoIds, steps, gpuDevice, force, concurrency, uploadCron };
 }
 
 async function submitTask(event) {
     event.preventDefault();
     
-    const { videoIds, steps, gpuDevice, force, concurrency } = getFormData();
+    const { videoIds, steps, gpuDevice, force, concurrency, uploadCron } = getFormData();
     
     if (videoIds.length === 0) {
         showToast('请至少选择一个视频', 'warning');
@@ -258,6 +442,12 @@ async function submitTask(event) {
     
     if (steps.length === 0) {
         showToast('请至少选择一个阶段', 'warning');
+        return;
+    }
+    
+    // 客户端校验：定时上传要求 steps 仅为 upload
+    if (uploadCron && (steps.length !== 1 || steps[0] !== 'upload')) {
+        showToast('定时上传仅可用于“上传到B站”阶段', 'warning');
         return;
     }
     
@@ -271,7 +461,8 @@ async function submitTask(event) {
                 gpu_device: gpuDevice,
                 force: force,
                 concurrency: concurrency,
-                playlist_id: document.querySelector('input[name="playlist_id"]')?.value || null
+                playlist_id: document.querySelector('input[name="playlist_id"]')?.value || null,
+                upload_cron: uploadCron
             })
         });
         
@@ -288,7 +479,7 @@ async function submitTask(event) {
 }
 
 function generateCLI() {
-    const { videoIds, steps, gpuDevice, force, concurrency } = getFormData();
+    const { videoIds, steps, gpuDevice, force, concurrency, uploadCron } = getFormData();
     const playlistId = document.querySelector('input[name="playlist_id"]')?.value || null;
     
     let cmd = 'python -m vat process';
@@ -312,6 +503,10 @@ function generateCLI() {
     
     if (concurrency > 1) {
         cmd += ` -c ${concurrency}`;
+    }
+    
+    if (uploadCron) {
+        cmd += ` --upload-cron "${uploadCron}"`;
     }
     
     document.getElementById('cli-command').textContent = cmd;

@@ -121,6 +121,7 @@ Based on [biliup](https://github.com/biliup/biliup):
 - Auto-fetches covers, generates tags
 - LLM-recommended Bilibili categories
 - Supports adding to collections (⚠️ Known issue: video upload works, but adding to collections is sometimes unstable)
+- Scheduled upload: cron expression support for timed uploads, one video per trigger (CLI `--upload-cron` / WebUI visual config)
 
 ### Scheduling & Concurrency
 
@@ -256,6 +257,7 @@ vat status
 | `vat translate -v ID` | Translation only |
 | `vat embed -v ID` | Subtitle embedding only |
 | `vat upload VIDEO_ID` | Upload to Bilibili |
+| `vat process -v ID -s upload --upload-cron "0 12,18 * * *"` | Scheduled upload (daily 12/18) |
 | `vat playlist sync URL` | Sync playlist |
 | `vat status` | View processing status |
 | `vat clean -v ID` | Clean intermediate files |

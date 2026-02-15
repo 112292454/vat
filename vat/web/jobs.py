@@ -45,6 +45,7 @@ class WebJob:
     created_at: datetime
     started_at: Optional[datetime]
     finished_at: Optional[datetime]
+    upload_cron: Optional[str] = None
     
     def to_dict(self) -> Dict:
         return {
@@ -62,6 +63,7 @@ class WebJob:
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "started_at": self.started_at.isoformat() if self.started_at else None,
             "finished_at": self.finished_at.isoformat() if self.finished_at else None,
+            "upload_cron": self.upload_cron,
         }
 
 
@@ -107,6 +109,11 @@ class JobManager:
                 )
             """)
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_job_status ON web_jobs(status)")
+            # 增量迁移：添加 upload_cron 列（已有则忽略）
+            try:
+                cursor.execute("ALTER TABLE web_jobs ADD COLUMN upload_cron TEXT")
+            except Exception:
+                pass  # 列已存在
     
     def submit_job(
         self,
@@ -115,7 +122,8 @@ class JobManager:
         gpu_device: str = "auto",
         force: bool = False,
         concurrency: int = 1,
-        playlist_id: Optional[str] = None
+        playlist_id: Optional[str] = None,
+        upload_cron: Optional[str] = None
     ) -> str:
         """
         提交任务并立即启动子进程执行
@@ -133,8 +141,8 @@ class JobManager:
             cursor = conn.cursor()
             cursor.execute("""
                 INSERT INTO web_jobs 
-                (job_id, video_ids, steps, gpu_device, force, status, log_file, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                (job_id, video_ids, steps, gpu_device, force, status, log_file, created_at, upload_cron)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 job_id,
                 json.dumps(video_ids),
@@ -143,11 +151,12 @@ class JobManager:
                 1 if force else 0,
                 JobStatus.PENDING.value,
                 log_file,
-                now
+                now,
+                upload_cron
             ))
         
         # 启动子进程
-        self._start_job_process(job_id, video_ids, steps, gpu_device, force, log_file, concurrency, playlist_id)
+        self._start_job_process(job_id, video_ids, steps, gpu_device, force, log_file, concurrency, playlist_id, upload_cron)
         
         logger.info(f"任务已提交: {job_id}, 视频数: {len(video_ids)}, 步骤: {steps}")
         return job_id
@@ -161,7 +170,8 @@ class JobManager:
         force: bool,
         log_file: str,
         concurrency: int = 1,
-        playlist_id: Optional[str] = None
+        playlist_id: Optional[str] = None,
+        upload_cron: Optional[str] = None
     ):
         """启动子进程执行任务"""
         # 构建 CLI 命令
@@ -184,6 +194,9 @@ class JobManager:
         
         if concurrency > 1:
             cmd.extend(["-c", str(concurrency)])
+        
+        if upload_cron:
+            cmd.extend(["--upload-cron", upload_cron])
         
         # 打开日志文件
         log_fd = open(log_file, "w", buffering=1)  # 行缓冲
@@ -577,6 +590,12 @@ class JobManager:
     
     def _row_to_job(self, row) -> WebJob:
         """将数据库行转换为 WebJob 对象"""
+        # upload_cron 列可能不存在（旧数据库），安全读取
+        try:
+            upload_cron = row['upload_cron']
+        except (IndexError, KeyError):
+            upload_cron = None
+        
         return WebJob(
             job_id=row['job_id'],
             video_ids=json.loads(row['video_ids']),
@@ -591,4 +610,5 @@ class JobManager:
             created_at=datetime.fromisoformat(row['created_at']) if row['created_at'] else None,
             started_at=datetime.fromisoformat(row['started_at']) if row['started_at'] else None,
             finished_at=datetime.fromisoformat(row['finished_at']) if row['finished_at'] else None,
+            upload_cron=upload_cron,
         )

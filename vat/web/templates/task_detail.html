@@ -61,6 +61,12 @@
                 <span class="text-gray-500">强制模式:</span>
                 <span class="ml-2 font-medium">{% if task.force %}是{% else %}否{% endif %}</span>
             </div>
+            {% if task.upload_cron %}
+            <div class="col-span-2">
+                <span class="text-gray-500">定时上传:</span>
+                <span class="ml-2 font-medium font-mono bg-orange-50 px-2 py-0.5 rounded text-orange-800">{{ task.upload_cron }}</span>
+            </div>
+            {% endif %}
             <div class="col-span-2">
                 <span class="text-gray-500">处理视频:</span>
                 <span class="ml-2 font-medium">

@@ -39,6 +39,7 @@ class ExecuteRequest(BaseModel):
     force: bool = False
     concurrency: int = 1  # 并发处理的视频数量（默认1=串行）
     playlist_id: Optional[str] = None  # playlist context（用于 custom prompt 覆写）
+    upload_cron: Optional[str] = None  # 定时上传 cron 表达式（仅 steps=["upload"] 时可用）
     
     # 可选：生成等价 CLI 命令
     generate_cli: bool = False
@@ -116,6 +117,40 @@ async def execute_task(
     if not request.video_ids:
         raise HTTPException(400, "No video_ids provided")
     
+    # ========== upload_cron 校验 ==========
+    if request.upload_cron:
+        # 校验1: steps 必须仅为 upload
+        if steps != ["upload"]:
+            raise HTTPException(
+                400,
+                "定时上传仅可用于 upload 阶段。请将执行阶段设为仅 'upload'，"
+                "或去掉定时上传设置。"
+            )
+        
+        # 校验2: cron 表达式合法性
+        try:
+            from croniter import croniter
+            if not croniter.is_valid(request.upload_cron):
+                raise HTTPException(400, f"无效的 cron 表达式: {request.upload_cron}")
+        except ImportError:
+            raise HTTPException(500, "服务端缺少 croniter 依赖，请安装: pip install croniter")
+        
+        # 校验3: 所有视频的 embed 阶段已完成
+        from vat.web.deps import get_db as _get_db_for_check
+        from vat.models import TaskStep
+        check_db = _get_db_for_check()
+        not_ready = []
+        for vid in request.video_ids:
+            if not check_db.is_step_completed(vid, TaskStep.EMBED):
+                v = check_db.get_video(vid)
+                name = (v.title[:30] if v and v.title else vid)
+                not_ready.append(name)
+        if not_ready:
+            detail = f"{len(not_ready)} 个视频尚未完成 embed 阶段: {', '.join(not_ready[:5])}"
+            if len(not_ready) > 5:
+                detail += f" ...等 {len(not_ready)} 个"
+            raise HTTPException(400, f"无法创建定时上传任务: {detail}")
+    
     # 单任务约束：同一视频同时只能有一个 running job（阶段顺序依赖，多 task 无意义）
     running_vids = job_manager.get_running_video_ids()
     conflict_vids = [vid for vid in request.video_ids if vid in running_vids]
@@ -159,7 +194,8 @@ async def execute_task(
         gpu_device=request.gpu_device,
         force=request.force,
         concurrency=request.concurrency,
-        playlist_id=request.playlist_id
+        playlist_id=request.playlist_id,
+        upload_cron=request.upload_cron
     )
     
     # 生成等价 CLI 命令（可选）
@@ -202,6 +238,10 @@ def _generate_cli_command(request: ExecuteRequest) -> str:
     # 并发
     if request.concurrency > 1:
         parts.append(f"-c {request.concurrency}")
+    
+    # 定时上传
+    if request.upload_cron:
+        parts.append(f'--upload-cron "{request.upload_cron}"')
     
     return " ".join(parts)
 

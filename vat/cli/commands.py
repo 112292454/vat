@@ -564,8 +564,9 @@ def parse_stages(stages_str: str) -> List[TaskStep]:
 @click.option('--dry-run', is_flag=True, help='仅显示将要执行的操作，不实际执行')
 @click.option('--concurrency', '-c', default=1, type=int, help='并发处理的视频数量（默认1，即串行）')
 @click.option('--delay', '-d', default=None, type=float, help='视频间处理延迟（秒），防止 YouTube 限流。默认从配置读取')
+@click.option('--upload-cron', default=None, help='定时上传 cron 表达式（仅当 stages 为 upload 时可用），如 "0 12,18 * * *"')
 @click.pass_context
-def process(ctx, video_id, process_all, playlist, stages, gpu, force, dry_run, concurrency, delay):
+def process(ctx, video_id, process_all, playlist, stages, gpu, force, dry_run, concurrency, delay, upload_cron):
     """
     处理视频（支持细粒度阶段控制）
     
@@ -643,6 +644,43 @@ def process(ctx, video_id, process_all, playlist, stages, gpu, force, dry_run, c
     
     # 去重
     video_ids = list(dict.fromkeys(video_ids))
+    
+    # ========== upload-cron 校验与分流 ==========
+    if upload_cron:
+        # 校验1: stages 必须仅包含 upload
+        upload_only = all(s == TaskStep.UPLOAD for s in target_steps) and len(target_steps) == 1
+        if not upload_only:
+            click.echo("错误: --upload-cron 仅可用于 upload 阶段（-s upload）", err=True)
+            return
+        
+        # 校验2: cron 表达式合法性
+        try:
+            from croniter import croniter
+            if not croniter.is_valid(upload_cron):
+                click.echo(f"错误: 无效的 cron 表达式: {upload_cron}", err=True)
+                return
+        except ImportError:
+            click.echo("错误: croniter 未安装，请运行: pip install croniter", err=True)
+            return
+        
+        # 校验3: 所有视频的 embed 阶段已完成
+        not_ready = []
+        for vid in video_ids:
+            if not db.is_step_completed(vid, TaskStep.EMBED):
+                v = db.get_video(vid)
+                name = v.title[:30] if v and v.title else vid
+                not_ready.append(name)
+        if not_ready:
+            click.echo(f"错误: 以下 {len(not_ready)} 个视频尚未完成 embed 阶段，无法创建定时上传任务:", err=True)
+            for name in not_ready[:5]:
+                click.echo(f"  - {name}", err=True)
+            if len(not_ready) > 5:
+                click.echo(f"  ... 还有 {len(not_ready) - 5} 个", err=True)
+            return
+        
+        # 进入定时上传流程
+        _run_scheduled_uploads(config, db, logger, video_ids, upload_cron, force, dry_run)
+        return
     
     # 显示执行计划
     plan_lines = [
@@ -759,6 +797,133 @@ def process(ctx, video_id, process_all, playlist, stages, gpu, force, dry_run, c
         logger.warning(f"处理完成，{len(failed_vids)} 个视频最终失败: {', '.join(failed_vids[:5])}")
     else:
         logger.info("处理完成，全部成功")
+
+
+def _run_scheduled_uploads(config, db, logger, video_ids, cron_expr, force, dry_run):
+    """
+    定时上传：按 cron 表达式逐个上传视频
+    
+    每次 cron 触发时间到达后上传队列中的下一个视频。
+    已完成上传的视频会被跳过（支持断点续传）。
+    
+    Args:
+        config: 配置对象
+        db: 数据库实例
+        logger: 日志器
+        video_ids: 视频ID有序列表（决定上传顺序）
+        cron_expr: cron 表达式
+        force: 是否强制重新上传
+        dry_run: 仅预览
+    """
+    import time
+    from datetime import datetime
+    from croniter import croniter
+    
+    total = len(video_ids)
+    
+    # 构建上传队列：跳过已完成上传的视频（除非 force）
+    queue = []
+    for vid in video_ids:
+        if not force and db.is_step_completed(vid, TaskStep.UPLOAD):
+            video = db.get_video(vid)
+            title = video.title[:30] if video and video.title else vid
+            logger.info(f"跳过已上传: {title}")
+            continue
+        queue.append(vid)
+    
+    if not queue:
+        logger.info("所有视频已上传完成，无需定时上传")
+        return
+    
+    logger.info(f"定时上传任务: {len(queue)}/{total} 个视频待上传")
+    logger.info(f"Cron 表达式: {cron_expr}")
+    
+    # 预览模式：显示上传计划
+    cron = croniter(cron_expr, datetime.now())
+    if dry_run:
+        logger.info("[DRY-RUN] 上传计划:")
+        for i, vid in enumerate(queue):
+            next_time = cron.get_next(datetime)
+            video = db.get_video(vid)
+            title = video.title[:40] if video and video.title else vid
+            logger.info(f"  {i+1}. {next_time.strftime('%Y-%m-%d %H:%M')} → {title}")
+        return
+    
+    # 逐个上传
+    uploaded = 0
+    failed = 0
+    cron = croniter(cron_expr, datetime.now())
+    
+    for i, vid in enumerate(queue):
+        next_time = cron.get_next(datetime)
+        video = db.get_video(vid)
+        title = video.title[:30] if video and video.title else vid
+        
+        # 等待到触发时间
+        now = datetime.now()
+        wait_seconds = (next_time - now).total_seconds()
+        
+        if wait_seconds > 0:
+            logger.info(
+                f"[UPLOAD-SCHEDULE] 等待上传 ({uploaded+1}/{len(queue)}): "
+                f"{title} @ {next_time.strftime('%Y-%m-%d %H:%M:%S')} "
+                f"(还需等待 {_format_duration(wait_seconds)})"
+            )
+            # 分段 sleep，每 60 秒输出一次心跳日志（方便 WebUI 判断进程存活）
+            while True:
+                remaining = (next_time - datetime.now()).total_seconds()
+                if remaining <= 0:
+                    break
+                sleep_chunk = min(remaining, 60.0)
+                time.sleep(sleep_chunk)
+        
+        # 执行上传
+        logger.info(f"[UPLOAD-SCHEDULE] 开始上传 ({uploaded+1}/{len(queue)}): {title}")
+        try:
+            processor = VideoProcessor(
+                video_id=vid,
+                config=config,
+                gpu_id=None,
+                force=force,
+                video_index=i,
+                total_videos=len(queue)
+            )
+            success = processor.process(steps=['upload'])
+            if success:
+                uploaded += 1
+                logger.info(
+                    f"[UPLOAD-SCHEDULE] 上传成功 ({uploaded}/{len(queue)}): {title}"
+                )
+            else:
+                failed += 1
+                logger.warning(
+                    f"[UPLOAD-SCHEDULE] 上传失败 ({title})，继续下一个"
+                )
+        except Exception as e:
+            failed += 1
+            logger.error(f"[UPLOAD-SCHEDULE] 上传异常 ({title}): {e}")
+    
+    logger.info(
+        f"[UPLOAD-SCHEDULE] 定时上传完成: "
+        f"成功 {uploaded}, 失败 {failed}, 总计 {len(queue)}"
+    )
+
+
+def _format_duration(seconds: float) -> str:
+    """格式化等待时长为人类可读字符串"""
+    seconds = int(seconds)
+    if seconds < 60:
+        return f"{seconds}秒"
+    minutes = seconds // 60
+    if minutes < 60:
+        return f"{minutes}分{seconds % 60}秒"
+    hours = minutes // 60
+    remaining_min = minutes % 60
+    if hours < 24:
+        return f"{hours}时{remaining_min}分"
+    days = hours // 24
+    remaining_hours = hours % 24
+    return f"{days}天{remaining_hours}时{remaining_min}分"
 
 
 def _generate_process_cli(video_ids: List[str], stages: str, gpu: str, force: bool) -> str:

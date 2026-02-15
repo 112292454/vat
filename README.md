@@ -138,6 +138,7 @@ VAT 在此基础上的改动：
 - 自动获取封面、生成标签
 - LLM 推荐 B 站分区
 - 支持添加到合集（⚠️ 已知问题：视频可以上传成功，但添加合集的功能目前不稳定，有时会失败）
+- 定时上传：支持 cron 表达式指定上传时间，每次触发上传一个视频（CLI `--upload-cron` / WebUI 可视化配置）
 
 ### 调度与并发
 
@@ -273,6 +274,7 @@ vat status
 | `vat translate -v ID` | 仅翻译 |
 | `vat embed -v ID` | 仅嵌入字幕 |
 | `vat upload VIDEO_ID` | 上传到 B 站 |
+| `vat process -v ID -s upload --upload-cron "0 12,18 * * *"` | 定时上传（每天 12/18 点） |
 | `vat playlist sync URL` | 同步播放列表 |
 | `vat status` | 查看处理状态 |
 | `vat clean -v ID` | 清理中间产物 |

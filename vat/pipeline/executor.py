@@ -1648,7 +1648,8 @@ class VideoProcessor:
                 progress_callback=embed_progress_callback,
                 fonts_dir=self.config.storage.fonts_dir,
                 subtitle_style=subtitle_style,
-                style_dir=style_dir
+                style_dir=style_dir,
+                max_nvenc_sessions=self.config.embedder.max_nvenc_sessions_per_gpu
             )
             
             if success:

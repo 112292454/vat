@@ -6,13 +6,128 @@ import time
 import tempfile
 import subprocess
 import shutil
+import threading
 from pathlib import Path
 from typing import Optional, Dict, Any, List, Callable, Union
 
-from vat.utils.gpu import resolve_gpu_device, is_cuda_available
+from vat.utils.gpu import resolve_gpu_device, get_available_gpus, is_cuda_available
 from vat.utils.logger import setup_logger
 
 logger = setup_logger("ffmpeg_wrapper")
+
+
+class _NvencSessionManager:
+    """NVENC 编码会话管理器
+    
+    NVIDIA 消费级显卡（如 RTX 4090）限制每张卡同时最多 N 个 NVENC 会话。
+    此管理器通过 per-GPU 信号量控制并发会话数，并实现均衡 GPU 分配。
+    """
+    
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._initialized = False
+        # gpu_id -> Semaphore
+        self._semaphores: Dict[int, threading.Semaphore] = {}
+        # gpu_id -> 当前活跃会话数（用于选择最空闲 GPU）
+        self._active_sessions: Dict[int, int] = {}
+        self._max_per_gpu = 5
+    
+    def init(self, max_per_gpu: int = 5) -> None:
+        """初始化（幂等，首次调用时探测可用 GPU）
+        
+        Args:
+            max_per_gpu: 每张 GPU 最大并发 NVENC 会话数（RTX 消费级默认 5）
+        """
+        if self._initialized:
+            return
+        with self._lock:
+            if self._initialized:
+                return
+            self._max_per_gpu = max_per_gpu
+            try:
+                gpus = get_available_gpus()
+                for gpu in gpus:
+                    self._semaphores[gpu.index] = threading.Semaphore(max_per_gpu)
+                    self._active_sessions[gpu.index] = 0
+                logger.info(
+                    f"NVENC 会话管理器已初始化: {len(gpus)} 张 GPU, "
+                    f"每卡最大 {max_per_gpu} 会话"
+                )
+            except Exception as e:
+                logger.warning(f"无法探测 GPU 列表，NVENC 会话管理器降级: {e}")
+            self._initialized = True
+    
+    def _ensure_gpu(self, gpu_id: int) -> None:
+        """确保指定 GPU 有对应的信号量（动态扩展）"""
+        if gpu_id not in self._semaphores:
+            with self._lock:
+                if gpu_id not in self._semaphores:
+                    self._semaphores[gpu_id] = threading.Semaphore(self._max_per_gpu)
+                    self._active_sessions[gpu_id] = 0
+    
+    def select_gpu(self) -> int:
+        """选择当前活跃会话最少的 GPU（均衡分配）
+        
+        Returns:
+            gpu_id: 选中的 GPU 索引
+            
+        Raises:
+            RuntimeError: 没有可用 GPU
+        """
+        if not self._semaphores:
+            # 尚未初始化或无 GPU，fallback 到 resolve_gpu_device
+            from vat.utils.gpu import select_best_gpu
+            gpu_id = select_best_gpu(min_free_memory_mb=1000)
+            if gpu_id is None:
+                raise RuntimeError("没有可用 GPU")
+            self._ensure_gpu(gpu_id)
+            return gpu_id
+        
+        with self._lock:
+            # 选择活跃会话最少的 GPU
+            best_gpu = min(self._active_sessions, key=self._active_sessions.get)
+            return best_gpu
+    
+    def acquire(self, gpu_id: int, timeout: float = 600) -> bool:
+        """获取指定 GPU 的 NVENC 会话槽位
+        
+        Args:
+            gpu_id: GPU 索引
+            timeout: 最大等待秒数（默认 10 分钟）
+            
+        Returns:
+            是否成功获取
+        """
+        self._ensure_gpu(gpu_id)
+        acquired = self._semaphores[gpu_id].acquire(timeout=timeout)
+        if acquired:
+            with self._lock:
+                self._active_sessions[gpu_id] = self._active_sessions.get(gpu_id, 0) + 1
+            logger.debug(
+                f"NVENC 会话已获取: GPU {gpu_id} "
+                f"(活跃: {self._active_sessions[gpu_id]}/{self._max_per_gpu})"
+            )
+        else:
+            logger.warning(
+                f"NVENC 会话获取超时 ({timeout}s): GPU {gpu_id}, "
+                f"当前活跃: {self._active_sessions.get(gpu_id, '?')}/{self._max_per_gpu}"
+            )
+        return acquired
+    
+    def release(self, gpu_id: int) -> None:
+        """释放指定 GPU 的 NVENC 会话槽位"""
+        if gpu_id in self._semaphores:
+            with self._lock:
+                self._active_sessions[gpu_id] = max(0, self._active_sessions.get(gpu_id, 1) - 1)
+            self._semaphores[gpu_id].release()
+            logger.debug(
+                f"NVENC 会话已释放: GPU {gpu_id} "
+                f"(活跃: {self._active_sessions[gpu_id]}/{self._max_per_gpu})"
+            )
+
+
+# 模块级单例
+_nvenc_manager = _NvencSessionManager()
 
 
 def _format_time(seconds: float) -> str:
@@ -226,7 +341,8 @@ class FFmpegWrapper:
         fonts_dir: Optional[str] = None,
         subtitle_style: Optional[str] = None,
         style_dir: Optional[str] = None,
-        reference_height: int = 720
+        reference_height: int = 720,
+        max_nvenc_sessions: int = 5
     ) -> bool:
         """
         硬字幕嵌入（烧录到视频画面）
@@ -245,6 +361,7 @@ class FFmpegWrapper:
             subtitle_style: 字幕样式模板名称（仅ASS格式需要）
             style_dir: 样式文件目录（仅ASS格式需要）
             reference_height: 参考高度，用于样式缩放（默认720）
+            max_nvenc_sessions: 每张 GPU 最大并发 NVENC 会话数（默认 5）
             
         Returns:
             是否成功
@@ -256,22 +373,31 @@ class FFmpegWrapper:
             logger.error(f"字幕文件不存在: {subtitle_path}")
             return False
         
-        # 解析 GPU 设备
-        try:
-            device_str, gpu_id = resolve_gpu_device(
-                gpu_device,
-                allow_cpu_fallback=False,  # 遵循 GPU 原则
-                min_free_memory_mb=1000
-            )
-            use_gpu = (device_str == "cuda")
-        except RuntimeError as e:
-            logger.error(f"GPU 解析失败: {e}")
-            raise
+        # 初始化 NVENC 会话管理器（幂等）
+        _nvenc_manager.init(max_per_gpu=max_nvenc_sessions)
         
-        if not use_gpu:
+        # GPU 选择：通过 session manager 均衡分配，而非按空闲显存选择
+        if gpu_device == "auto":
+            gpu_id = _nvenc_manager.select_gpu()
+            logger.info(f"NVENC 会话均衡分配: 选择 GPU {gpu_id}")
+        elif gpu_device.startswith("cuda:"):
+            try:
+                gpu_id = int(gpu_device.split(":")[1])
+            except (IndexError, ValueError):
+                raise ValueError(f"无效的 GPU 设备格式: {gpu_device}")
+        else:
             error_msg = "Embed 阶段需要 GPU，按 GPU 原则禁止 CPU 回退"
             logger.error(error_msg)
             raise RuntimeError(error_msg)
+        
+        # 获取 NVENC 会话槽位（阻塞等待，最多 10 分钟）
+        if not _nvenc_manager.acquire(gpu_id, timeout=600):
+            raise RuntimeError(
+                f"NVENC 会话获取超时: GPU {gpu_id}，"
+                f"所有 {max_nvenc_sessions} 个槽位已满且 10 分钟内未释放"
+            )
+        
+        use_gpu = True
         
         output_path.parent.mkdir(parents=True, exist_ok=True)
         
@@ -496,8 +622,10 @@ class FFmpegWrapper:
                 logger.warning(f"无法保存 FFmpeg 日志: {e}")
             
             if return_code != 0:
-                error_info = process.stderr.read()
-                logger.error(f"硬字幕嵌入失败: {error_info}")
+                # 从已收集的日志行中提取错误信息（stderr 已被 readline 循环消费）
+                error_lines = [l.strip() for l in ffmpeg_log_lines if 'error' in l.lower() or 'failed' in l.lower()]
+                error_summary = '; '.join(error_lines[-3:]) if error_lines else '(无详细错误，见日志)'
+                logger.error(f"硬字幕嵌入失败: {error_summary}")
                 logger.info(f"完整日志已保存至: {log_path}")
                 return False
             
@@ -509,6 +637,8 @@ class FFmpegWrapper:
             logger.error(f"硬字幕嵌入失败: {e.stderr}")
             return False
         finally:
+            # 释放 NVENC 会话槽位
+            _nvenc_manager.release(gpu_id)
             # 清理临时文件
             for temp_file in temp_files_to_cleanup:
                 try:

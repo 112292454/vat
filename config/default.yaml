@@ -225,6 +225,11 @@ embedder:
   subtitle_style: "default"                 # 样式模板名称（对应 resources/subtitle_style/*.txt）
                                             # 可选值: default, 毕导科普风, 番剧可爱风, 竖屏
   
+  # NVENC 并发控制
+  max_nvenc_sessions_per_gpu: 5             # 每张 GPU 最大并发 NVENC 编码会话数
+                                            # RTX 消费级显卡硬件限制通常为 5（可通过补丁解除）
+                                            # 超出限制的任务会排队等待，而非直接失败
+  
 
 
 # =============================================================================

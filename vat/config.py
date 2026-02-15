@@ -409,6 +409,7 @@ class EmbedderConfig:
     preset: str
     use_gpu: bool
     subtitle_style: str
+    max_nvenc_sessions_per_gpu: int = 5  # 每张 GPU 最大并发 NVENC 编码会话数（RTX 消费级默认 5）
 
 
 @dataclass

@@ -90,9 +90,9 @@ class VideoProcessor:
         if gpu_id is not None:
             os.environ['CUDA_VISIBLE_DEVICES'] = str(gpu_id)
             
-        # 初始化缓存
+        # 初始化缓存（由 config 控制是否启用 diskcache）
         from vat.utils.cache import init_caches
-        init_caches(config.storage.cache_dir)
+        init_caches(config.storage.cache_dir, enabled=config.storage.cache_enabled)
         
         # 进度追踪器（在 process 方法中初始化）
         self._progress_tracker: Optional[ProgressTracker] = None

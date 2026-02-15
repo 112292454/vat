@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
+from contextlib import contextmanager
 
 from vat.utils.logger import setup_logger
 
@@ -46,6 +47,7 @@ class WebJob:
     started_at: Optional[datetime]
     finished_at: Optional[datetime]
     upload_cron: Optional[str] = None
+    concurrency: int = 1
     
     def to_dict(self) -> Dict:
         return {
@@ -64,6 +66,7 @@ class WebJob:
             "started_at": self.started_at.isoformat() if self.started_at else None,
             "finished_at": self.finished_at.isoformat() if self.finished_at else None,
             "upload_cron": self.upload_cron,
+            "concurrency": self.concurrency,
         }
 
 
@@ -80,17 +83,27 @@ class JobManager:
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self._init_table()
     
+    @contextmanager
     def _get_connection(self):
-        conn = sqlite3.connect(self.db_path)
+        """获取数据库连接（上下文管理器，确保连接关闭）"""
+        conn = sqlite3.connect(self.db_path, timeout=120)
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=5000")
-        return conn
+        conn.execute("PRAGMA busy_timeout=120000")
+        try:
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
     
     def _init_table(self):
         """初始化 web_jobs 表"""
         with self._get_connection() as conn:
             cursor = conn.cursor()
+            # WAL 模式：持久化设置，只需设置一次
+            conn.execute("PRAGMA journal_mode=WAL")
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS web_jobs (
                     job_id TEXT PRIMARY KEY,
@@ -109,11 +122,15 @@ class JobManager:
                 )
             """)
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_job_status ON web_jobs(status)")
-            # 增量迁移：添加 upload_cron 列（已有则忽略）
-            try:
-                cursor.execute("ALTER TABLE web_jobs ADD COLUMN upload_cron TEXT")
-            except Exception:
-                pass  # 列已存在
+            # 增量迁移：添加新列（已有则忽略）
+            for col_sql in [
+                "ALTER TABLE web_jobs ADD COLUMN upload_cron TEXT",
+                "ALTER TABLE web_jobs ADD COLUMN concurrency INTEGER DEFAULT 1",
+            ]:
+                try:
+                    cursor.execute(col_sql)
+                except Exception:
+                    pass  # 列已存在
     
     def submit_job(
         self,
@@ -141,8 +158,8 @@ class JobManager:
             cursor = conn.cursor()
             cursor.execute("""
                 INSERT INTO web_jobs 
-                (job_id, video_ids, steps, gpu_device, force, status, log_file, created_at, upload_cron)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (job_id, video_ids, steps, gpu_device, force, status, log_file, created_at, upload_cron, concurrency)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 job_id,
                 json.dumps(video_ids),
@@ -152,7 +169,8 @@ class JobManager:
                 JobStatus.PENDING.value,
                 log_file,
                 now,
-                upload_cron
+                upload_cron,
+                concurrency
             ))
         
         # 启动子进程
@@ -596,6 +614,12 @@ class JobManager:
         except (IndexError, KeyError):
             upload_cron = None
         
+        # concurrency 列可能不存在（旧数据库），安全读取
+        try:
+            concurrency = row['concurrency'] or 1
+        except (IndexError, KeyError):
+            concurrency = 1
+        
         return WebJob(
             job_id=row['job_id'],
             video_ids=json.loads(row['video_ids']),
@@ -611,4 +635,5 @@ class JobManager:
             started_at=datetime.fromisoformat(row['started_at']) if row['started_at'] else None,
             finished_at=datetime.fromisoformat(row['finished_at']) if row['finished_at'] else None,
             upload_cron=upload_cron,
+            concurrency=concurrency,
         )

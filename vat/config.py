@@ -73,6 +73,7 @@ class StorageConfig:
     fonts_dir: str
     subtitle_style_dir: str
     cache_dir: str
+    cache_enabled: bool = False  # 是否启用 diskcache（默认关闭，避免高并发 SQLite 锁冲突）
     
     def __post_init__(self):
         # 展开用户目录并转换为绝对路径

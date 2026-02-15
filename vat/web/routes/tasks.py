@@ -316,12 +316,14 @@ async def retry_task(
     if job.status == JobStatus.RUNNING:
         raise HTTPException(400, "Task is still running")
     
-    # 使用原任务的参数创建新任务
+    # 使用原任务的参数创建新任务（保留并发数、定时上传等配置）
     new_job_id = job_manager.submit_job(
         video_ids=job.video_ids,
         steps=job.steps,
         gpu_device=job.gpu_device,
-        force=job.force
+        force=job.force,
+        concurrency=job.concurrency,
+        upload_cron=job.upload_cron
     )
     
     return {

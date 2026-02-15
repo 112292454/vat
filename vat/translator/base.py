@@ -163,12 +163,17 @@ class BaseTranslator(ABC):
     ) -> List[SubtitleProcessData]:
         """安全的翻译块"""
         try:
-            cache_key = self._get_cache_key(chunk)
-            cache_enabled = is_cache_enabled()
+            cache_enabled = is_cache_enabled() and self._cache is not None
+            cache_key = self._get_cache_key(chunk) if cache_enabled else None
+            
             if cache_enabled:
-                cached_result = self._cache.get(cache_key, default=None)
+                import sqlite3
+                try:
+                    cached_result = self._cache.get(cache_key, default=None)
+                except sqlite3.OperationalError as e:
+                    logger.warning(f"Cache 读取失败（SQLite 锁），跳过缓存: {e}")
+                    cached_result = None
                 if cached_result is not None:
-                    # 记录 cache 命中
                     self._cache_hit_count += 1
                     return cached_result
 
@@ -178,7 +183,11 @@ class BaseTranslator(ABC):
                 self.update_callback(result)
 
             if cache_enabled:
-                self._cache.set(cache_key, result, expire=86400 * 7)
+                import sqlite3
+                try:
+                    self._cache.set(cache_key, result, expire=86400 * 7)
+                except sqlite3.OperationalError as e:
+                    logger.warning(f"Cache 写入失败（SQLite 锁），结果不缓存: {e}")
             return result
 
         except Exception as e:

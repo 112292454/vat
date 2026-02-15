@@ -8,6 +8,8 @@ SQLite数据库操作层
 """
 import sqlite3
 import json
+import time
+import threading
 from pathlib import Path
 from datetime import datetime
 from typing import List, Optional, Dict, Any, Set
@@ -24,6 +26,17 @@ logger = setup_logger("database")
 # 当前数据库版本
 DB_VERSION = 4
 
+# SQLite 并发配置
+# 高并发场景（20+ 线程 + WebUI 进程）需要足够长的超时
+_DB_BUSY_TIMEOUT_MS = 120_000   # busy_timeout（毫秒），SQLite 内部等待锁释放
+_DB_CONNECT_TIMEOUT_S = 120     # sqlite3.connect() 的 timeout 参数（秒）
+_DB_RETRY_ATTEMPTS = 5          # 应用层重试次数（busy_timeout 超时后的最后防线）
+_DB_RETRY_BASE_DELAY = 1.0      # 重试基础延迟（秒），指数退避
+
+# 已完成初始化的数据库路径集合（避免多线程重复跑 DDL 竞争写锁）
+_initialized_databases: set = set()
+_init_lock = threading.Lock()
+
 
 class Database:
     """数据库管理类"""
@@ -31,15 +44,28 @@ class Database:
     def __init__(self, db_path: str):
         self.db_path = Path(db_path).expanduser()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._init_database()
+        # 同一进程中多个 Database 实例指向同一路径时，只做一次 DDL 初始化
+        # 避免 20 个线程同时跑 _init_database 竞争写锁
+        db_key = str(self.db_path)
+        if db_key not in _initialized_databases:
+            with _init_lock:
+                if db_key not in _initialized_databases:
+                    self._init_database()
+                    _initialized_databases.add(db_key)
     
     @contextmanager
     def get_connection(self):
-        """获取数据库连接的上下文管理器"""
-        conn = sqlite3.connect(str(self.db_path))
+        """获取数据库连接的上下文管理器
+        
+        WAL 模式在 _init_database 中设置（持久化，无需每次连接设置）。
+        busy_timeout 需每次连接设置（连接级属性）。
+        """
+        conn = sqlite3.connect(
+            str(self.db_path),
+            timeout=_DB_CONNECT_TIMEOUT_S,  # Python 层面的锁等待超时
+        )
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute(f"PRAGMA busy_timeout={_DB_BUSY_TIMEOUT_MS}")
         try:
             yield conn
             conn.commit()
@@ -49,10 +75,37 @@ class Database:
         finally:
             conn.close()
     
+    def _retry_on_locked(self, func, *args, **kwargs):
+        """对数据库写操作进行重试，处理高并发下的 database is locked
+        
+        busy_timeout (120s) + connect timeout (120s) 已覆盖绝大多数场景。
+        此方法作为最后防线：当超时后仍获取不到锁，在应用层重试整个事务。
+        """
+        last_err = None
+        for attempt in range(_DB_RETRY_ATTEMPTS):
+            try:
+                return func(*args, **kwargs)
+            except sqlite3.OperationalError as e:
+                if "locked" not in str(e).lower():
+                    raise
+                last_err = e
+                delay = _DB_RETRY_BASE_DELAY * (2 ** attempt)
+                logger.warning(
+                    f"数据库锁冲突（第{attempt+1}次/{_DB_RETRY_ATTEMPTS}），"
+                    f"{delay:.1f}s 后重试: {e}"
+                )
+                time.sleep(delay)
+        raise sqlite3.OperationalError(
+            f"数据库锁冲突，{_DB_RETRY_ATTEMPTS}次重试后仍失败"
+        ) from last_err
+    
     def _init_database(self):
         """初始化数据库表结构"""
         with self.get_connection() as conn:
             cursor = conn.cursor()
+            
+            # WAL 模式：持久化设置，提升并发读写性能（读不阻塞写，写不阻塞读）
+            conn.execute("PRAGMA journal_mode=WAL")
             
             # 创建版本表
             cursor.execute("""
@@ -295,9 +348,11 @@ class Database:
         set_clause = ', '.join(f"{k} = ?" for k in updates.keys())
         values = list(updates.values()) + [video_id]
         
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(f"UPDATE videos SET {set_clause} WHERE id = ?", values)
+        def _do_update():
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(f"UPDATE videos SET {set_clause} WHERE id = ?", values)
+        self._retry_on_locked(_do_update)
     
     def add_processing_note(self, video_id: str, stage: str, message: str) -> None:
         """追加一条处理警告到视频的 processing_notes
@@ -570,22 +625,26 @@ class Database:
     
     def add_task(self, task: Task) -> int:
         """添加任务记录"""
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("""
-                INSERT INTO tasks 
-                (video_id, step, status, gpu_id, started_at, completed_at, error_message)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (
-                task.video_id,
-                task.step.value,
-                task.status.value,
-                task.gpu_id,
-                task.started_at,
-                task.completed_at,
-                task.error_message
-            ))
-            return cursor.lastrowid
+        result = [None]
+        def _do_insert():
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    INSERT INTO tasks 
+                    (video_id, step, status, gpu_id, started_at, completed_at, error_message)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    task.video_id,
+                    task.step.value,
+                    task.status.value,
+                    task.gpu_id,
+                    task.started_at,
+                    task.completed_at,
+                    task.error_message
+                ))
+                result[0] = cursor.lastrowid
+        self._retry_on_locked(_do_insert)
+        return result[0]
     
     def get_task(self, video_id: str, step: TaskStep) -> Optional[Task]:
         """获取特定步骤的任务"""
@@ -624,46 +683,62 @@ class Database:
                 - error_message: 错误信息
                 - gpu_id: GPU编号
         """
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            
-            # 获取最新的该步骤任务
-            cursor.execute("""
-                SELECT id FROM tasks 
-                WHERE video_id = ? AND step = ?
-                ORDER BY id DESC LIMIT 1
-            """, (video_id, step.value))
-            row = cursor.fetchone()
-            
-            if not row:
-                # 如果任务不存在，创建新任务
-                task = Task(
-                    video_id=video_id,
-                    step=step,
-                    status=status,
-                    **kwargs
-                )
-                self.add_task(task)
-                return
-            
-            task_id = row['id']
-            
-            # 更新任务
-            updates = {'status': status.value}
-            if status == TaskStatus.RUNNING and 'started_at' not in kwargs:
-                updates['started_at'] = datetime.now()
-            if status == TaskStatus.COMPLETED and 'completed_at' not in kwargs:
-                updates['completed_at'] = datetime.now()
-            # 任务开始运行或成功完成时清除旧的错误信息
-            if status in (TaskStatus.RUNNING, TaskStatus.COMPLETED, TaskStatus.SKIPPED) and 'error_message' not in kwargs:
-                updates['error_message'] = None
-            
-            updates.update(kwargs)
-            
-            set_clause = ', '.join(f"{k} = ?" for k in updates.keys())
-            values = list(updates.values()) + [task_id]
-            
-            cursor.execute(f"UPDATE tasks SET {set_clause} WHERE id = ?", values)
+        def _do_update():
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                
+                # 获取最新的该步骤任务
+                cursor.execute("""
+                    SELECT id FROM tasks 
+                    WHERE video_id = ? AND step = ?
+                    ORDER BY id DESC LIMIT 1
+                """, (video_id, step.value))
+                row = cursor.fetchone()
+                
+                if not row:
+                    # 如果任务不存在，创建新任务
+                    task = Task(
+                        video_id=video_id,
+                        step=step,
+                        status=status,
+                        **kwargs
+                    )
+                    # 直接在当前连接中插入，避免嵌套 _retry_on_locked
+                    cursor.execute("""
+                        INSERT INTO tasks 
+                        (video_id, step, status, gpu_id, started_at, completed_at, error_message)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """, (
+                        task.video_id,
+                        task.step.value,
+                        task.status.value,
+                        task.gpu_id,
+                        task.started_at,
+                        task.completed_at,
+                        task.error_message
+                    ))
+                    return
+                
+                task_id = row['id']
+                
+                # 更新任务
+                updates = {'status': status.value}
+                if status == TaskStatus.RUNNING and 'started_at' not in kwargs:
+                    updates['started_at'] = datetime.now()
+                if status == TaskStatus.COMPLETED and 'completed_at' not in kwargs:
+                    updates['completed_at'] = datetime.now()
+                # 任务开始运行或成功完成时清除旧的错误信息
+                if status in (TaskStatus.RUNNING, TaskStatus.COMPLETED, TaskStatus.SKIPPED) and 'error_message' not in kwargs:
+                    updates['error_message'] = None
+                
+                updates.update(kwargs)
+                
+                set_clause = ', '.join(f"{k} = ?" for k in updates.keys())
+                values = list(updates.values()) + [task_id]
+                
+                cursor.execute(f"UPDATE tasks SET {set_clause} WHERE id = ?", values)
+        
+        self._retry_on_locked(_do_update)
     
     def get_videos_by_task_status(self, step: Optional[TaskStep] = None, 
                                   status: Optional[TaskStatus] = None) -> List[str]:

@@ -749,7 +749,8 @@ def process(ctx, video_id, process_all, playlist, stages, gpu, force, dry_run, c
                 logger.warning(f"[{idx + 1}/{total}] 失败: {title}")
                 return vid, False, "处理返回失败"
         except Exception as e:
-            logger.error(f"[{idx + 1}/{total}] 失败: {title} - {e}")
+            import traceback
+            logger.error(f"[{idx + 1}/{total}] 失败: {title} - {e}\n{traceback.format_exc()}")
             return vid, False, str(e)
     
     def _run_batch(video_list):

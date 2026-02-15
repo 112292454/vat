@@ -13,6 +13,9 @@ storage:
   fonts_dir: "vat/resources/fonts"                     # 字体目录
   subtitle_style_dir: "vat/resources/subtitle_style"   # 字幕样式模板目录
   cache_dir: "~/.vat/cache"                            # 缓存目录
+  cache_enabled: false                                   # 是否启用 diskcache（LLM/翻译结果缓存）
+                                                         # 高并发时 diskcache 内部 SQLite 可能引发锁冲突，建议关闭
+                                                         # 开启后重跑同一视频可复用已缓存的 LLM 调用结果
 
 # =============================================================================
 # 下载器配置

@@ -61,6 +61,10 @@
                 <span class="text-gray-500">强制模式:</span>
                 <span class="ml-2 font-medium">{% if task.force %}是{% else %}否{% endif %}</span>
             </div>
+            <div>
+                <span class="text-gray-500">并发数:</span>
+                <span class="ml-2 font-medium">{{ task.concurrency or 1 }}</span>
+            </div>
             {% if task.upload_cron %}
             <div class="col-span-2">
                 <span class="text-gray-500">定时上传:</span>

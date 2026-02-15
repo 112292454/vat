@@ -8,7 +8,7 @@
 - 多 GPU：per-GPU worker 进程模型
   - 每个 GPU 一个持久 worker 进程，模型只加载一次
   - 所有 chunk 放入共享队列，worker 自行取任务（天然负载均衡）
-  - worker 加载模型前检查显存是否满足 min_free_memory_mb
+  - worker 加载模型前检查显存，不足时无限等待（不持有 chunk）
   - OOM 时 chunk 重回队列重试，不丢失内容
 """
 
@@ -45,7 +45,6 @@ DEFAULT_CHUNK_CONCURRENCY = 3  # 3个并发
 
 # 多 GPU worker 常量
 _MEMORY_CHECK_INTERVAL_SEC = 20   # 显存不足时的重试间隔（秒）
-_MEMORY_CHECK_MAX_WAIT_SEC = 1200  # 显存等待最长时间（秒）
 _OOM_MAX_RETRIES = 3              # 单个 chunk OOM 最大重试次数
 _OOM_COOLDOWN_SEC = 10            # OOM 后冷却等待时间（秒）
 _WORKER_QUEUE_TIMEOUT_SEC = 2     # worker 从队列取任务的超时时间（秒）
@@ -73,9 +72,9 @@ def _gpu_worker_loop(
     Per-GPU 持久 worker 函数：在独立进程中运行
     
     每个 GPU 对应一个 worker 进程。worker 加载模型一次后循环处理 chunk。
-    - 加载模型前检查显存是否满足 min_free_memory_mb
-    - 显存不足时等待（有最大等待时间）
-    - OOM 时清理 CUDA cache，将 chunk 重回队列重试
+    - 先加载模型（显存不足时无限等待），再从队列取 chunk
+    - 等待显存期间不持有 chunk，避免 chunk 被卡住
+    - OOM 时 chunk 重回队列，卸载模型后重新等待显存
     - 收到 None 哨兵值时退出
     
     Args:
@@ -89,14 +88,21 @@ def _gpu_worker_loop(
     # 设置 CUDA_VISIBLE_DEVICES：子进程隔离，不影响主进程
     os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
     
-    # 子进程中重新初始化 logger
+    # 子进程中重新初始化 logger（propagate=False 防止向父 logger 传播导致重复输出）
     from ..utils.logger import setup_logger as _setup_logger
     worker_logger = _setup_logger(f"chunked_asr.gpu{gpu_id}")
+    worker_logger.propagate = False
     worker_logger.info(f"Worker GPU {gpu_id} 启动")
     
-    asr_model = None  # 延迟加载
+    asr_model = None
     
     while True:
+        # 确保模型已加载再取 chunk（不持有 chunk 等待显存，避免 chunk 被卡住）
+        if asr_model is None:
+            asr_model = _load_model_with_memory_check(
+                gpu_id, whisper_kwargs, min_free_memory_mb, worker_logger
+            )
+        
         # 从共享队列取任务
         try:
             item = chunk_queue.get(timeout=_WORKER_QUEUE_TIMEOUT_SEC)
@@ -115,21 +121,7 @@ def _gpu_worker_loop(
         )
         
         try:
-            # 延迟加载模型：首次处理 chunk 时加载
-            if asr_model is None:
-                asr_model = _load_model_with_memory_check(
-                    gpu_id, whisper_kwargs, min_free_memory_mb, worker_logger
-                )
-                if asr_model is None:
-                    # 等待超时仍无法加载，将 chunk 放回队列
-                    worker_logger.error(
-                        f"GPU {gpu_id} 显存等待超时，无法加载模型。"
-                        f"Chunk {chunk_idx} 放回队列"
-                    )
-                    chunk_queue.put((chunk_idx, chunk_file, retry_count))
-                    break  # 退出此 worker（显存长期不足，避免死循环）
-            
-            # 执行转录
+            # 执行转录（模型已在取 chunk 前加载）
             asr_data = asr_model.asr_audio(chunk_file, language=language)
             
             # 序列化结果（ASRData 不能直接跨进程传递）
@@ -198,7 +190,11 @@ def _load_model_with_memory_check(
     worker_logger,
 ):
     """
-    在加载模型前检查 GPU 显存，显存不足时等待。
+    在加载模型前检查 GPU 显存，显存不足时无限等待直到满足条件。
+    
+    此函数在取 chunk 之前调用，worker 此时不持有任何 chunk，
+    因此等待期间不会阻塞其他 worker 处理队列中的 chunk。
+    如果主进程需要终止等待中的 worker，通过 Process.terminate() 强制退出。
     
     Args:
         gpu_id: 物理 GPU 索引
@@ -207,23 +203,18 @@ def _load_model_with_memory_check(
         worker_logger: worker 专属 logger
         
     Returns:
-        加载成功的 WhisperASR 实例，或 None（等待超时）
+        加载成功的 WhisperASR 实例（无限等待，永不返回 None）
     """
     from ..utils.gpu import check_gpu_free_memory
     
     waited = 0
-    while waited < _MEMORY_CHECK_MAX_WAIT_SEC:
-        if check_gpu_free_memory(gpu_id, min_free_memory_mb):
-            break
+    while not check_gpu_free_memory(gpu_id, min_free_memory_mb):
         worker_logger.info(
             f"GPU {gpu_id} 显存不足 {min_free_memory_mb}MB，"
-            f"等待 {_MEMORY_CHECK_INTERVAL_SEC}s... (已等待 {waited}s/{_MEMORY_CHECK_MAX_WAIT_SEC}s)"
+            f"等待 {_MEMORY_CHECK_INTERVAL_SEC}s... (已等待 {waited}s)"
         )
         time.sleep(_MEMORY_CHECK_INTERVAL_SEC)
         waited += _MEMORY_CHECK_INTERVAL_SEC
-    else:
-        # while 正常结束（未 break）= 等待超时
-        return None
     
     # 显存满足，加载模型
     worker_logger.info(f"GPU {gpu_id} 显存充足，开始加载模型")
@@ -317,8 +308,10 @@ class ChunkedASR:
         # 1. 分块音频
         chunks = self._split_audio()
 
-        # 2. 如果只有一块，直接创建单个 ASR 实例转录
-        if len(chunks) == 1:
+        # 2. 如果只有一块且是单 GPU，直接创建单个 ASR 实例转录
+        #    多 GPU 模式下即使只有一块也必须走 worker 进程，避免主进程加载模型
+        gpu_count = _get_available_gpu_count()
+        if len(chunks) == 1 and gpu_count <= 1:
             logger.info("音频短于分块长度，直接转录")
             single_asr = self.asr_class(self.audio_path, **self.asr_kwargs)
             return single_asr.run(callback)
@@ -421,7 +414,7 @@ class ChunkedASR:
         Per-GPU worker 模型：
         - 每个 GPU 启动一个持久 worker 进程，模型只加载一次
         - 所有 chunk 放入共享队列，worker 自行取任务（天然负载均衡）
-        - worker 加载模型前检查 GPU 空闲显存是否满足 min_free_memory_mb
+        - worker 加载模型前检查 GPU 空闲显存，不足时无限等待（不持有 chunk）
         - OOM 时 chunk 重回队列重试（最多 _OOM_MAX_RETRIES 次）
         """
         total_chunks = len(chunks)
@@ -540,9 +533,14 @@ class ChunkedASR:
             for w in workers:
                 w.join(timeout=30)
                 if w.is_alive():
-                    logger.warning(f"Worker {w.name} 未在30s内退出，强制终止")
+                    logger.warning(f"Worker {w.name} 未在30s内退出，发送 SIGTERM")
                     w.terminate()
-                    w.join(timeout=5)
+                    w.join(timeout=10)
+                    if w.is_alive():
+                        # CUDA 进程可能不响应 SIGTERM，使用 SIGKILL
+                        logger.warning(f"Worker {w.name} SIGTERM 无效，发送 SIGKILL")
+                        w.kill()
+                        w.join(timeout=5)
             
             # 7. 检查完整性：是否有 chunk 失败或丢失
             missing_chunks = [i for i, r in enumerate(results) if r is None]
@@ -562,11 +560,17 @@ class ChunkedASR:
             return [r for r in results if r is not None]
             
         finally:
-            # 确保所有 worker 进程被清理
+            # 确保所有 worker 进程被清理（SIGTERM → SIGKILL）
             for w in workers:
                 if w.is_alive():
                     w.terminate()
-                    w.join(timeout=5)
+                    w.join(timeout=10)
+                    if w.is_alive():
+                        logger.warning(f"Worker {w.name} SIGTERM 无效，发送 SIGKILL")
+                        w.kill()
+                        w.join(timeout=5)
+                # 释放进程资源
+                w.close() if hasattr(w, 'close') else None
             
             # 清理临时文件
             for temp_file in temp_files:

@@ -596,10 +596,26 @@ class WhisperASR:
         # 检查音频时长
         duration_seconds = self._get_audio_duration(audio_path)
         
-        # 如果启用分块且音频较长（>5分钟），使用分块处理
-        if self.enable_chunked and duration_seconds > 600:
+        # 检测多 GPU 环境
+        from .chunked_asr import _get_available_gpu_count
+        gpu_count = _get_available_gpu_count()
+        use_multi_gpu = gpu_count > 1
+        
+        # 决定是否使用 ChunkedASR（worker 进程模式）：
+        # - 多 GPU：必须走 worker 进程，避免主进程加载模型污染所有 GPU 显存
+        #   （主进程 auto 选 GPU 会逐个累积模型到 class-level cache，最终占满所有 GPU）
+        # - 单 GPU + 长音频（>10min）：分块并发处理
+        should_use_chunked = self.enable_chunked and (use_multi_gpu or duration_seconds > 600)
+        
+        if should_use_chunked:
             if progress_callback:
-                progress_callback(f"音频时长 {duration_seconds/60:.1f} 分钟，使用分块处理")
+                if use_multi_gpu:
+                    progress_callback(
+                        f"音频时长 {duration_seconds/60:.1f} 分钟，"
+                        f"多 GPU 模式 ({gpu_count} GPUs)"
+                    )
+                else:
+                    progress_callback(f"音频时长 {duration_seconds/60:.1f} 分钟，使用分块处理")
             
             # 创建 ChunkedASR 包装器
             chunked_asr = ChunkedASR(
@@ -618,7 +634,7 @@ class WhisperASR:
             return chunked_asr.run(lambda progress, msg: 
                 progress_callback(msg) if progress_callback else None)
         else:
-            # 直接转录
+            # 单 GPU + 短音频：直接在主进程转录
             if progress_callback and duration_seconds > 0:
                 progress_callback(f"音频时长 {duration_seconds/60:.1f} 分钟，使用普通模式")
             return self.asr_audio(audio_path, language, progress_callback)

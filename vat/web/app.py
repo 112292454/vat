@@ -25,6 +25,32 @@ from vat.web.routes import videos_router, playlists_router, tasks_router, files_
 
 app = FastAPI(title="VAT Manager", description="视频处理任务管理界面")
 
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    """全局异常处理：500 错误时在页面上显示具体错误信息"""
+    import traceback
+    tb = traceback.format_exception(type(exc), exc, exc.__traceback__)
+    tb_str = "".join(tb)
+    # API 请求返回 JSON
+    if request.url.path.startswith("/api/"):
+        return JSONResponse(
+            status_code=500,
+            content={"error": str(exc), "traceback": tb_str}
+        )
+    # 页面请求返回 HTML
+    html = f"""<!DOCTYPE html>
+<html><head><title>500 Internal Server Error</title>
+<style>body{{font-family:monospace;margin:2em;background:#1a1a2e;color:#e0e0e0}}
+h1{{color:#e74c3c}}pre{{background:#16213e;padding:1em;border-radius:8px;overflow-x:auto;font-size:13px;line-height:1.5}}
+a{{color:#3498db}}</style></head>
+<body><h1>500 Internal Server Error</h1>
+<p><a href="javascript:history.back()">&larr; 返回</a></p>
+<p><strong>{type(exc).__name__}:</strong> {exc}</p>
+<pre>{tb_str}</pre></body></html>"""
+    return HTMLResponse(content=html, status_code=500)
+
+
 # CORS 配置（开发环境）
 app.add_middleware(
     CORSMiddleware,
@@ -92,6 +118,10 @@ async def index(
 ):
     """首页 - 视频列表（SQL 层面分页+过滤，避免全量加载）"""
     db = get_db()
+    
+    # 搜索关键词 strip
+    if q:
+        q = q.strip() or None
     
     # 构建阶段级过滤字典
     stage_filters = {}

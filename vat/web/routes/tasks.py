@@ -7,7 +7,7 @@ import asyncio
 import re
 from typing import Optional, List
 from pathlib import Path
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -294,39 +294,53 @@ async def retry_task(
 @router.get("/{task_id}/log-content")
 async def get_log_content(
     task_id: str,
+    tail: int = Query(500, ge=0, description="只返回最后 N 行，0=全部"),
     job_manager: JobManager = Depends(get_job_manager)
 ):
-    """获取任务日志内容（非流式）"""
+    """获取任务日志内容（非流式），返回尾部 N 行和文件 byte offset（供 SSE 续读）"""
     job = job_manager.get_job(task_id)
     if not job:
         raise HTTPException(404, "Task not found")
     
     content = ""
+    file_offset = 0  # SSE 从此处开始读增量
     if job.log_file:
         from pathlib import Path
         log_path = Path(job.log_file)
         if log_path.exists():
-            content = re.sub(r'\x1b\[[0-9;]*m', '', log_path.read_text())
+            raw = log_path.read_text(encoding="utf-8", errors="replace")
+            file_offset = len(raw.encode("utf-8"))  # 文件末尾的 byte 位置
+            clean = re.sub(r'\x1b\[[0-9;]*m', '', raw)
+            if tail > 0:
+                lines = clean.splitlines()
+                if len(lines) > tail:
+                    content = f"... (已省略 {len(lines) - tail} 条早期日志) ...\n" + "\n".join(lines[-tail:])
+                else:
+                    content = clean
+            else:
+                content = clean
     
-    return {"task_id": task_id, "content": content}
+    return {"task_id": task_id, "content": content, "file_offset": file_offset}
 
 
 @router.get("/{task_id}/logs")
 async def stream_logs(
     task_id: str,
+    offset: int = Query(0, ge=0, description="文件 byte offset，从此处开始读增量"),
     job_manager: JobManager = Depends(get_job_manager)
 ):
     """
-    SSE 实时日志流
+    SSE 实时日志流（增量推送）
     
-    从日志文件读取并推送，直到任务完成
+    offset 参数由前端从 /log-content 的 file_offset 获取，
+    确保 SSE 只推送 loadExistingLogs 之后新产生的日志行。
     """
     job = job_manager.get_job(task_id)
     if not job:
         raise HTTPException(404, "Task not found")
     
     async def event_generator():
-        last_pos = 0
+        last_pos = offset
         
         while True:
             # 更新任务状态
@@ -339,7 +353,7 @@ async def stream_logs(
                     from pathlib import Path
                     log_path = Path(current_job.log_file)
                     if log_path.exists():
-                        with open(log_path, "r") as f:
+                        with open(log_path, "r", encoding="utf-8", errors="replace") as f:
                             f.seek(last_pos)
                             new_content = f.read()
                             last_pos = f.tell()

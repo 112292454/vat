@@ -197,7 +197,7 @@ function selectPending() {
 }
 
 function filterVideos() {
-    const query = document.getElementById('video-search').value.toLowerCase();
+    const query = document.getElementById('video-search').value.trim().toLowerCase();
     document.querySelectorAll('.video-item').forEach(item => {
         const title = item.dataset.title || '';
         item.style.display = title.includes(query) ? '' : 'none';

@@ -520,7 +520,7 @@ class Database:
             videos = []
             for row in cursor.fetchall():
                 video = self._row_to_video(row)
-                if playlist_id and row.get('pv_index') is not None:
+                if playlist_id and 'pv_index' in row.keys() and row['pv_index'] is not None:
                     video.playlist_index = row['pv_index']
                 videos.append(video)
             

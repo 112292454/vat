@@ -205,12 +205,14 @@ function clearLogs() {
     logContent.innerHTML = '';
 }
 
-function startLogStream() {
+let logFileOffset = 0;  // 由 loadExistingLogs 设置，SSE 从此处续读
+
+function startLogStream(offset) {
     if (eventSource) {
         eventSource.close();
     }
-    
-    eventSource = new EventSource(`/api/tasks/${taskId}/logs`);
+    const startOffset = offset !== undefined ? offset : logFileOffset;
+    eventSource = new EventSource(`/api/tasks/${taskId}/logs?offset=${startOffset}`);
     
     eventSource.onmessage = (event) => {
         appendLog(event.data);
@@ -248,8 +250,8 @@ async function checkTaskStatus() {
                 updateTaskStatus(data.status);
                 setTimeout(() => location.reload(), 1000);
             } else {
-                // 任务仍在运行，3秒后重连
-                setTimeout(startLogStream, 3000);
+                // 任务仍在运行，3秒后重连（从当前 offset 续读）
+                setTimeout(() => startLogStream(), 3000);
             }
         }
     } catch (e) {
@@ -347,20 +349,19 @@ async function retryTask(taskId) {
     }
 }
 
-// 加载已有日志（限制数量防止卡死）
+// 加载已有日志（后端已做 tail 截断，返回 file_offset 供 SSE 续读）
 async function loadExistingLogs() {
     try {
-        const response = await fetch(`/api/tasks/${taskId}/log-content`);
+        const response = await fetch(`/api/tasks/${taskId}/log-content?tail=${MAX_LOG_LINES}`);
         if (response.ok) {
             const data = await response.json();
+            // 记录 file_offset，SSE 从此处开始增量推送
+            if (data.file_offset !== undefined) {
+                logFileOffset = data.file_offset;
+            }
             if (data.content) {
                 const lines = data.content.split('\n').filter(line => line.trim());
-                // 只加载最后 MAX_LOG_LINES 行
-                const startIdx = Math.max(0, lines.length - MAX_LOG_LINES);
-                if (startIdx > 0) {
-                    appendLog(`... (已省略 ${startIdx} 条早期日志) ...`);
-                }
-                lines.slice(startIdx).forEach(line => {
+                lines.forEach(line => {
                     appendLog(line);
                 });
             }
@@ -370,13 +371,12 @@ async function loadExistingLogs() {
     }
 }
 
-// 页面加载时加载已有日志
-loadExistingLogs();
-
-// 如果任务正在运行，启动日志流和进度轮询
-{% if task.status == 'running' %}
-startLogStream();
-startProgressPolling();
-{% endif %}
+// 页面加载时加载已有日志，运行中任务之后启动 SSE 增量流
+loadExistingLogs().then(() => {
+    {% if task.status == 'running' %}
+    startLogStream(logFileOffset);
+    startProgressPolling();
+    {% endif %}
+});
 </script>
 {% endblock %}

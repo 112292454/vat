@@ -61,7 +61,9 @@ def get_playlist_service(db: Database = Depends(get_db)) -> PlaylistService:
     config = load_config()
     downloader = YouTubeDownloader(
         proxy=config.proxy.get_proxy(),
-        video_format=config.downloader.youtube.format
+        video_format=config.downloader.youtube.format,
+        cookies_file=config.downloader.youtube.cookies_file,
+        remote_components=config.downloader.youtube.remote_components,
     )
     return PlaylistService(db, downloader)
 
@@ -132,7 +134,9 @@ def _run_sync_in_background(
     db = Database(config.storage.database_path)
     downloader = YouTubeDownloader(
         proxy=config.proxy.get_proxy(),
-        video_format=config.downloader.youtube.format
+        video_format=config.downloader.youtube.format,
+        cookies_file=config.downloader.youtube.cookies_file,
+        remote_components=config.downloader.youtube.remote_components,
     )
     service = PlaylistService(db, downloader)
     
@@ -186,7 +190,9 @@ async def add_playlist(
     config = load_config()
     downloader = YouTubeDownloader(
         proxy=config.proxy.get_proxy(),
-        video_format=config.downloader.youtube.format
+        video_format=config.downloader.youtube.format,
+        cookies_file=config.downloader.youtube.cookies_file,
+        remote_components=config.downloader.youtube.remote_components,
     )
     
     try:

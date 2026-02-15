@@ -380,6 +380,55 @@ class TestBatchGetPlaylistProgress:
 
 # ==================== DB Version ====================
 
+class TestIsStepCompleted:
+    """is_step_completed 方法（被 process() 跳过逻辑依赖）"""
+
+    def test_completed_returns_true(self, db):
+        _add_video(db, "v1")
+        db.add_task(Task(video_id="v1", step=TaskStep.DOWNLOAD, status=TaskStatus.COMPLETED))
+        assert db.is_step_completed("v1", TaskStep.DOWNLOAD) is True
+
+    def test_pending_returns_false(self, db):
+        _add_video(db, "v1")
+        db.add_task(Task(video_id="v1", step=TaskStep.DOWNLOAD, status=TaskStatus.PENDING))
+        assert db.is_step_completed("v1", TaskStep.DOWNLOAD) is False
+
+    def test_failed_returns_false(self, db):
+        _add_video(db, "v1")
+        _fail_step(db, "v1", TaskStep.DOWNLOAD)
+        assert db.is_step_completed("v1", TaskStep.DOWNLOAD) is False
+
+    def test_running_returns_false(self, db):
+        _add_video(db, "v1")
+        _run_step(db, "v1", TaskStep.DOWNLOAD)
+        assert db.is_step_completed("v1", TaskStep.DOWNLOAD) is False
+
+    def test_no_task_returns_false(self, db):
+        _add_video(db, "v1")
+        assert db.is_step_completed("v1", TaskStep.DOWNLOAD) is False
+
+
+class TestBatchGetVideoProgressRunning:
+    """batch_get_video_progress 对 running 状态的检测"""
+
+    def test_running_detected(self, db):
+        _add_video(db, "v1")
+        _complete_partial_steps(db, "v1", [TaskStep.DOWNLOAD])
+        _run_step(db, "v1", TaskStep.WHISPER)
+        progress = db.batch_get_video_progress(["v1"])
+        assert progress["v1"]["has_running"] is True
+        assert progress["v1"]["has_failed"] is False
+
+    def test_mixed_running_and_failed(self, db):
+        _add_video(db, "v1")
+        _complete_partial_steps(db, "v1", [TaskStep.DOWNLOAD])
+        _run_step(db, "v1", TaskStep.WHISPER)
+        _fail_step(db, "v1", TaskStep.SPLIT)
+        progress = db.batch_get_video_progress(["v1"])
+        assert progress["v1"]["has_running"] is True
+        assert progress["v1"]["has_failed"] is True
+
+
 class TestDatabaseVersion:
 
     def test_fresh_db_has_version(self, db):

@@ -328,119 +328,120 @@ class WhisperASR:
         self._ensure_model_loaded()
         
         if self.use_pipeline:
-            return self._asr_with_pipeline(audio_path, language, progress_callback)
+            # return self._asr_with_pipeline(audio_path, language, progress_callback)
+            raise NotImplementedError
         else:
             return self._asr_with_faster_whisper(audio_path, language, progress_callback)
 
-    def _asr_with_pipeline(
-        self,
-        audio_path: Union[Path, bytes],
-        language: Optional[str] = None,
-        progress_callback: Optional[Callable[[str], None]] = None
-    ) -> ASRData:
-        """使用Pipeline进行转录 [已搁置 - 实验性功能]"""
-        import warnings
-        warnings.warn(
-            "[VAT] Pipeline ASR 转录已搁置，效果不如 faster-whisper。",
-            UserWarning,
-            stacklevel=2
-        )
-        lang = language or self.language
+    # def _asr_with_pipeline(
+    #     self,
+    #     audio_path: Union[Path, bytes],
+    #     language: Optional[str] = None,
+    #     progress_callback: Optional[Callable[[str], None]] = None
+    # ) -> ASRData:
+    #     """使用Pipeline进行转录 [已搁置 - 实验性功能]"""
+    #     import warnings
+    #     warnings.warn(
+    #         "[VAT] Pipeline ASR 转录已搁置，效果不如 faster-whisper。",
+    #         UserWarning,
+    #         stacklevel=2
+    #     )
+    #     lang = language or self.language
         
-        if progress_callback:
-            progress_callback(f"开始Pipeline转录: {audio_path}")
+    #     if progress_callback:
+    #         progress_callback(f"开始Pipeline转录: {audio_path}")
         
-        # 构建pipeline参数，复用Whisper的配置风格
-        generate_kwargs = {
-            "language": lang,
-            "task": "transcribe",
-            "num_beams": self.beam_size,
-            "condition_on_prev_tokens": self.condition_on_previous_text,
-            "compression_ratio_threshold": self.compression_ratio_threshold,
-            "temperature": self.temperature,
-            "logprob_threshold": self.log_prob_threshold,
-            "no_speech_threshold": self.no_speech_threshold,
-            "repetition_penalty": self.repetition_penalty,
-            "initial_prompt": self.initial_prompt if self.initial_prompt else None,
-        }
+    #     # 构建pipeline参数，复用Whisper的配置风格
+    #     generate_kwargs = {
+    #         "language": lang,
+    #         "task": "transcribe",
+    #         "num_beams": self.beam_size,
+    #         "condition_on_prev_tokens": self.condition_on_previous_text,
+    #         "compression_ratio_threshold": self.compression_ratio_threshold,
+    #         "temperature": self.temperature,
+    #         "logprob_threshold": self.log_prob_threshold,
+    #         "no_speech_threshold": self.no_speech_threshold,
+    #         "repetition_penalty": self.repetition_penalty,
+    #         "initial_prompt": self.initial_prompt if self.initial_prompt else None,
+    #     }
         
-        # 移除 None 值
-        generate_kwargs = {k: v for k, v in generate_kwargs.items() if v is not None}
+    #     # 移除 None 值
+    #     generate_kwargs = {k: v for k, v in generate_kwargs.items() if v is not None}
         
-        # 执行转录参数
-        call_kwargs = {
-            "chunk_length_s": self.pipeline_chunk_length,
-            "return_timestamps": True,
-            "generate_kwargs": generate_kwargs,
-            "add_punctuation": self.enable_punctuation,
-            # "add_silence_end": 0.5, 
-            # "add_silence_start": 0.5
-        }
+    #     # 执行转录参数
+    #     call_kwargs = {
+    #         "chunk_length_s": self.pipeline_chunk_length,
+    #         "return_timestamps": True,
+    #         "generate_kwargs": generate_kwargs,
+    #         "add_punctuation": self.enable_punctuation,
+    #         # "add_silence_end": 0.5, 
+    #         # "add_silence_start": 0.5
+    #     }
         
-        # 说话人数量控制
-        if self.num_speakers is not None:
-            call_kwargs["num_speakers"] = self.num_speakers
-        if self.min_speakers is not None:
-            call_kwargs["min_speakers"] = self.min_speakers
-        if self.max_speakers is not None:
-            call_kwargs["max_speakers"] = self.max_speakers
+    #     # 说话人数量控制
+    #     if self.num_speakers is not None:
+    #         call_kwargs["num_speakers"] = self.num_speakers
+    #     if self.min_speakers is not None:
+    #         call_kwargs["min_speakers"] = self.min_speakers
+    #     if self.max_speakers is not None:
+    #         call_kwargs["max_speakers"] = self.max_speakers
         
-        # 执行转录
-        result = self.pipe(str(audio_path), **call_kwargs)
+    #     # 执行转录
+    #     result = self.pipe(str(audio_path), **call_kwargs)
         
-        return self._convert_pipeline_to_asr_data(result, progress_callback)
+    #     return self._convert_pipeline_to_asr_data(result, progress_callback)
 
-    def _convert_pipeline_to_asr_data(
-        self,
-        result: dict,
-        progress_callback: Optional[Callable[[str], None]] = None
-    ) -> ASRData:
-        """将Pipeline结果转换为ASRData"""
-        asr_segments = []
+    # def _convert_pipeline_to_asr_data(
+    #     self,
+    #     result: dict,
+    #     progress_callback: Optional[Callable[[str], None]] = None
+    # ) -> ASRData:
+    #     """将Pipeline结果转换为ASRData"""
+    #     asr_segments = []
         
-        if self.enable_diarization and 'chunks' in result:
-            # 说话人分离模式
-            for chunk in result['chunks']:
-                text = chunk.get('text', '').strip()
-                if not text:
-                    continue
+    #     if self.enable_diarization and 'chunks' in result:
+    #         # 说话人分离模式
+    #         for chunk in result['chunks']:
+    #             text = chunk.get('text', '').strip()
+    #             if not text:
+    #                 continue
                 
-                # 过滤无用文本（保留原有逻辑）
-                if any(x in text for x in ["・", "作詞", "編曲"]) or text.startswith(("【", "（")):
-                    continue
+    #             # 过滤无用文本（保留原有逻辑）
+    #             if any(x in text for x in ["・", "作詞", "編曲"]) or text.startswith(("【", "（")):
+    #                 continue
                 
-                asr_segments.append(ASRDataSeg(
-                    text=text,
-                    start_time=int(chunk['timestamp'][0] * 1000),
-                    end_time=int(chunk['timestamp'][1] * 1000),
-                    speaker_id=chunk.get('speaker_id', None)
-                ))
+    #             asr_segments.append(ASRDataSeg(
+    #                 text=text,
+    #                 start_time=int(chunk['timestamp'][0] * 1000),
+    #                 end_time=int(chunk['timestamp'][1] * 1000),
+    #                 speaker_id=chunk.get('speaker_id', None)
+    #             ))
                 
-                if progress_callback:
-                    speaker_info = f" [{chunk.get('speaker_id')}]" if chunk.get('speaker_id') else ""
-                    progress_callback(f"[{chunk['timestamp'][0]:.2f}s]{speaker_info} {text}")
-        else:
-            # 标准模式（无说话人分离）
-            chunks = result.get('chunks', [])
-            for chunk in chunks:
-                text = chunk.get('text', '').strip()
-                if not text:
-                    continue
+    #             if progress_callback:
+    #                 speaker_info = f" [{chunk.get('speaker_id')}]" if chunk.get('speaker_id') else ""
+    #                 progress_callback(f"[{chunk['timestamp'][0]:.2f}s]{speaker_info} {text}")
+    #     else:
+    #         # 标准模式（无说话人分离）
+    #         chunks = result.get('chunks', [])
+    #         for chunk in chunks:
+    #             text = chunk.get('text', '').strip()
+    #             if not text:
+    #                 continue
                 
-                # 过滤无用文本
-                if any(x in text for x in ["・", "作詞", "編曲"]) or text.startswith(("【", "（")):
-                    continue
+    #             # 过滤无用文本
+    #             if any(x in text for x in ["・", "作詞", "編曲"]) or text.startswith(("【", "（")):
+    #                 continue
                 
-                asr_segments.append(ASRDataSeg(
-                    text=text,
-                    start_time=int(chunk['timestamp'][0] * 1000),
-                    end_time=int(chunk['timestamp'][1] * 1000)
-                ))
+    #             asr_segments.append(ASRDataSeg(
+    #                 text=text,
+    #                 start_time=int(chunk['timestamp'][0] * 1000),
+    #                 end_time=int(chunk['timestamp'][1] * 1000)
+    #             ))
                 
-                if progress_callback:
-                    progress_callback(f"[{chunk['timestamp'][0]:.2f}s -> {chunk['timestamp'][1]:.2f}s] {text}")
+    #             if progress_callback:
+    #                 progress_callback(f"[{chunk['timestamp'][0]:.2f}s -> {chunk['timestamp'][1]:.2f}s] {text}")
         
-        return ASRData(asr_segments)
+    #     return ASRData(asr_segments)
 
     def _asr_with_faster_whisper(
         self,
@@ -596,7 +597,7 @@ class WhisperASR:
         duration_seconds = self._get_audio_duration(audio_path)
         
         # 如果启用分块且音频较长（>5分钟），使用分块处理
-        if self.enable_chunked and duration_seconds > 300:
+        if self.enable_chunked and duration_seconds > 600:
             if progress_callback:
                 progress_callback(f"音频时长 {duration_seconds/60:.1f} 分钟，使用分块处理")
             

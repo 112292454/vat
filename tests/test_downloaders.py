@@ -108,3 +108,45 @@ class TestYdlOpts:
     def test_no_subtitle_opts_by_default(self, dl):
         opts = dl._get_ydl_opts(Path("/tmp/test"))
         assert 'writesubtitles' not in opts
+
+
+class TestGenerateVideoId:
+    """generate_video_id_from_url 哈希 ID 生成"""
+
+    def test_deterministic(self):
+        url = "https://youtube.com/watch?v=abc"
+        id1 = YouTubeDownloader.generate_video_id_from_url(url)
+        id2 = YouTubeDownloader.generate_video_id_from_url(url)
+        assert id1 == id2
+
+    def test_length_16(self):
+        vid = YouTubeDownloader.generate_video_id_from_url("https://youtube.com/watch?v=x")
+        assert len(vid) == 16
+
+    def test_different_urls_different_ids(self):
+        id1 = YouTubeDownloader.generate_video_id_from_url("https://youtube.com/watch?v=a")
+        id2 = YouTubeDownloader.generate_video_id_from_url("https://youtube.com/watch?v=b")
+        assert id1 != id2
+
+    def test_consistent_with_create_video_from_url(self):
+        """与 create_video_from_url 使用相同的哈希逻辑"""
+        import hashlib
+        url = "https://youtube.com/watch?v=test123"
+        expected = hashlib.md5(url.encode()).hexdigest()[:16]
+        assert YouTubeDownloader.generate_video_id_from_url(url) == expected
+
+
+class TestChannelPattern:
+    """频道 URL 正则匹配"""
+
+    def test_at_handle(self, dl):
+        assert dl.channel_pattern.search("https://www.youtube.com/@SomeChannel")
+
+    def test_channel_path(self, dl):
+        assert dl.channel_pattern.search("https://www.youtube.com/channel/UCxxxxxxx")
+
+    def test_user_path(self, dl):
+        assert dl.channel_pattern.search("https://www.youtube.com/user/SomeName")
+
+    def test_non_channel_url(self, dl):
+        assert not dl.channel_pattern.search("https://example.com/video")

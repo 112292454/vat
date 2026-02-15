@@ -57,16 +57,21 @@ class YtDlpLogger:
 class YouTubeDownloader(BaseDownloader):
     """YouTube视频下载器"""
     
-    def __init__(self, proxy: str = None, video_format: str = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]"):
+    def __init__(self, proxy: str = None, video_format: str = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]",
+                 cookies_file: str = "", remote_components: List[str] = None):
         """
         初始化YouTube下载器
         
         Args:
             proxy: 代理地址（可选，由调用方从全局配置 config.proxy.get_proxy() 传入）
             video_format: 视频格式选择
+            cookies_file: cookie 文件路径（Netscape 格式），解决 YouTube bot 检测
+            remote_components: yt-dlp 远程组件列表，如 ["ejs:github"]，解决 JS challenge
         """
         self.proxy = proxy or ""
         self.video_format = video_format
+        self.cookies_file = cookies_file or ""
+        self.remote_components = remote_components or []
         
         # 编译URL正则表达式
         self.video_pattern = re.compile(
@@ -99,6 +104,18 @@ class YouTubeDownloader(BaseDownloader):
         
         if self.proxy:
             opts['proxy'] = self.proxy
+        
+        # Cookie 认证（解决 YouTube bot 检测 / 限流）
+        if self.cookies_file:
+            cookie_path = Path(self.cookies_file)
+            if cookie_path.exists():
+                opts['cookiefile'] = str(cookie_path)
+            else:
+                logger.warning(f"配置的 cookie 文件不存在: {self.cookies_file}")
+        
+        # 远程组件（解决 YouTube JS challenge，如 n 参数解密）
+        if self.remote_components:
+            opts['remote_components'] = self.remote_components
         
         # 字幕下载配置
         if download_subs:

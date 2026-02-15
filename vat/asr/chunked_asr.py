@@ -349,7 +349,7 @@ class ChunkedASR:
         logger.info(
             f"音频总时长: {total_duration_ms/1000:.1f}s, "
             f"分块长度: {self.chunk_length_ms/1000:.1f}s, "
-            f"重叠: {self.chunk_overlap_ms/1000:.1f}s"
+            f"重叠: {self.chunk_overlap_ms/1000:.1f}s，开始分块音频"
         )
 
         chunks = []

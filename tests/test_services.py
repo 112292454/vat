@@ -116,6 +116,25 @@ class TestPlaylistProgress:
         for step in DEFAULT_STAGE_SEQUENCE:
             assert step.value in p['by_step']
 
+    def test_by_step_download_counts(self, db):
+        """by_step 中 download 的 completed/pending/failed 应与实际一致"""
+        self._setup(db)
+        p = PlaylistService(db).get_playlist_progress("PL1")
+        dl = p['by_step']['download']
+        # v_comp: download completed, v_part: download completed,
+        # v_fail: download completed, v_pend: no task, v_unavail: skipped
+        assert dl['completed'] == 3
+        assert dl['failed'] == 0
+
+    def test_by_step_whisper_counts(self, db):
+        """by_step 中 whisper 应反映部分完成和失败"""
+        self._setup(db)
+        p = PlaylistService(db).get_playlist_progress("PL1")
+        wh = p['by_step']['whisper']
+        # v_comp: completed, v_part: completed, v_fail: failed
+        assert wh['completed'] == 2
+        assert wh['failed'] == 1
+
 
 class TestGetPendingVideos:
 

@@ -116,3 +116,19 @@ Reflect 不是多次 LLM 调用，而是单次调用中输出 3 个字段（init
 
 - **现象**：视频上传成功，但添加到合集有时会失败
 - **状态**：已知问题，暂未定位根因
+
+### Upload-2: 视频编号（#N）与时间顺序不一致（已修复）
+
+- **现象**：上传标题中的 `#N` 编号与视频的实际发布时间顺序不符。例如倒数第 2 新的视频显示 `#3` 而非 `#29`
+- **根因**：4 个 bug 叠加导致
+  1. `database.update_video_playlist_info` 使用 `INSERT OR REPLACE`，每次 sync 都**删除旧行再插入新行**，丢失已分配的 `upload_order_index`
+  2. `_assign_upload_order_index` 只处理本次 sync 新增的视频，已有视频即使索引丢失也不会重新分配
+  3. `executor` 上传时 `upload_order_index` 缺失会回退到 `playlist_index`（YouTube 的 1=最新逆序），语义与 `upload_order_index`（1=最旧正序）**完全相反**
+  4. `backfill_upload_order_index` 保留已有的错误索引，不做全量修正
+- **修复**：
+  1. `update_video_playlist_info` 改用 `ON CONFLICT UPDATE`，只更新 `playlist_index`，保留 `upload_order_index`
+  2. 重写为 `_reassign_upload_order_indices`：每次 sync 全量按 `upload_date` 排序分配 `1~N`
+  3. 移除 executor 中对 `playlist_index` 的错误回退
+  4. `backfill` 改为全量重分配
+- **验证**：12 个新增测试 + 8 个 playlist 全量数据验证通过
+- **状态**：已修复

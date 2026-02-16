@@ -117,18 +117,29 @@ class ASRData:
         filtered_segments = [seg for seg in segments if seg.text and seg.text.strip()]
         filtered_segments.sort(key=lambda x: x.start_time)
         
-        # 检查时间戳合理性
-        for i in range(len(filtered_segments)):
-            seg = filtered_segments[i]
-            assert seg.start_time < seg.end_time, f"逻辑错误: 第 {i} 段字幕时间戳无效: {seg.start_time} >= {seg.end_time}"
-            if i > 0:
-                # 允许重叠，但通常不应该有负向跳跃
-                prev_seg = filtered_segments[i-1]
-                # 这里不强制要求 start_time >= prev.start_time 因为已经 sort 过了
-                # 但可以检查是否过于离谱
-                assert seg.start_time >= prev_seg.start_time, f"逻辑错误: 排序后第 {i} 段开始时间早于前一段"
+        # 过滤退化段：duration <= 0 或 < 50ms（whisper 幽灵段，播放中不可见）
+        # 注意：50ms 是显示下限；ASS 格式精度为 10ms(centisecond)，
+        # <10ms 的段在 ASS 转换后会变成 start==end 导致下游崩溃
+        MIN_DURATION_MS = 50
+        valid_segments = []
+        degenerate_count = 0
+        for seg in filtered_segments:
+            if seg.end_time - seg.start_time < MIN_DURATION_MS:
+                degenerate_count += 1
+                continue
+            valid_segments.append(seg)
+        
+        if degenerate_count > 0:
+            logger.warning(
+                f"过滤 {degenerate_count} 个退化字幕段（duration < {MIN_DURATION_MS}ms）"
+            )
+        
+        # 排序后校验
+        for i in range(1, len(valid_segments)):
+            assert valid_segments[i].start_time >= valid_segments[i-1].start_time, \
+                f"逻辑错误: 排序后第 {i} 段开始时间早于前一段"
                 
-        self.segments = filtered_segments
+        self.segments = valid_segments
 
     def __iter__(self):
         return iter(self.segments)
@@ -283,11 +294,16 @@ class ASRData:
         return self
 
     def dedup_adjacent_segments(self, max_gap_ms: int = 15000) -> "ASRData":
-        """移除相邻的重复字幕段
+        """移除相邻的重复/重叠字幕段
         
-        Whisper 分块处理时，重叠窗口可能产生完全相同的相邻段。
-        检测条件：文本完全相同 + 时间间隔 <= max_gap_ms。
-        保留第一个出现的段，删除后续重复段。
+        处理 Whisper 分块处理时产生的两类重复：
+        1. 完全相同文本的相邻段（原有逻辑）
+        2. 时间重叠的相邻段（分块边界重叠，文本可能不完全相同）
+        
+        对于时间重叠段，按以下策略处理：
+        - 文本包含关系（一方是另一方的子串）→ 移除被包含的，保留更完整的
+        - 重叠比 ≥ 50%（占较短段时长）→ 移除较短段（同一音频区域的重复识别）
+        - 重叠比 < 50% → 保留两段，调整边界消除重叠（不同内容，仅时序微偏）
         
         Args:
             max_gap_ms: 最大时间间隔（毫秒），超过此间隔的相同文本视为有意重复
@@ -300,22 +316,91 @@ class ASRData:
         
         kept = [self.segments[0]]
         removed_count = 0
+        adjusted_count = 0
         
         for i in range(1, len(self.segments)):
             prev = kept[-1]
             curr = self.segments[i]
             
-            # 文本相同 + 时间间隔在阈值内 → 重复段，跳过
+            # Case 0: 文本完全相同 + 时间间隔在阈值内 → 精确重复
             gap = curr.start_time - prev.end_time
             if curr.text.strip() == prev.text.strip() and gap <= max_gap_ms:
-                # 扩展前一段的结束时间以覆盖被删段的范围
                 prev.end_time = max(prev.end_time, curr.end_time)
                 removed_count += 1
-            else:
+                continue
+            
+            # 以下仅处理时间重叠的情况
+            if curr.start_time >= prev.end_time:
+                # 无时间重叠，正常保留
                 kept.append(curr)
+                continue
+            
+            # 存在时间重叠：curr.start_time < prev.end_time
+            overlap_ms = prev.end_time - curr.start_time
+            dur_prev = prev.end_time - prev.start_time
+            dur_curr = curr.end_time - curr.start_time
+            min_dur = min(dur_prev, dur_curr)
+            overlap_ratio = overlap_ms / min_dur if min_dur > 0 else 1.0
+            
+            prev_text = prev.text.strip()
+            curr_text = curr.text.strip()
+            
+            # Case 1: 文本包含关系（一方是另一方的子串）
+            # Whisper 分块重叠的典型模式：后段文本是前段的后缀
+            prev_contains_curr = len(curr_text) >= 2 and curr_text in prev_text
+            curr_contains_prev = len(prev_text) >= 2 and prev_text in curr_text
+            
+            if prev_contains_curr:
+                # prev 包含 curr 的全部内容 → 移除 curr
+                prev.end_time = max(prev.end_time, curr.end_time)
+                removed_count += 1
+                logger.debug(
+                    f"dedup: 移除被包含段 (prev⊃curr), "
+                    f"prev=\"{prev_text[:30]}\" curr=\"{curr_text[:30]}\""
+                )
+                continue
+            
+            if curr_contains_prev:
+                # curr 包含 prev 的全部内容 → 用 curr 替换 prev
+                curr.start_time = min(prev.start_time, curr.start_time)
+                kept[-1] = curr
+                removed_count += 1
+                logger.debug(
+                    f"dedup: 替换为更完整段 (curr⊃prev), "
+                    f"prev=\"{prev_text[:30]}\" curr=\"{curr_text[:30]}\""
+                )
+                continue
+            
+            # Case 2: 高重叠比（≥50%）→ 同一音频区域的不同识别结果
+            # 保留时长更长的（通常包含更多上下文，ASR 结果更可靠）
+            if overlap_ratio >= 0.5:
+                if dur_prev >= dur_curr:
+                    # 保留 prev，移除 curr
+                    prev.end_time = max(prev.end_time, curr.end_time)
+                    removed_count += 1
+                else:
+                    # 保留 curr，替换 prev
+                    curr.start_time = min(prev.start_time, curr.start_time)
+                    kept[-1] = curr
+                    removed_count += 1
+                logger.debug(
+                    f"dedup: 移除高重叠段 (ratio={overlap_ratio:.2f}), "
+                    f"kept_dur={max(dur_prev,dur_curr)}ms, "
+                    f"removed_dur={min(dur_prev,dur_curr)}ms"
+                )
+                continue
+            
+            # Case 3: 低重叠比（<50%）→ 不同内容，仅时序微偏
+            # 调整边界消除重叠，两段都保留
+            prev.end_time = curr.start_time
+            adjusted_count += 1
+            kept.append(curr)
         
-        if removed_count > 0:
-            logger.info(f"dedup_adjacent_segments: 移除了 {removed_count} 个相邻重复段")
+        if removed_count > 0 or adjusted_count > 0:
+            logger.info(
+                f"dedup_adjacent_segments: 移除 {removed_count} 个重复/重叠段, "
+                f"调整 {adjusted_count} 个边界"
+            )
             self.segments = kept
         
         return self

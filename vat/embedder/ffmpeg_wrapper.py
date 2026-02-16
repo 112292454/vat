@@ -376,28 +376,11 @@ class FFmpegWrapper:
         # 初始化 NVENC 会话管理器（幂等）
         _nvenc_manager.init(max_per_gpu=max_nvenc_sessions)
         
-        # GPU 选择：通过 session manager 均衡分配，而非按空闲显存选择
-        if gpu_device == "auto":
-            gpu_id = _nvenc_manager.select_gpu()
-            logger.info(f"NVENC 会话均衡分配: 选择 GPU {gpu_id}")
-        elif gpu_device.startswith("cuda:"):
-            try:
-                gpu_id = int(gpu_device.split(":")[1])
-            except (IndexError, ValueError):
-                raise ValueError(f"无效的 GPU 设备格式: {gpu_device}")
-        else:
+        # GPU 设备校验（仅校验格式，不占用 session）
+        if gpu_device not in ("auto",) and not gpu_device.startswith("cuda:"):
             error_msg = "Embed 阶段需要 GPU，按 GPU 原则禁止 CPU 回退"
             logger.error(error_msg)
             raise RuntimeError(error_msg)
-        
-        # 获取 NVENC 会话槽位（阻塞等待，最多 10 分钟）
-        if not _nvenc_manager.acquire(gpu_id, timeout=600):
-            raise RuntimeError(
-                f"NVENC 会话获取超时: GPU {gpu_id}，"
-                f"所有 {max_nvenc_sessions} 个槽位已满且 10 分钟内未释放"
-            )
-        
-        use_gpu = True
         
         output_path.parent.mkdir(parents=True, exist_ok=True)
         
@@ -405,13 +388,10 @@ class FFmpegWrapper:
         processed_subtitle = subtitle_path
         temp_files_to_cleanup = []  # 记录需要清理的临时文件
         
-        # ========== ASS 字幕预处理流程 ==========
-        # 1. 从 translated.ass 加载字幕数据
-        # 2. 根据视频分辨率缩放样式（字号、边距等）
-        # 3. 重新生成 ASS 内容（固定布局：原文在上，译文在下）
-        # 4. 自动换行处理
-        # 5. 传递给 FFmpeg 进行硬编码
-        # ========================================
+        # ========== 阶段 1: ASS 字幕预处理（CPU 密集，不占用 GPU session） ==========
+        # 在获取 NVENC 会话之前完成所有 CPU 预处理工作，
+        # 避免在字体渲染/自动换行期间空耗 GPU 会话槽位。
+        # ============================================================================
         if subtitle_ext == '.ass' and subtitle_style:
             try:
                 from vat.asr import ASRData
@@ -423,7 +403,7 @@ class FFmpegWrapper:
                 # Step 2: 加载并缩放样式
                 style_str = get_subtitle_style(subtitle_style, style_dir=style_dir)
                 if not style_str:
-                    print(f"警告: 无法加载样式 '{subtitle_style}'，使用默认样式")
+                    logger.warning(f"无法加载样式 '{subtitle_style}'，使用默认样式")
                     style_str = get_subtitle_style("default", style_dir=style_dir) or ""
                 
                 scale_factor = height / reference_height
@@ -445,7 +425,7 @@ class FFmpegWrapper:
                     temp_ass_path = temp_file.name
                     temp_files_to_cleanup.append(temp_ass_path)
                 
-                # Step 4: 自动换行处理
+                # Step 4: 自动换行处理（CPU 密集：逐行字体渲染测量宽度）
                 processed_subtitle_path = auto_wrap_ass_file(temp_ass_path, fonts_dir=fonts_dir)
                 processed_subtitle = Path(processed_subtitle_path)
                 # 如果换行处理生成了新文件，也需要清理
@@ -469,63 +449,87 @@ class FFmpegWrapper:
         else:
             vf = f"subtitles='{subtitle_path_escaped}'"
         
-        # 选择编码器和参数
-        if use_gpu:
-            # 检查是否支持 NVENC
-            if not self._check_nvenc_support():
-                error_msg = "当前环境不支持 NVENC，按 GPU 原则禁止 CPU 回退"
-                logger.error(error_msg)
-                raise RuntimeError(error_msg)
-
-            # 自动选择硬件编码器
-            if video_codec in ['libx265', 'hevc']:
-                actual_codec = 'hevc_nvenc'
-            elif video_codec == 'av1':
-                # 检查是否支持 av1_nvenc
-                if self._check_encoder_support('av1_nvenc'):
-                    actual_codec = 'av1_nvenc'
-                else:
-                    logger.warning("当前环境不支持 av1_nvenc，回退到 hevc_nvenc")
-                    actual_codec = 'hevc_nvenc'
-            else:
-                if video_codec != 'h264':
-                    logger.info(f"未知编码器 {video_codec}，使用 h264_nvenc")
-                actual_codec = 'h264_nvenc'
-
-            # 优化：获取原视频码率以控制输出体积
-            video_info = self.get_video_info(video_path)
-            original_bitrate = video_info.get('bit_rate', 0) if video_info else 0
-
-            if original_bitrate > 0:
-                # 使用受限码率模式 (VBR)，目标码率设为原视频的 1.1 倍，最大 1.5 倍
-                target_bitrate = int(original_bitrate * 1.1)
-                max_bitrate = int(original_bitrate * 1.5)
-                codec_params = [
-                    '-rc', 'vbr',              # 变码率模式
-                    '-cq', str(crf),           # 目标质量
-                    '-b:v', str(target_bitrate),
-                    '-maxrate', str(max_bitrate),
-                    '-bufsize', str(max_bitrate * 2),
-                    '-preset', preset if preset.startswith('p') else 'p4',
-                ]
-            else:
-                # 如果获取不到码率，回退到质量优先模式
-                codec_params = [
-                    '-rc', 'constqp',
-                    '-qp', str(crf),
-                    '-preset', preset if preset.startswith('p') else 'p4',
-                ]
-
-            codec_params.extend([
-                '-gpu', str(gpu_id),
-                '-spatial_aq', '1',
-                '-temporal_aq', '1'
-            ])
+        # ========== 阶段 2: 获取 NVENC 会话 + 构建 ffmpeg 命令 ==========
+        # 预处理完成后才获取 GPU session，最大化 session 利用率。
+        # ================================================================
         
+        # GPU 选择：通过 session manager 均衡分配
+        if gpu_device == "auto":
+            gpu_id = _nvenc_manager.select_gpu()
+            logger.info(f"NVENC 会话均衡分配: 选择 GPU {gpu_id}")
+        else:
+            # gpu_device = "cuda:N"
+            try:
+                gpu_id = int(gpu_device.split(":")[1])
+            except (IndexError, ValueError):
+                raise ValueError(f"无效的 GPU 设备格式: {gpu_device}")
+        
+        # 获取 NVENC 会话槽位（阻塞等待，最多 10 分钟）
+        if not _nvenc_manager.acquire(gpu_id, timeout=600):
+            raise RuntimeError(
+                f"NVENC 会话获取超时: GPU {gpu_id}，"
+                f"所有 {max_nvenc_sessions} 个槽位已满且 10 分钟内未释放"
+            )
+        
+        # 检查是否支持 NVENC
+        if not self._check_nvenc_support():
+            _nvenc_manager.release(gpu_id)
+            error_msg = "当前环境不支持 NVENC，按 GPU 原则禁止 CPU 回退"
+            logger.error(error_msg)
+            raise RuntimeError(error_msg)
+
+        # 自动选择硬件编码器
+        if video_codec in ['libx265', 'hevc']:
+            actual_codec = 'hevc_nvenc'
+        elif video_codec == 'av1':
+            if self._check_encoder_support('av1_nvenc'):
+                actual_codec = 'av1_nvenc'
+            else:
+                logger.warning("当前环境不支持 av1_nvenc，回退到 hevc_nvenc")
+                actual_codec = 'hevc_nvenc'
+        else:
+            if video_codec != 'h264':
+                logger.info(f"未知编码器 {video_codec}，使用 h264_nvenc")
+            actual_codec = 'h264_nvenc'
+
+        # 优化：获取原视频码率以控制输出体积
+        video_info = self.get_video_info(video_path)
+        original_bitrate = video_info.get('bit_rate', 0) if video_info else 0
+
+        if original_bitrate > 0:
+            # 使用受限码率模式 (VBR)，目标码率设为原视频的 1.1 倍，最大 1.5 倍
+            target_bitrate = int(original_bitrate * 1.1)
+            max_bitrate = int(original_bitrate * 1.5)
+            codec_params = [
+                '-rc', 'vbr',              # 变码率模式
+                '-cq', str(crf),           # 目标质量
+                '-b:v', str(target_bitrate),
+                '-maxrate', str(max_bitrate),
+                '-bufsize', str(max_bitrate * 2),
+                '-preset', preset if preset.startswith('p') else 'p4',
+            ]
+        else:
+            # 如果获取不到码率，回退到质量优先模式
+            codec_params = [
+                '-rc', 'constqp',
+                '-qp', str(crf),
+                '-preset', preset if preset.startswith('p') else 'p4',
+            ]
+
+        codec_params.extend([
+            '-gpu', str(gpu_id),
+            '-spatial_aq', '1',
+            '-temporal_aq', '1'
+        ])
+        
+        # 构建 ffmpeg 命令
+        # 注意：-vf ass/subtitles 是 CPU 滤镜，帧流为:
+        #   hwaccel 解码(GPU N) → 下载到 CPU → 字幕渲染 → 上传到 GPU N → NVENC 编码
+        # 使用 -hwaccel_device 确保解码与编码在同一张 GPU，避免所有进程挤占 GPU 0。
         cmd = [
             'ffmpeg',
-            '-hwaccel', 'cuda' if use_gpu else 'none',
-            '-threads', '0',
+            '-hwaccel', 'cuda',
+            '-hwaccel_device', str(gpu_id),
             '-i', str(video_path),
             '-vf', vf,
             '-c:v', actual_codec,
@@ -541,7 +545,7 @@ class FFmpegWrapper:
             log_path = output_path.parent / "ffmpeg_embed.log"
             ffmpeg_log_lines = []
             
-            # 如果有进度回调，使用 Popen 实时读取进度
+            # 使用 Popen 实时读取进度
             process = subprocess.Popen(
                     cmd,
                     stdout=subprocess.PIPE,

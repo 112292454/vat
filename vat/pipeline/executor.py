@@ -673,6 +673,11 @@ class VideoProcessor:
                     if self._progress_tracker:
                         self._progress_tracker.report_event(ProgressEvent.DOWNLOAD_TRANSLATE_DONE)
                 
+                # 下载封面到本地（上传时优先使用本地文件，避免临时下载）
+                thumbnail_url = metadata.get('thumbnail', '')
+                if thumbnail_url:
+                    self._download_thumbnail(thumbnail_url)
+                
                 self.db.update_video(
                     self.video_id,
                     title=title,
@@ -688,6 +693,36 @@ class VideoProcessor:
                 raise DownloadError(error_msg, original_error=e)
         
         raise DownloadError(f"不支持的视频来源类型: {self.video.source_type}")
+    
+    def _download_thumbnail(self, thumbnail_url: str) -> None:
+        """下载封面图片到本地 output_dir/thumbnail.{ext}
+        
+        失败不抛异常，仅记录警告（封面不影响主流程）。
+        """
+        # 检查是否已有本地封面
+        for name in ['thumbnail.jpg', 'thumbnail.png', 'thumbnail.webp', 'cover.jpg', 'cover.png']:
+            if (self.output_dir / name).exists():
+                return
+        
+        try:
+            import requests
+            proxy = self.config.get_stage_proxy("download") or ""
+            proxies = {"http": proxy, "https": proxy} if proxy else None
+            resp = requests.get(thumbnail_url, timeout=15, proxies=proxies)
+            resp.raise_for_status()
+            
+            ct = resp.headers.get('content-type', '')
+            ext = '.jpg'
+            if 'png' in ct:
+                ext = '.png'
+            elif 'webp' in ct:
+                ext = '.webp'
+            
+            target = self.output_dir / f"thumbnail{ext}"
+            target.write_bytes(resp.content)
+            self.progress_callback(f"封面已保存: thumbnail{ext} ({len(resp.content)//1024}KB)")
+        except Exception as e:
+            self.logger.warning(f"下载封面失败（不影响主流程）: {e}")
     
     # ==================== 细粒度阶段实现 ====================
     

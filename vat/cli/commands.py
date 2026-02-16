@@ -739,7 +739,8 @@ def process(ctx, video_id, process_all, playlist, stages, gpu, force, dry_run, c
                 gpu_id=gpu_id,
                 force=force,
                 video_index=idx,
-                total_videos=total
+                total_videos=total,
+                playlist_id=playlist
             )
             success = processor.process(steps=step_names)
             if success:
@@ -1202,10 +1203,11 @@ def playlist_delete(ctx, playlist_id, delete_videos, yes):
 @cli.command()
 @click.argument('video_id')
 @click.option('--platform', '-p', default='bilibili', help='上传平台 (目前仅支持 bilibili)')
+@click.option('--playlist', 'upload_playlist_id', default=None, help='指定上传上下文的 Playlist ID（视频属于多个 playlist 时用于确定正确的上下文）')
 @click.option('--season', '-s', type=int, help='添加到合集ID (上传后自动添加)')
 @click.option('--dry-run', is_flag=True, help='仅预览，不实际上传')
 @click.pass_context
-def upload(ctx, video_id, platform, season, dry_run):
+def upload(ctx, video_id, upload_playlist_id, platform, season, dry_run):
     """上传视频到指定平台
     
     VIDEO_ID: 视频ID
@@ -1243,10 +1245,13 @@ def upload(ctx, video_id, platform, season, dry_run):
         }
     
     # 获取播放列表信息
+    # 优先使用显式传入的 playlist_id（发起任务的 playlist），
+    # 回退到 video.playlist_id（videos 表单一字段，视频属于多个 playlist 时可能不准确）
+    effective_playlist_id = upload_playlist_id or video.playlist_id
     playlist_info = None
-    if video.playlist_id:
+    if effective_playlist_id:
         playlist_service = PlaylistService(db)
-        pl = playlist_service.get_playlist(video.playlist_id)
+        pl = playlist_service.get_playlist(effective_playlist_id)
         if pl:
             playlist_info = {
                 'name': pl.title,
@@ -1570,7 +1575,7 @@ def upload_playlist(ctx, playlist_id, platform, season, limit, dry_run):
     success_count = 0
     for i, v in enumerate(ready_videos, 1):
         click.echo(f"\n[{i}/{len(ready_videos)}] 上传: {v.title[:40]}...")
-        ctx.invoke(upload, video_id=v.id, platform=platform, season=season, dry_run=False)
+        ctx.invoke(upload, video_id=v.id, upload_playlist_id=playlist_id, platform=platform, season=season, dry_run=False)
         success_count += 1
     
     click.echo(f"\n完成: 成功上传 {success_count}/{len(ready_videos)} 个视频")

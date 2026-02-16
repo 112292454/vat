@@ -40,7 +40,8 @@ class VideoProcessor:
         force: bool = False,
         progress_callback: Optional[Callable[[str], None]] = None,
         video_index: int = 0,
-        total_videos: int = 1
+        total_videos: int = 1,
+        playlist_id: Optional[str] = None
     ):
         """
         初始化视频处理器
@@ -53,6 +54,9 @@ class VideoProcessor:
             progress_callback: 进度回调函数
             video_index: 当前视频在批次中的索引（0-based）
             total_videos: 批次总视频数
+            playlist_id: 发起任务的 Playlist ID（上传时用于确定正确的 playlist 上下文）。
+                视频可能属于多个 playlist，此参数指定"当前操作的上下文 playlist"。
+                为 None 时回退到 video.playlist_id（videos 表的单一字段）。
         """
         self.video_id = video_id
         self.config = config
@@ -61,6 +65,7 @@ class VideoProcessor:
         self.progress_callback = progress_callback or self._default_progress_callback
         self.video_index = video_index
         self.total_videos = total_videos
+        self._playlist_id = playlist_id
         
         # 初始化日志
         self.logger = setup_logger("pipeline.executor")
@@ -1698,19 +1703,30 @@ class VideoProcessor:
             'custom_vars': bilibili_config.templates.custom_vars,
         }
         
-        # 获取播放列表信息（如果有）
+        # 获取播放列表信息
+        # 优先使用显式传入的 playlist_id（发起任务的 playlist），
+        # 回退到 video.playlist_id（videos 表的单一字段，视频属于多个 playlist 时可能不准确）。
+        effective_playlist_id = self._playlist_id or self.video.playlist_id
         playlist_info = None
-        if self.video.playlist_id:
-            playlist = self.db.get_playlist(self.video.playlist_id)
+        if effective_playlist_id:
+            playlist = self.db.get_playlist(effective_playlist_id)
             if playlist:
                 pl_metadata = playlist.metadata or {}
                 pl_upload_config = pl_metadata.get('upload_config', {})
                 
                 # upload_order_index: 1=最旧, N=最新（sync 时按 upload_date 排序分配）
-                # 注意：不可回退到 playlist_index，后者是 YouTube 逆序（1=最新）
-                video_metadata = self.video.metadata or {}
-                assert video_metadata.get('upload_order_index'), f"视频 {self.video.id} 缺少 upload_order_index，请先执行 playlist sync 以分配时间顺序索引"
-                upload_order_index = video_metadata.get('upload_order_index', 0)
+                # 从 playlist_videos 关联表读取（per-playlist），而非 video.metadata（全局单值）。
+                # 视频属于多个 playlist 时，metadata 中的值可能对应错误的 playlist。
+                pv_info = self.db.get_playlist_video_info(effective_playlist_id, self.video.id)
+                upload_order_index = pv_info.get('upload_order_index', 0) if pv_info else 0
+                if not upload_order_index:
+                    # 回退到 metadata（兼容尚未迁移到关联表的数据）
+                    video_metadata = self.video.metadata or {}
+                    upload_order_index = video_metadata.get('upload_order_index', 0)
+                assert upload_order_index, (
+                    f"视频 {self.video.id} 在 playlist {effective_playlist_id} 中缺少 upload_order_index，"
+                    "请先执行 playlist sync 以分配时间顺序索引"
+                )
                 
                 playlist_info = {
                     'name': playlist.title,

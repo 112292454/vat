@@ -1153,14 +1153,17 @@ class Database:
         playlist_id: str,
         playlist_index: int
     ) -> None:
-        """更新视频的 Playlist 关联信息"""
+        """更新视频的 Playlist 关联信息（保留 upload_order_index）"""
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            # 更新关联表
+            # 使用 ON CONFLICT UPDATE 而非 INSERT OR REPLACE
+            # INSERT OR REPLACE 会删除旧行再插入，丢失 upload_order_index
             cursor.execute("""
-                INSERT OR REPLACE INTO playlist_videos 
+                INSERT INTO playlist_videos 
                 (playlist_id, video_id, playlist_index, created_at)
                 VALUES (?, ?, ?, ?)
+                ON CONFLICT(playlist_id, video_id) DO UPDATE SET
+                    playlist_index = excluded.playlist_index
             """, (playlist_id, video_id, playlist_index, datetime.now()))
             # 向后兼容：更新 videos 表（仅当该视频未关联其他 playlist 时）
             cursor.execute("""

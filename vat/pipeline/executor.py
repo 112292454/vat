@@ -1714,10 +1714,11 @@ class VideoProcessor:
                 pl_metadata = playlist.metadata or {}
                 pl_upload_config = pl_metadata.get('upload_config', {})
                 
-                # 使用同步时持久化存储的 upload_order_index（只读，不会变）
-                # 如果没有，回退到原始 playlist_index
+                # upload_order_index: 1=最旧, N=最新（sync 时按 upload_date 排序分配）
+                # 注意：不可回退到 playlist_index，后者是 YouTube 逆序（1=最新）
                 video_metadata = self.video.metadata or {}
-                upload_order_index = video_metadata.get('upload_order_index', self.video.playlist_index or 0)
+                assert video_metadata.get('upload_order_index'), f"视频 {self.video.id} 缺少 upload_order_index，请先执行 playlist sync 以分配时间顺序索引"
+                upload_order_index = video_metadata.get('upload_order_index', 0)
                 
                 playlist_info = {
                     'name': playlist.title,

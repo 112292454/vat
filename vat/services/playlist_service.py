@@ -268,10 +268,11 @@ class PlaylistService:
             self._interpolate_missing_dates(playlist_id, date_results, callback)
             
             callback("发布日期获取完成")
-            
-            # 为新视频分配 upload_order_index（只读，一旦分配不再改变）
-            callback("分配时间顺序索引...")
-            self._assign_upload_order_index(playlist_id, new_videos, callback)
+        
+        # 全量重分配 upload_order_index（每次 sync 都执行，确保与时间顺序一致）
+        # 放在 fetch_upload_dates 块外面：即使没有新视频，也修正已有的错误索引
+        callback("分配时间顺序索引...")
+        self._reassign_upload_order_indices(playlist_id, callback)
         
         return SyncResult(
             playlist_id=playlist_id,
@@ -390,68 +391,52 @@ class PlaylistService:
         except Exception:
             return datetime.now().strftime('%Y%m%d')
     
-    def _assign_upload_order_index(
+    def _reassign_upload_order_indices(
         self,
         playlist_id: str,
-        new_video_ids: List[str],
         callback: Callable[[str], None]
     ) -> None:
         """
-        为新视频分配 upload_order_index
+        全量重分配 upload_order_index
         
-        设计原则：
-        1. upload_order_index 一旦分配就不再改变（只读）
-        2. 新视频按 upload_date 排序后，在现有最大索引基础上递增分配
-        3. 已有视频的索引永远不受新视频影响
+        按 upload_date 排序所有视频，分配 1（最旧）~ N（最新）。
+        每次 sync 都调用，确保索引始终与时间顺序一致。
+        
+        注意：YouTube 的 playlist_index 是 1=最新（每次 sync 都变），
+        而 upload_order_index 是 1=最旧（稳定的时间顺序）。
+        两者语义相反，不可混用。
         
         Args:
             playlist_id: Playlist ID
-            new_video_ids: 本次新增的视频 ID 列表
             callback: 进度回调
         """
-        if not new_video_ids:
+        # 获取所有视频，按 upload_date 排序（最早在前）
+        all_videos = self.get_playlist_videos(playlist_id, order_by="upload_date")
+        if not all_videos:
             return
         
-        # 1. 获取现有视频的最大 upload_order_index
-        all_videos = self.get_playlist_videos(playlist_id, order_by="upload_date")
-        max_index = 0
-        for v in all_videos:
-            if v.metadata:
-                existing_index = v.metadata.get('upload_order_index', 0)
-                if existing_index > max_index:
-                    max_index = existing_index
-        
-        # 2. 收集新视频及其 upload_date，排序
-        new_videos_with_date = []
-        for vid in new_video_ids:
-            video = self.db.get_video(vid)
-            if video:
-                upload_date = (video.metadata or {}).get('upload_date', '99999999')
-                new_videos_with_date.append((vid, upload_date, video))
-        
-        # 按 upload_date 排序（最早的在前）
-        new_videos_with_date.sort(key=lambda x: x[1])
-        
-        # 3. 分配新索引（同时更新关联表和 video.metadata）
-        assigned_count = 0
-        for vid, upload_date, video in new_videos_with_date:
-            # 检查关联表中是否已有索引
-            pv_info = self.db.get_playlist_video_info(playlist_id, vid)
-            existing_order_index = pv_info.get('upload_order_index') if pv_info else None
+        updated_count = 0
+        for i, video in enumerate(all_videos, 1):
+            expected_index = i
             
-            if not existing_order_index:
-                max_index += 1
+            # 检查当前值是否已正确
+            metadata = video.metadata or {}
+            current_index = metadata.get('upload_order_index', 0)
+            
+            if current_index != expected_index:
                 # 更新关联表
-                self.db.update_playlist_video_order_index(playlist_id, vid, max_index)
-                # 向后兼容：同时更新 video.metadata
-                metadata = video.metadata or {}
-                metadata['upload_order_index'] = max_index
-                self.db.update_video(vid, metadata=metadata)
-                assigned_count += 1
+                self.db.update_playlist_video_order_index(playlist_id, video.id, expected_index)
+                # 同时更新 video.metadata（上传时从这里读取）
+                metadata['upload_order_index'] = expected_index
+                self.db.update_video(video.id, metadata=metadata)
+                updated_count += 1
         
-        if assigned_count > 0:
-            callback(f"已分配 {assigned_count} 个视频的时间顺序索引")
-            logger.info(f"Playlist {playlist_id}: 分配了 {assigned_count} 个 upload_order_index (max={max_index})")
+        if updated_count > 0:
+            callback(f"更新 {updated_count}/{len(all_videos)} 个视频的时间顺序索引")
+            logger.info(
+                f"Playlist {playlist_id}: 重分配 upload_order_index, "
+                f"更新 {updated_count}/{len(all_videos)} 个"
+            )
     
     def _submit_translate_task(self, video_id: str, video_info: Dict[str, Any], force: bool = False) -> None:
         """
@@ -676,37 +661,33 @@ class PlaylistService:
         callback: Callable[[str], None] = lambda x: None
     ) -> Dict[str, Any]:
         """
-        为现有 playlist 中缺少 upload_order_index 的视频补充索引
+        全量重分配 upload_order_index
         
-        用于对已有 playlist 进行一次性补齐，按 upload_date 排序分配索引。
-        已有索引的视频不会被修改。
+        按 upload_date 排序所有视频，分配 1（最旧）~ N（最新）。
+        会覆盖已有的错误索引。
         
         Args:
             playlist_id: Playlist ID
             callback: 进度回调
             
         Returns:
-            {'assigned': N, 'skipped': N}
+            {'total': N, 'updated': N}
         """
         videos = self.get_playlist_videos(playlist_id, order_by="upload_date")
-        assigned = 0
-        skipped = 0
+        callback(f"全量重分配 {len(videos)} 个视频的时间顺序索引...")
         
-        callback(f"检查 {len(videos)} 个视频的时间顺序索引...")
-        
-        # 遍历排序后的视频，按顺序分配索引
+        updated = 0
         for i, video in enumerate(videos, 1):
             metadata = video.metadata or {}
-            if 'upload_order_index' not in metadata:
+            if metadata.get('upload_order_index') != i:
+                self.db.update_playlist_video_order_index(playlist_id, video.id, i)
                 metadata['upload_order_index'] = i
                 self.db.update_video(video.id, metadata=metadata)
-                assigned += 1
-            else:
-                skipped += 1
+                updated += 1
         
-        callback(f"补齐完成: 分配 {assigned} 个, 跳过 {skipped} 个")
-        logger.info(f"Playlist {playlist_id}: backfill upload_order_index - assigned={assigned}, skipped={skipped}")
-        return {'assigned': assigned, 'skipped': skipped}
+        callback(f"重分配完成: 更新 {updated}/{len(videos)} 个")
+        logger.info(f"Playlist {playlist_id}: backfill upload_order_index - updated={updated}/{len(videos)}")
+        return {'total': len(videos), 'updated': updated}
     
     def retranslate_videos(
         self,

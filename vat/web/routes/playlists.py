@@ -416,9 +416,10 @@ async def backfill_upload_order_index(
     service: PlaylistService = Depends(get_playlist_service)
 ):
     """
-    为现有 Playlist 补充 upload_order_index
+    全量重分配 upload_order_index
     
-    按 upload_date 排序，为缺少索引的视频分配时间顺序索引。
+    按 upload_date 排序所有视频，分配 1（最旧）~ N（最新）。
+    会覆盖已有的错误索引。
     """
     pl = service.get_playlist(playlist_id)
     if not pl:

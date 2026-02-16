@@ -697,30 +697,45 @@ class VideoProcessor:
     def _download_thumbnail(self, thumbnail_url: str) -> None:
         """下载封面图片到本地 output_dir/thumbnail.{ext}
         
+        如果 maxresdefault 返回 404，自动降级尝试 hqdefault/mqdefault。
         失败不抛异常，仅记录警告（封面不影响主流程）。
         """
         # 检查是否已有本地封面
-        for name in ['thumbnail.jpg', 'thumbnail.png', 'thumbnail.webp', 'cover.jpg', 'cover.png']:
+        for name in ['thumbnail.jpg', 'thumbnail.png', 'thumbnail.webp', 'cover.jpg', 'cover.png', 'cover.webp']:
             if (self.output_dir / name).exists():
                 return
+        
+        # 构建候选 URL 列表（maxresdefault → hqdefault → mqdefault）
+        urls_to_try = [thumbnail_url]
+        if 'maxresdefault' in thumbnail_url:
+            urls_to_try.append(thumbnail_url.replace('maxresdefault', 'hqdefault'))
+            urls_to_try.append(thumbnail_url.replace('maxresdefault', 'mqdefault'))
         
         try:
             import requests
             proxy = self.config.get_stage_proxy("download") or ""
             proxies = {"http": proxy, "https": proxy} if proxy else None
-            resp = requests.get(thumbnail_url, timeout=15, proxies=proxies)
-            resp.raise_for_status()
             
-            ct = resp.headers.get('content-type', '')
-            ext = '.jpg'
-            if 'png' in ct:
-                ext = '.png'
-            elif 'webp' in ct:
-                ext = '.webp'
-            
-            target = self.output_dir / f"thumbnail{ext}"
-            target.write_bytes(resp.content)
-            self.progress_callback(f"封面已保存: thumbnail{ext} ({len(resp.content)//1024}KB)")
+            for try_url in urls_to_try:
+                try:
+                    resp = requests.get(try_url, timeout=15, proxies=proxies)
+                    resp.raise_for_status()
+                    
+                    ct = resp.headers.get('content-type', '')
+                    ext = '.jpg'
+                    if 'png' in ct:
+                        ext = '.png'
+                    elif 'webp' in ct:
+                        ext = '.webp'
+                    
+                    target = self.output_dir / f"thumbnail{ext}"
+                    target.write_bytes(resp.content)
+                    self.progress_callback(f"封面已保存: thumbnail{ext} ({len(resp.content)//1024}KB)")
+                    return
+                except requests.exceptions.HTTPError as e:
+                    if e.response is not None and e.response.status_code == 404 and try_url != urls_to_try[-1]:
+                        continue  # 404 时降级尝试下一个分辨率
+                    raise
         except Exception as e:
             self.logger.warning(f"下载封面失败（不影响主流程）: {e}")
     
@@ -1808,7 +1823,7 @@ class VideoProcessor:
         if bilibili_config.auto_cover:
             # 1. 先查找本地封面文件
             if self.video.output_dir:
-                for cover_name in ['thumbnail.jpg', 'thumbnail.png', 'cover.jpg', 'cover.png']:
+                for cover_name in ['thumbnail.jpg', 'thumbnail.png', 'thumbnail.webp', 'cover.jpg', 'cover.png', 'cover.webp']:
                     potential = Path(self.video.output_dir) / cover_name
                     if potential.exists():
                         cover_path = potential
@@ -1824,7 +1839,9 @@ class VideoProcessor:
                         import tempfile
                         
                         self.progress_callback("下载封面图片...")
-                        resp = requests.get(thumbnail_url, timeout=30)
+                        proxy_url = self.config.downloader.proxy if self.config.downloader.proxy else None
+                        proxies = {"http": proxy_url, "https": proxy_url} if proxy_url else None
+                        resp = requests.get(thumbnail_url, timeout=30, proxies=proxies)
                         resp.raise_for_status()
                         
                         # 根据 content-type 确定扩展名

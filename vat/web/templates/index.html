@@ -108,18 +108,37 @@
 <!-- 视频列表 -->
 <div class="bg-white rounded-lg shadow overflow-hidden">
     <table class="w-full" id="video-table">
+        {# 服务端排序：构建基础筛选参数（不含 sort/order/page） #}
+        {% set base_sort_params %}{% if status_filter %}&status={{ status_filter }}{% endif %}{% if search_query %}&q={{ search_query }}{% endif %}{% if playlist_filter %}&playlist_id={{ playlist_filter }}{% endif %}{% for k, v in stage_filters.items() %}&sf_{{ k }}={{ v }}{% endfor %}&per_page={{ per_page }}{% endset %}
+        {% macro sort_th(label, col, extra_class='') %}
+            {% if sort_by == col %}
+                {% set next_order = 'asc' if sort_order == 'desc' else 'desc' %}
+                {% set arrow = '▲' if sort_order == 'asc' else '▼' %}
+                <th class="px-4 py-3 text-left text-xs font-medium uppercase {{ extra_class }}">
+                    <a href="/?sort={{ col }}&order={{ next_order }}{{ base_sort_params }}" class="text-blue-600 hover:text-blue-800 cursor-pointer select-none">
+                        {{ label }} {{ arrow }}
+                    </a>
+                </th>
+            {% else %}
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase {{ extra_class }}">
+                    <a href="/?sort={{ col }}&order=asc{{ base_sort_params }}" class="hover:text-gray-800 cursor-pointer select-none">
+                        {{ label }}
+                    </a>
+                </th>
+            {% endif %}
+        {% endmacro %}
         <thead class="bg-gray-50 border-b">
             <tr>
                 <th class="px-2 py-3 w-10">
                     <input type="checkbox" id="select-all" onchange="toggleSelectAll()" class="rounded">
                 </th>
-                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase" data-sort="1" data-sort-type="text">视频</th>
-                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase" data-sort="2" data-sort-type="text">来源</th>
-                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase" data-sort="3" data-sort-type="number">时长</th>
+                {{ sort_th('视频', 'title') }}
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">来源</th>
+                {{ sort_th('时长', 'duration') }}
                 <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">任务状态</th>
-                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase" data-sort="5" data-sort-type="number">进度</th>
-                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase" data-sort="6" data-sort-type="date">发布日期</th>
-                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase" data-sort="7" data-sort-type="date">创建时间</th>
+                {{ sort_th('进度', 'progress') }}
+                {{ sort_th('发布日期', 'upload_date') }}
+                {{ sort_th('创建时间', 'created_at') }}
             </tr>
         </thead>
         <tbody class="divide-y divide-gray-200">
@@ -224,8 +243,8 @@
     
     {% if total_pages > 1 %}
     <span class="text-gray-300">|</span>
-    {# 构建通用筛选参数后缀（status + search + playlist + stage filters） #}
-    {% set filter_params %}{% if status_filter %}&status={{ status_filter }}{% endif %}{% if search_query %}&q={{ search_query }}{% endif %}{% if playlist_filter %}&playlist_id={{ playlist_filter }}{% endif %}{% for k, v in stage_filters.items() %}&sf_{{ k }}={{ v }}{% endfor %}{% endset %}
+    {# 构建通用筛选参数后缀（status + search + playlist + stage filters + sort） #}
+    {% set filter_params %}{% if status_filter %}&status={{ status_filter }}{% endif %}{% if search_query %}&q={{ search_query }}{% endif %}{% if playlist_filter %}&playlist_id={{ playlist_filter }}{% endif %}{% for k, v in stage_filters.items() %}&sf_{{ k }}={{ v }}{% endfor %}{% if sort_by %}&sort={{ sort_by }}&order={{ sort_order }}{% endif %}{% endset %}
     {% if current_page > 1 %}
     <a href="?page={{ current_page - 1 }}&per_page={{ per_page }}{{ filter_params }}" 
        class="px-3 py-1 bg-white border rounded hover:bg-gray-50">上一页</a>
@@ -446,10 +465,7 @@ function changePerPage(value) {
     window.location.href = '/?' + params.toString();
 }
 
-// 初始化表格排序
-document.addEventListener('DOMContentLoaded', () => {
-    initSortableTable(document.getElementById('video-table'));
-});
+// 服务端排序，不再使用客户端排序
 
 // ESC 关闭弹窗
 document.addEventListener('keydown', function(e) {

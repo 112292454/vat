@@ -115,6 +115,8 @@ async def index(
     sf_translate: Optional[str] = None,
     sf_embed: Optional[str] = None,
     sf_upload: Optional[str] = None,
+    sort: Optional[str] = None,  # 排序字段（title, duration, progress, upload_date, created_at）
+    order: Optional[str] = None,  # 排序方向（asc, desc）
 ):
     """首页 - 视频列表（SQL 层面分页+过滤，避免全量加载）"""
     db = get_db()
@@ -133,7 +135,12 @@ async def index(
         if step_val and step_val in ("pending", "completed", "failed"):
             stage_filters[step_name] = step_val
     
-    # SQL 层面分页+过滤
+    # 校验排序参数
+    valid_sorts = {'title', 'duration', 'progress', 'upload_date', 'created_at'}
+    sort_by = sort if sort in valid_sorts else None
+    sort_order = order if order in ('asc', 'desc') else 'desc'
+    
+    # SQL 层面分页+过滤+排序
     result = db.list_videos_paginated(
         page=page,
         per_page=per_page,
@@ -141,6 +148,8 @@ async def index(
         search=q,
         playlist_id=playlist_id,
         stage_filters=stage_filters or None,
+        sort_by=sort_by,
+        sort_order=sort_order,
     )
     
     page_videos = result['videos']
@@ -199,6 +208,8 @@ async def index(
         "playlist_filter": playlist_id or "",
         "playlists": [{"id": p.id, "title": p.title} for p in playlists],
         "stage_filters": stage_filters,
+        "sort_by": sort_by or "",
+        "sort_order": sort_order,
     })
 
 

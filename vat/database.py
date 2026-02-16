@@ -481,7 +481,9 @@ class Database:
         status: Optional[str] = None,
         search: Optional[str] = None,
         playlist_id: Optional[str] = None,
-        stage_filters: Optional[Dict[str, str]] = None
+        stage_filters: Optional[Dict[str, str]] = None,
+        sort_by: Optional[str] = None,
+        sort_order: str = "desc"
     ) -> Dict[str, Any]:
         """分页列出视频（SQL 层面过滤，避免全量加载）
         
@@ -493,6 +495,8 @@ class Database:
             playlist_id: Playlist 过滤
             stage_filters: 阶段级过滤（AND 逻辑），如 {"download": "failed", "whisper": "pending"}
                            支持的状态值: 'pending'（就绪待运行）, 'completed', 'failed'
+            sort_by: 排序字段 ('title', 'duration', 'progress', 'upload_date', 'created_at')
+            sort_order: 排序方向 ('asc' 或 'desc'，默认 'desc')
             
         Returns:
             {'videos': List[Video], 'total': int, 'page': int, 'total_pages': int}
@@ -509,11 +513,35 @@ class Database:
                     INNER JOIN playlist_videos pv ON v.id = pv.video_id AND pv.playlist_id = ?
                 """
                 base_params = [playlist_id]
-                order_by = "ORDER BY pv.playlist_index ASC"
+                default_order = "ORDER BY pv.playlist_index ASC"
             else:
                 base_from = "FROM videos v"
                 base_params = []
-                order_by = "ORDER BY v.created_at DESC"
+                default_order = "ORDER BY v.created_at DESC"
+            
+            # 服务端排序：将前端列名映射到 SQL 表达式
+            sort_dir = "ASC" if sort_order == "asc" else "DESC"
+            SORT_COLUMN_MAP = {
+                "title": f"v.title {sort_dir}",
+                "duration": f"CAST(COALESCE(JSON_EXTRACT(v.metadata, '$.duration'), 0) AS REAL) {sort_dir}",
+                "progress": None,  # 需要子查询，单独处理
+                "upload_date": f"COALESCE(JSON_EXTRACT(v.metadata, '$.upload_date'), '') {sort_dir}",
+                "created_at": f"v.created_at {sort_dir}",
+            }
+            if sort_by and sort_by in SORT_COLUMN_MAP:
+                if sort_by == "progress":
+                    # 进度排序需要子查询计算 completed_count
+                    order_by = f"""ORDER BY (
+                        SELECT COUNT(*) FROM (
+                            SELECT video_id, status,
+                                   ROW_NUMBER() OVER (PARTITION BY video_id, step ORDER BY id DESC) as rn
+                            FROM tasks WHERE video_id = v.id
+                        ) t WHERE t.rn = 1 AND t.status = 'completed'
+                    ) {sort_dir}"""
+                else:
+                    order_by = f"ORDER BY {SORT_COLUMN_MAP[sort_by]}"
+            else:
+                order_by = default_order
             
             # 构建 WHERE 条件
             where_clauses = []

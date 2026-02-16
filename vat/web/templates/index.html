@@ -185,7 +185,7 @@
                         <span class="text-xs text-gray-600">{{ video.progress }}%</span>
                     </div>
                 </td>
-                <td class="px-4 py-3 text-sm text-gray-600" data-sort-value="{{ video.upload_date or '' }}">
+                <td class="px-4 py-3 text-sm text-gray-600" data-sort-value="{% if video.upload_date and video.upload_date|length >= 8 %}{{ video.upload_date[:4] }}-{{ video.upload_date[4:6] }}-{{ video.upload_date[6:8] }}{% endif %}">
                     {% if video.upload_date %}
                     {{ video.upload_date[:4] }}-{{ video.upload_date[4:6] }}-{{ video.upload_date[6:8] }}
                     {% else %}-{% endif %}

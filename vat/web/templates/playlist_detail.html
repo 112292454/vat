@@ -225,7 +225,7 @@
                         <span class="ml-1 text-amber-500" title="处理过程中存在非致命问题">⚠</span>
                         {% endif %}
                     </td>
-                    <td class="px-6 py-4 text-sm text-gray-500" data-sort-value="{{ video.upload_date or '' }}">
+                    <td class="px-6 py-4 text-sm text-gray-500" data-sort-value="{% if video.upload_date and video.upload_date|length >= 8 %}{{ video.upload_date[:4] }}-{{ video.upload_date[4:6] }}-{{ video.upload_date[6:8] }}{% endif %}">
                         {% if video.upload_date %}
                         {{ video.upload_date[:4] }}-{{ video.upload_date[4:6] }}-{{ video.upload_date[6:8] }}
                         {% if video.upload_date_interpolated %}

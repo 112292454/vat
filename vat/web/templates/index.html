@@ -303,15 +303,33 @@ function updateSelectedCount() {
     document.getElementById('batch-process-btn').classList.toggle('hidden', count === 0);
 }
 
-// 批量处理：将选中视频发送到新建任务页
+// 批量处理：用 POST 表单将选中视频发送到新建任务页（避免 URL 过长导致 414）
 function batchProcessVideos() {
     const checkboxes = document.querySelectorAll('.video-checkbox:checked');
     const ids = Array.from(checkboxes).map(cb => cb.value);
     if (ids.length === 0) return;
     
-    // 存入 sessionStorage 避免 URL 过长导致 414
-    sessionStorage.setItem('task_video_ids', JSON.stringify(ids));
-    window.location.href = '/tasks/new?from_storage=1';
+    const form = document.createElement('form');
+    form.method = 'POST';
+    form.action = '/tasks/new';
+    ids.forEach(id => {
+        const input = document.createElement('input');
+        input.type = 'hidden';
+        input.name = 'video_ids';
+        input.value = id;
+        form.appendChild(input);
+    });
+    // 如果当前有 playlist 筛选，也传递过去
+    const plSelect = document.querySelector('select[name="playlist_id"]');
+    if (plSelect && plSelect.value) {
+        const input = document.createElement('input');
+        input.type = 'hidden';
+        input.name = 'playlist_id';
+        input.value = plSelect.value;
+        form.appendChild(input);
+    }
+    document.body.appendChild(form);
+    form.submit();
 }
 
 // 批量删除

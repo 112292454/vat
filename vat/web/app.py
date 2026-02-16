@@ -476,26 +476,17 @@ async def tasks_page(request: Request):
     })
 
 
-@app.get("/tasks/new", response_class=HTMLResponse)
-async def task_new_page(
-    request: Request, 
-    playlist: Optional[str] = None, 
-    video: Optional[List[str]] = Query(None),  # 支持多个 ?video=id1&video=id2
-    videos: Optional[str] = None  # 逗号分隔的多个视频 ID
+def _render_task_new_page(
+    request: Request,
+    playlist_id: Optional[str],
+    selected_video_ids: set,
+    back_url: str = "/tasks",
 ):
-    """新建任务页"""
+    """新建任务页的共用渲染逻辑（GET/POST 共享）"""
     db = get_db()
     
-    playlist_id = playlist
     playlist_title = None
     playlist_video_count = 0
-    
-    # 解析选中的视频 ID 列表
-    selected_video_ids = set()
-    if video:
-        selected_video_ids.update(video)
-    if videos:
-        selected_video_ids.update(videos.split(','))
     
     if playlist_id:
         from vat.services import PlaylistService
@@ -543,13 +534,6 @@ async def task_new_page(
             "progress_text": f"{completed}/7 ({int(completed/7*100)}%)"
         })
     
-    # 计算返回链接
-    back_url = "/tasks"
-    if playlist_id:
-        back_url = f"/playlists/{playlist_id}"
-    elif video:
-        back_url = f"/video/{video}"
-    
     return templates.TemplateResponse("task_new.html", {
         "request": request,
         "videos": video_list,
@@ -559,6 +543,45 @@ async def task_new_page(
         "back_url": back_url,
         "truncated": truncated
     })
+
+
+@app.get("/tasks/new", response_class=HTMLResponse)
+async def task_new_page(
+    request: Request, 
+    playlist: Optional[str] = None, 
+    video: Optional[List[str]] = Query(None),  # 支持多个 ?video=id1&video=id2
+    videos: Optional[str] = None  # 逗号分隔的多个视频 ID
+):
+    """新建任务页（GET：URL 参数传递视频 ID）"""
+    selected_video_ids = set()
+    if video:
+        selected_video_ids.update(video)
+    if videos:
+        selected_video_ids.update(videos.split(','))
+    
+    back_url = "/tasks"
+    if playlist:
+        back_url = f"/playlists/{playlist}"
+    elif video:
+        back_url = f"/video/{video}"
+    
+    return _render_task_new_page(request, playlist, selected_video_ids, back_url)
+
+
+@app.post("/tasks/new", response_class=HTMLResponse)
+async def task_new_page_post(request: Request):
+    """新建任务页（POST：表单提交视频 ID，避免 URL 过长导致 414）"""
+    form = await request.form()
+    video_ids = form.getlist('video_ids')
+    playlist_id = form.get('playlist_id') or None
+    
+    selected_video_ids = set(video_ids)
+    
+    back_url = "/tasks"
+    if playlist_id:
+        back_url = f"/playlists/{playlist_id}"
+    
+    return _render_task_new_page(request, playlist_id, selected_video_ids, back_url)
 
 
 @app.get("/tasks/{task_id}", response_class=HTMLResponse)

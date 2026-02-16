@@ -366,10 +366,6 @@
 
 <script>
 const playlistId = '{{ playlist.id }}';
-const allVideoIds = {{ all_video_ids | tojson }};
-// 构建 videoId -> status 的映射（用于筛选后的全选）
-const allVideoData = {{ all_video_data | tojson }};
-
 // 视频状态筛选（当前页内）
 function filterPlVideos(status) {
     const table = document.getElementById('pl-video-table');
@@ -423,9 +419,24 @@ function playlistManager() {
                 return;
             }
             
-            // 将视频 ID 存入 sessionStorage（避免 URL 过长导致 414）
-            sessionStorage.setItem('task_video_ids', JSON.stringify(this.selectedVideos));
-            location.href = `/tasks/new?playlist=${playlistId}&from_storage=1`;
+            // 用 POST 表单提交（避免 URL 过长导致 414）
+            const form = document.createElement('form');
+            form.method = 'POST';
+            form.action = '/tasks/new';
+            this.selectedVideos.forEach(id => {
+                const input = document.createElement('input');
+                input.type = 'hidden';
+                input.name = 'video_ids';
+                input.value = id;
+                form.appendChild(input);
+            });
+            const plInput = document.createElement('input');
+            plInput.type = 'hidden';
+            plInput.name = 'playlist_id';
+            plInput.value = playlistId;
+            form.appendChild(plInput);
+            document.body.appendChild(form);
+            form.submit();
         }
     };
 }

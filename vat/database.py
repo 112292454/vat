@@ -537,7 +537,7 @@ class Database:
                         SELECT vs.video_id FROM (
                             SELECT 
                                 lt.video_id,
-                                SUM(CASE WHEN lt.status IN ('completed', 'skipped') THEN 1 ELSE 0 END) as completed_count,
+                                SUM(CASE WHEN lt.status = 'completed' THEN 1 ELSE 0 END) as completed_count,
                                 SUM(CASE WHEN lt.status = 'failed' THEN 1 ELSE 0 END) as failed_count,
                                 SUM(CASE WHEN lt.status = 'running' THEN 1 ELSE 0 END) as running_count
                             FROM (
@@ -569,14 +569,14 @@ class Database:
             if stage_filters:
                 for step_name, step_status in stage_filters.items():
                     if step_status == 'completed':
-                        # 该阶段最新任务为 completed/skipped
+                        # 该阶段最新任务为 completed
                         where_clauses.append("""
                             v.id IN (
                                 SELECT t_sf.video_id FROM (
                                     SELECT video_id, status,
                                            ROW_NUMBER() OVER (PARTITION BY video_id ORDER BY id DESC) as rn
                                     FROM tasks WHERE step = ?
-                                ) t_sf WHERE t_sf.rn = 1 AND t_sf.status IN ('completed', 'skipped')
+                                ) t_sf WHERE t_sf.rn = 1 AND t_sf.status = 'completed'
                             )
                         """)
                         where_params.append(step_name)
@@ -602,7 +602,7 @@ class Database:
                                            ROW_NUMBER() OVER (PARTITION BY video_id ORDER BY id DESC) as rn
                                     FROM tasks WHERE step = ?
                                 ) t_sf WHERE t_sf.rn = 1
-                                    AND t_sf.status IN ('completed', 'skipped', 'failed', 'running')
+                                    AND t_sf.status IN ('completed', 'failed', 'running')
                             )
                         """)
                         where_params.append(step_name)
@@ -618,7 +618,7 @@ class Database:
                                                    ROW_NUMBER() OVER (PARTITION BY video_id ORDER BY id DESC) as rn
                                             FROM tasks WHERE step = ?
                                         ) t_sf WHERE t_sf.rn = 1
-                                            AND t_sf.status IN ('completed', 'skipped')
+                                            AND t_sf.status = 'completed'
                                     )
                                 """)
                                 where_params.append(prereq.value)
@@ -968,7 +968,7 @@ class Database:
                     if step_val in tasks:
                         t = tasks[step_val]
                         task_status[step_val] = t
-                        if t["status"] in ("completed", "skipped"):
+                        if t["status"] == "completed":
                             completed_count += 1
                         if t["status"] == "failed":
                             has_failed = True
@@ -1023,7 +1023,7 @@ class Database:
                 video_stats AS (
                     SELECT 
                         video_id,
-                        SUM(CASE WHEN status IN ('completed', 'skipped') THEN 1 ELSE 0 END) as completed_count,
+                        SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed_count,
                         SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed_count,
                         SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END) as running_count
                     FROM latest_tasks

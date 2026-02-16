@@ -367,7 +367,7 @@ async def playlist_detail_page(
             cursor = conn.cursor()
             cursor.execute(f"""
                 SELECT video_id, 
-                       SUM(CASE WHEN status IN ('completed', 'skipped') THEN 1 ELSE 0 END) as done
+                       SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as done
                 FROM (
                     SELECT video_id, step, status,
                            ROW_NUMBER() OVER (PARTITION BY video_id, step ORDER BY id DESC) as rn

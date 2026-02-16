@@ -171,6 +171,7 @@
                             {% if status == 'completed' %}✓
                             {% elif status == 'running' %}⟳
                             {% elif status == 'failed' %}✗
+                            {% elif status == 'skipped' %}–
                             {% else %}·{% endif %}
                         </div>
                         {% endfor %}

@@ -66,7 +66,7 @@ class VideoProcessor:
         self.logger = setup_logger("pipeline.executor")
         
         # 初始化数据库
-        self.db = Database(config.storage.database_path)
+        self.db = Database(config.storage.database_path, output_base_dir=config.storage.output_dir)
         
         # 初始化各个模块（延迟初始化以节省资源）
         self._downloader = None
@@ -78,13 +78,9 @@ class VideoProcessor:
         if not self.video:
             raise ValueError(f"视频不存在: {video_id}")
         
-        # 设置输出目录
-        self.output_dir = Path(self.video.output_dir) if self.video.output_dir else self._get_output_dir()
+        # 输出目录：由 config.storage.output_dir / video_id 计算（不再依赖数据库存储）
+        self.output_dir = Path(self.video.output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        
-        # 更新数据库中的 output_dir（如果尚未设置）
-        if not self.video.output_dir:
-            self.db.update_video(video_id, output_dir=str(self.output_dir))
         
         # 设置GPU环境变量
         if gpu_id is not None:
@@ -145,10 +141,6 @@ class VideoProcessor:
                 original_cb(message)
         
         return callback
-    
-    def _get_output_dir(self) -> Path:
-        """获取输出目录"""
-        return Path(self.config.storage.output_dir) / self.video_id
     
     @property
     def downloader(self) -> YouTubeDownloader:

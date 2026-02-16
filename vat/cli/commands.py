@@ -79,7 +79,7 @@ def download(ctx, url, playlist, file):
     """下载YouTube视频"""
     config = get_config(ctx.obj.get('config_path'))
     logger = get_logger()
-    db = Database(config.storage.database_path)
+    db = Database(config.storage.database_path, output_base_dir=config.storage.output_dir)
     
     # 收集URLs
     urls = list(url)
@@ -134,7 +134,7 @@ def asr(ctx, video_id, process_all, force):
     """语音识别（转录字幕）"""
     config = get_config(ctx.obj.get('config_path'))
     logger = get_logger()
-    db = Database(config.storage.database_path)
+    db = Database(config.storage.database_path, output_base_dir=config.storage.output_dir)
     
     # 确定要处理的视频
     if video_id:
@@ -174,7 +174,7 @@ def translate(ctx, video_id, process_all, backend, force):
     """翻译字幕"""
     config = get_config(ctx.obj.get('config_path'))
     logger = get_logger()
-    db = Database(config.storage.database_path)
+    db = Database(config.storage.database_path, output_base_dir=config.storage.output_dir)
     
     # 覆盖后端设置
     if backend:
@@ -216,7 +216,7 @@ def embed(ctx, video_id, process_all, force):
     """嵌入字幕到视频"""
     config = get_config(ctx.obj.get('config_path'))
     logger = get_logger()
-    db = Database(config.storage.database_path)
+    db = Database(config.storage.database_path, output_base_dir=config.storage.output_dir)
     
     # 确定要处理的视频
     if video_id:
@@ -256,7 +256,7 @@ def pipeline(ctx, url, playlist, file, gpus, force):
     """完整流水线处理（下载→转录→翻译→嵌入）"""
     config = get_config(ctx.obj.get('config_path'))
     logger = get_logger()
-    db = Database(config.storage.database_path)
+    db = Database(config.storage.database_path, output_base_dir=config.storage.output_dir)
     
     # 设置GPU
     if gpus:
@@ -334,7 +334,7 @@ def upload(ctx, video_id, all_completed, title, desc, tags):
 def status(ctx, video_id, filter_failed, filter_pending):
     """查看处理状态"""
     config = get_config(ctx.obj.get('config_path'))
-    db = Database(config.storage.database_path)
+    db = Database(config.storage.database_path, output_base_dir=config.storage.output_dir)
     
     if video_id:
         # 显示特定视频的详细状态
@@ -425,7 +425,7 @@ def clean(ctx, video_id, clean_all, yes):
     
     config = get_config(ctx.obj.get('config_path'))
     logger = get_logger()
-    db = Database(config.storage.database_path)
+    db = Database(config.storage.database_path, output_base_dir=config.storage.output_dir)
     
     # 收集视频
     if clean_all:
@@ -476,7 +476,7 @@ def delete_video(ctx, video_id, delete_files, yes):
     
     config = get_config(ctx.obj.get('config_path'))
     logger = get_logger()
-    db = Database(config.storage.database_path)
+    db = Database(config.storage.database_path, output_base_dir=config.storage.output_dir)
     
     if not video_id:
         click.echo("错误: 请指定 --video-id", err=True)
@@ -592,7 +592,7 @@ def process(ctx, video_id, process_all, playlist, stages, gpu, force, dry_run, c
     """
     config = get_config(ctx.obj.get('config_path'))
     logger = get_logger()
-    db = Database(config.storage.database_path)
+    db = Database(config.storage.database_path, output_base_dir=config.storage.output_dir)
     
     # 解析阶段
     try:
@@ -962,7 +962,7 @@ def playlist_add(ctx, url, sync):
     """添加 Playlist"""
     config = get_config(ctx.obj.get('config_path'))
     logger = get_logger()
-    db = Database(config.storage.database_path)
+    db = Database(config.storage.database_path, output_base_dir=config.storage.output_dir)
     
     downloader = YouTubeDownloader(
         proxy=config.get_stage_proxy("downloader"),
@@ -994,7 +994,7 @@ def playlist_add(ctx, url, sync):
 def playlist_list(ctx):
     """列出所有 Playlist"""
     config = get_config(ctx.obj.get('config_path'))
-    db = Database(config.storage.database_path)
+    db = Database(config.storage.database_path, output_base_dir=config.storage.output_dir)
     
     playlists = db.list_playlists()
     
@@ -1023,7 +1023,7 @@ def playlist_sync(ctx, playlist_id):
     """同步 Playlist（增量更新）"""
     config = get_config(ctx.obj.get('config_path'))
     logger = get_logger()
-    db = Database(config.storage.database_path)
+    db = Database(config.storage.database_path, output_base_dir=config.storage.output_dir)
     
     pl = db.get_playlist(playlist_id)
     if not pl:
@@ -1077,7 +1077,7 @@ def playlist_refresh(ctx, playlist_id, force_refetch, force_retranslate):
     """
     config = get_config(ctx.obj.get('config_path'))
     logger = get_logger()
-    db = Database(config.storage.database_path)
+    db = Database(config.storage.database_path, output_base_dir=config.storage.output_dir)
     
     pl = db.get_playlist(playlist_id)
     if not pl:
@@ -1121,7 +1121,7 @@ def playlist_refresh(ctx, playlist_id, force_refetch, force_retranslate):
 def playlist_show(ctx, playlist_id):
     """显示 Playlist 详情"""
     config = get_config(ctx.obj.get('config_path'))
-    db = Database(config.storage.database_path)
+    db = Database(config.storage.database_path, output_base_dir=config.storage.output_dir)
     
     playlist_service = PlaylistService(db)
     
@@ -1173,7 +1173,7 @@ def playlist_show(ctx, playlist_id):
 def playlist_delete(ctx, playlist_id, delete_videos, yes):
     """删除 Playlist"""
     config = get_config(ctx.obj.get('config_path'))
-    db = Database(config.storage.database_path)
+    db = Database(config.storage.database_path, output_base_dir=config.storage.output_dir)
     
     playlist_service = PlaylistService(db)
     pl = playlist_service.get_playlist(playlist_id)
@@ -1211,7 +1211,7 @@ def upload(ctx, video_id, platform, season, dry_run):
     VIDEO_ID: 视频ID
     """
     config = get_config(ctx.obj.get('config_path'))
-    db = Database(config.storage.database_path)
+    db = Database(config.storage.database_path, output_base_dir=config.storage.output_dir)
     logger = get_logger()
     
     # 获取视频记录
@@ -1524,7 +1524,7 @@ def upload_playlist(ctx, playlist_id, platform, season, limit, dry_run):
     PLAYLIST_ID: 播放列表ID
     """
     config = get_config(ctx.obj.get('config_path'))
-    db = Database(config.storage.database_path)
+    db = Database(config.storage.database_path, output_base_dir=config.storage.output_dir)
     
     playlist_service = PlaylistService(db)
     pl = playlist_service.get_playlist(playlist_id)

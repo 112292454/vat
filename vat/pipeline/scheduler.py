@@ -26,7 +26,7 @@ class MultiGPUScheduler:
         """
         self.config = config
         self.gpu_devices = config.concurrency.gpu_devices
-        self.db = Database(config.storage.database_path)
+        self.db = Database(config.storage.database_path, output_base_dir=config.storage.output_dir)
     
     def run(
         self,
@@ -164,7 +164,7 @@ class SingleGPUScheduler:
         """
         self.config = config
         self.gpu_id = gpu_id
-        self.db = Database(config.storage.database_path)
+        self.db = Database(config.storage.database_path, output_base_dir=config.storage.output_dir)
     
     def run(
         self,

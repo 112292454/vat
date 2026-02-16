@@ -656,7 +656,7 @@ def _auto_sync_stale_playlists():
     from vat.downloaders import YouTubeDownloader
     
     config = load_config()
-    db = Database(config.storage.database_path)
+    db = Database(config.storage.database_path, output_base_dir=config.storage.output_dir)
     playlists = db.list_playlists()
     
     if not playlists:
@@ -679,7 +679,7 @@ def _auto_sync_stale_playlists():
     
     def sync_one(pl):
         try:
-            sync_db = Database(config.storage.database_path)
+            sync_db = Database(config.storage.database_path, output_base_dir=config.storage.output_dir)
             downloader = YouTubeDownloader(
                 proxy=config.get_stage_proxy("downloader"),
                 video_format=config.downloader.youtube.format,

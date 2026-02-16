@@ -213,7 +213,7 @@ nano config/config.yaml
 | 配置项 | 说明 |
 |--------|------|
 | `storage.work_dir` | 工作目录（处理中间文件） |
-| `storage.output_dir` | 输出目录（最终视频） |
+| `storage.output_dir` | 输出根目录（每个视频的输出路径 = `output_dir/video_id`，运行时计算，不存储在数据库中） |
 | `storage.models_dir` | 模型文件目录 |
 | `asr.model` | Whisper 模型（推荐 `large-v3`） |
 | `asr.language` | 源语言（如 `ja`） |

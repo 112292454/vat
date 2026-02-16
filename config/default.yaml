@@ -6,7 +6,7 @@
 # =============================================================================
 storage:
   work_dir: "/local/gzy/4090/vat/work"              # 工作目录（临时文件、处理中的文件）
-  output_dir: "/local/gzy/4090/vat/data/videos"     # 最终输出目录（完成的视频）
+  output_dir: "/local/gzy/4090/vat/data/videos"     # 输出根目录（每个视频路径 = output_dir/video_id，运行时计算）
   database_path: "/local/gzy/4090/vat/data/database.db" # 数据库路径
   models_dir: "/local/gzy/4090/vat/models"          # 所有模型文件的统一存储根目录
   resource_dir: "vat/resources"                        # 资源目录（字体、样式模板等）
@@ -182,9 +182,9 @@ translator:
     optimize:
       enable: true                          # 是否启用字幕优化（修正错别字、统一术语）
       custom_prompt: "fubuki"                     # 优化自定义提示词文件名（相对于 vat/llm/prompts/custom/），如 "optimize/example.md"，空字符串表示不使用
-      model: "gpt-5-nano"                     # 优化模型（比翻译便宜，术语纠错靠 prompt 引导）
-      api_key: "${VAT_RESELLER_APIKEY}"       # 中转站 API Key
-      base_url: "https://api.videocaptioner.cn" # 中转站 Base URL
+      model: "gemini-3-flash-preview"  #"gpt-5-nano"                     # 优化模型（比翻译便宜，术语纠错靠 prompt 引导）
+      # api_key: "${VAT_RESELLER_APIKEY}"       # 中转站 API Key
+      # base_url: "https://api.videocaptioner.cn" # 中转站 Base URL
       # batch_size: 0                         # 可选覆写批大小（0=继承父级 translator.llm.batch_size）
       # thread_num: 0                         # 可选覆写线程数（0=继承父级 translator.llm.thread_num）
   
@@ -264,7 +264,7 @@ concurrency:
 # 日志配置
 # =============================================================================
 logging:
-  level: "DEBUG"                             # 日志级别： DEBUG/INFO/WARNING/ERROR
+  level: "INFO"                             # 日志级别： DEBUG/INFO/WARNING/ERROR
   file: "vat.log"                          # 日志文件
   format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 
@@ -284,7 +284,7 @@ proxy:
                                             # 留空字符串 "" 表示不使用代理
   # 各环节代理覆盖（留空或不设置 = 使用全局 http_proxy）
   # 解析优先级：环节专属 → llm（LLM环节共用） → http_proxy
-  # downloader: ""                          # 下载器（YouTube 访问）
+  downloader: "http://localhost:7790"                          # 下载器（YouTube 访问）
   # llm: ""                                 # 所有 LLM API 调用的默认代理
   translate: "http://localhost:7990"                           # 翻译 LLM（如 Google API 需特定地区代理）
   # optimize: ""                            # 优化 LLM（fallback: translate → llm → http_proxy）

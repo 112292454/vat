@@ -16,5 +16,5 @@ def get_db() -> Database:
     global _db
     if _db is None:
         config = load_config()
-        _db = Database(config.storage.database_path)
+        _db = Database(config.storage.database_path, output_base_dir=config.storage.output_dir)
     return _db

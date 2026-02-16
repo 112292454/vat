@@ -131,7 +131,7 @@ def _run_sync_in_background(
     from vat.downloaders import YouTubeDownloader
     
     config = load_config()
-    db = Database(config.storage.database_path)
+    db = Database(config.storage.database_path, output_base_dir=config.storage.output_dir)
     downloader = YouTubeDownloader(
         proxy=config.get_stage_proxy("downloader"),
         video_format=config.downloader.youtube.format,
@@ -320,7 +320,7 @@ def _run_refresh_in_background(
     from vat.downloaders import YouTubeDownloader
     
     config = load_config()
-    db = Database(config.storage.database_path)
+    db = Database(config.storage.database_path, output_base_dir=config.storage.output_dir)
     downloader = YouTubeDownloader(
         proxy=config.get_stage_proxy("downloader"),
         video_format=config.downloader.youtube.format,

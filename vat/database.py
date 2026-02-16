@@ -4,7 +4,13 @@ SQLite数据库操作层
 子阶段独立化设计：
 - 每个细粒度阶段（WHISPER, SPLIT, OPTIMIZE, TRANSLATE 等）都有独立的任务记录
 - 支持 Playlist 管理
-- 支持数据库迁移
+- 支持数据库迁移（当前版本 v5）
+
+路径管理（v5+）：
+- Video.output_dir 不再存储在数据库中（列保留但值为 NULL）
+- 运行时由 output_base_dir / video_id 计算（output_base_dir 来自 config.storage.output_dir）
+- Database 构造时必须传入 output_base_dir，_row_to_video 透明解析
+- video_id 是视频的唯一标识（PRIMARY KEY），同时决定输出目录名，必须非空
 """
 import sqlite3
 import json
@@ -24,7 +30,7 @@ from .utils.logger import setup_logger
 logger = setup_logger("database")
 
 # 当前数据库版本
-DB_VERSION = 4
+DB_VERSION = 5
 
 # SQLite 并发配置
 # 高并发场景（20+ 线程 + WebUI 进程）需要足够长的超时
@@ -41,9 +47,19 @@ _init_lock = threading.Lock()
 class Database:
     """数据库管理类"""
     
-    def __init__(self, db_path: str):
+    def __init__(self, db_path: str, output_base_dir: str = ""):
+        """初始化数据库
+        
+        Args:
+            db_path: 数据库文件路径
+            output_base_dir: 视频输出根目录（来自 config.storage.output_dir）。
+                Video.output_dir 不再存储在数据库中，而是运行时由
+                output_base_dir / video_id 计算得出。
+                必须传入，否则 Video.output_dir 将为 None。
+        """
         self.db_path = Path(db_path).expanduser()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.output_base_dir = output_base_dir
         # 同一进程中多个 Database 实例指向同一路径时，只做一次 DDL 初始化
         # 避免 20 个线程同时跑 _init_database 竞争写锁
         db_key = str(self.db_path)
@@ -279,9 +295,29 @@ class Database:
             except sqlite3.OperationalError:
                 pass  # 字段已存在
             logger.info("数据库迁移 v3 -> v4 完成")
+        
+        if from_version < 5:
+            # 迁移 v4 -> v5: 清空 output_dir 列
+            # output_dir 不再存储绝对路径，改为运行时由 config.storage.output_dir / video_id 计算。
+            # 这消除了数据库与特定机器路径的耦合。
+            logger.info("执行数据库迁移 v4 -> v5: 清空 output_dir（改为运行时计算）")
+            # 记录迁移前的状态以便审计
+            cursor.execute("SELECT COUNT(*) as cnt FROM videos WHERE output_dir IS NOT NULL")
+            affected = cursor.fetchone()['cnt']
+            cursor.execute("UPDATE videos SET output_dir = NULL")
+            logger.info(f"数据库迁移 v4 -> v5 完成: 清空 {affected} 条 output_dir 记录")
     
     def add_video(self, video: Video) -> None:
-        """添加视频记录"""
+        """添加视频记录
+        
+        output_dir 不写入数据库（存 NULL），运行时由 output_base_dir / id 计算。
+        video.id 必须非空且在 videos 表中唯一（PRIMARY KEY 约束）。
+        """
+        # video_id 约束：非空、非纯空白
+        assert video.id and video.id.strip(), (
+            f"video.id 不能为空: got {video.id!r}。"
+            "video_id 是视频的唯一标识，也决定输出目录名。"
+        )
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
@@ -293,7 +329,7 @@ class Database:
                 video.source_type.value,
                 video.source_url,
                 video.title,
-                video.output_dir,
+                None,  # output_dir 不再存储，运行时由 output_base_dir / id 计算
                 json.dumps(video.metadata, ensure_ascii=False),
                 video.created_at,
                 video.updated_at,
@@ -314,13 +350,29 @@ class Database:
             return None
     
     def _row_to_video(self, row: sqlite3.Row) -> Video:
-        """将数据库行转换为 Video 对象"""
+        """将数据库行转换为 Video 对象
+        
+        output_dir 不再从数据库读取，而是由 output_base_dir / video_id 计算。
+        这确保路径始终与当前 config 一致，不受历史绝对路径影响。
+        """
+        video_id = row['id']
+        # 运行时计算 output_dir：config.storage.output_dir / video_id
+        if self.output_base_dir:
+            resolved_output_dir = str(Path(self.output_base_dir) / video_id)
+        else:
+            # output_base_dir 未设置时的降级（不应发生于正常流程）
+            resolved_output_dir = row['output_dir']
+            if resolved_output_dir:
+                logger.warning(
+                    f"output_base_dir 未设置，使用数据库中的原始路径: {resolved_output_dir}。"
+                    "请确保 Database 初始化时传入 output_base_dir。"
+                )
         return Video(
-            id=row['id'],
+            id=video_id,
             source_type=SourceType(row['source_type']),
             source_url=row['source_url'],
             title=row['title'],
-            output_dir=row['output_dir'],
+            output_dir=resolved_output_dir,
             metadata=json.loads(row['metadata']) if row['metadata'] else {},
             created_at=datetime.fromisoformat(row['created_at']),
             updated_at=datetime.fromisoformat(row['updated_at']),
@@ -331,7 +383,8 @@ class Database:
     
     def update_video(self, video_id: str, **kwargs) -> None:
         """更新视频记录"""
-        allowed_fields = {'title', 'output_dir', 'metadata', 'processing_notes', 'playlist_id', 'playlist_index'}
+        # output_dir 不再通过 update_video 更新（运行时由 config 计算）
+        allowed_fields = {'title', 'metadata', 'processing_notes', 'playlist_id', 'playlist_index'}
         updates = {k: v for k, v in kwargs.items() if k in allowed_fields}
         
         if not updates:

@@ -87,6 +87,8 @@
            class="px-3 py-1 rounded-full text-sm {% if status_filter == 'running' %}bg-blue-600 text-white{% else %}bg-gray-200 text-gray-700 hover:bg-gray-300{% endif %}">进行中</a>
         <a href="/?status=failed{% if search_query %}&q={{ search_query }}{% endif %}{% if playlist_filter %}&playlist_id={{ playlist_filter }}{% endif %}{{ sf_params }}" 
            class="px-3 py-1 rounded-full text-sm {% if status_filter == 'failed' %}bg-red-600 text-white{% else %}bg-gray-200 text-gray-700 hover:bg-gray-300{% endif %}">失败</a>
+        <a href="/?status=unavailable{% if search_query %}&q={{ search_query }}{% endif %}{% if playlist_filter %}&playlist_id={{ playlist_filter }}{% endif %}{{ sf_params }}" 
+           class="px-3 py-1 rounded-full text-sm {% if status_filter == 'unavailable' %}bg-gray-600 text-white{% else %}bg-gray-200 text-gray-700 hover:bg-gray-300{% endif %}">不可用</a>
         <span class="text-gray-400 mx-2">|</span>
         <span class="text-sm text-gray-600">共 {{ total }} 个视频</span>
     </div>

@@ -531,6 +531,9 @@ class Database:
             
             # 状态过滤（需要 JOIN tasks 表）
             if status:
+                # unavailable 视频的排除条件（unavailable 只在 status='unavailable' 时显示）
+                unavailable_exclude = "COALESCE(JSON_EXTRACT(v.metadata, '$.unavailable'), 0) != 1"
+                
                 # 子查询：计算每个视频的状态
                 status_subquery = f"""
                     v.id IN (
@@ -557,13 +560,19 @@ class Database:
                         }
                     )
                 """
-                if status == 'pending':
-                    # pending 还包括完全没有 task 记录的视频
+                if status == 'unavailable':
+                    # 只显示 unavailable 视频
+                    where_clauses.append("JSON_EXTRACT(v.metadata, '$.unavailable') = 1")
+                elif status == 'pending':
+                    # pending 还包括完全没有 task 记录的视频，排除 unavailable
                     where_clauses.append(f"""
                         ({status_subquery} OR v.id NOT IN (SELECT DISTINCT video_id FROM tasks))
+                        AND {unavailable_exclude}
                     """)
                 else:
+                    # completed/failed/running/partial_completed：排除 unavailable
                     where_clauses.append(status_subquery)
+                    where_clauses.append(unavailable_exclude)
             
             # 阶段级过滤（AND 逻辑）
             if stage_filters:
@@ -1037,7 +1046,9 @@ class Database:
                     SUM(CASE WHEN completed_count > 0 AND completed_count < {total_steps}
                                   AND failed_count = 0 AND running_count = 0
                          THEN 1 ELSE 0 END) as partial_completed_videos
-                FROM video_stats
+                FROM video_stats vs
+                JOIN videos v ON v.id = vs.video_id
+                WHERE COALESCE(JSON_EXTRACT(v.metadata, '$.unavailable'), 0) != 1
             """)
             row = cursor.fetchone()
             completed_videos = row['completed_videos'] or 0

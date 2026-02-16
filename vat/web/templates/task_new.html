@@ -326,6 +326,23 @@ document.addEventListener('DOMContentLoaded', () => {
         const el = document.getElementById(id);
         if (el) el.addEventListener('change', () => setTimeout(updateUploadScheduleVisibility, 50));
     });
+    
+    // 从 sessionStorage 恢复视频选择（playlist_detail 页面通过 sessionStorage 传递，避免 URL 过长）
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('from_storage') === '1') {
+        try {
+            const storedIds = JSON.parse(sessionStorage.getItem('task_video_ids') || '[]');
+            if (storedIds.length > 0) {
+                const idSet = new Set(storedIds);
+                document.querySelectorAll('input[name="video_ids"]').forEach(cb => {
+                    cb.checked = idSet.has(cb.value);
+                });
+                sessionStorage.removeItem('task_video_ids');
+            }
+        } catch (e) {
+            console.warn('Failed to restore video selection from sessionStorage:', e);
+        }
+    }
 });
 
 function toggleScheduleOptions() {

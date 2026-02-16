@@ -367,6 +367,8 @@
 <script>
 const playlistId = '{{ playlist.id }}';
 const allVideoIds = {{ all_video_ids | tojson }};
+// 构建 videoId -> status 的映射（用于筛选后的全选）
+const allVideoData = {{ all_video_data | tojson }};
 
 // 视频状态筛选（当前页内）
 function filterPlVideos(status) {
@@ -395,7 +397,24 @@ function playlistManager() {
         },
         
         toggleAll(checked) {
-            this.selectedVideos = checked ? [...allVideoIds] : [];
+            if (!checked) {
+                this.selectedVideos = [];
+                return;
+            }
+            // 只选当前可见（未被筛选隐藏）的行对应的视频
+            const table = document.getElementById('pl-video-table');
+            const visibleIds = [];
+            table.querySelectorAll('tbody tr').forEach(row => {
+                if (row.style.display !== 'none' && !row.classList.contains('filter-empty-row')) {
+                    const cb = row.querySelector('input[type="checkbox"]');
+                    if (cb) {
+                        // 从 @change="toggleVideo('xxx')" 提取 video id
+                        const match = row.innerHTML.match(/toggleVideo\('([^']+)'\)/);
+                        if (match) visibleIds.push(match[1]);
+                    }
+                }
+            });
+            this.selectedVideos = visibleIds;
         },
         
         async processSelected(force = false) {
@@ -404,9 +423,9 @@ function playlistManager() {
                 return;
             }
             
-            // 跳转到新建任务页面，让用户选择执行阶段
-            const videoIds = this.selectedVideos.join(',');
-            location.href = `/tasks/new?playlist=${playlistId}&videos=${encodeURIComponent(videoIds)}`;
+            // 将视频 ID 存入 sessionStorage（避免 URL 过长导致 414）
+            sessionStorage.setItem('task_video_ids', JSON.stringify(this.selectedVideos));
+            location.href = `/tasks/new?playlist=${playlistId}&from_storage=1`;
         }
     };
 }

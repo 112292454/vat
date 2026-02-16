@@ -1288,7 +1288,7 @@ class Database:
                 video_task_summary AS (
                     SELECT 
                         video_id,
-                        SUM(CASE WHEN status IN ('completed', 'skipped') THEN 1 ELSE 0 END) as completed_steps,
+                        SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed_steps,
                         SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed_steps
                     FROM latest_tasks
                     WHERE rn = 1

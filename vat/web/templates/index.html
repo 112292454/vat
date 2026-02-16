@@ -309,9 +309,9 @@ function batchProcessVideos() {
     const ids = Array.from(checkboxes).map(cb => cb.value);
     if (ids.length === 0) return;
     
-    const params = new URLSearchParams();
-    ids.forEach(id => params.append('video', id));
-    window.location.href = `/tasks/new?${params.toString()}`;
+    // 存入 sessionStorage 避免 URL 过长导致 414
+    sessionStorage.setItem('task_video_ids', JSON.stringify(ids));
+    window.location.href = '/tasks/new?from_storage=1';
 }
 
 // 批量删除

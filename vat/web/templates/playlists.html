@@ -42,20 +42,20 @@
                                 <div class="bg-green-500 h-2 rounded-full" style="width: {{ pl.progress_percent }}%"></div>
                             </div>
                             <div class="flex items-center space-x-1 text-xs whitespace-nowrap">
-                                <a href="/?playlist_id={{ pl.id }}" class="text-gray-600 hover:underline" title="总数">{{ pl.video_count }}</a>
+                                <a href="/playlists/{{ pl.id }}" class="text-gray-600 hover:underline" title="总数">{{ pl.video_count }}</a>
                                 <span class="text-gray-300">=</span>
-                                <a href="/?playlist_id={{ pl.id }}&status=completed" class="text-green-600 hover:underline" title="已完成">{{ pl.completed }}</a>
+                                <a href="/playlists/{{ pl.id }}" class="text-green-600 hover:underline" title="已完成">{{ pl.completed }}</a>
                                 {% if pl.partial_completed > 0 %}
                                 <span class="text-gray-300">+</span>
-                                <a href="/?playlist_id={{ pl.id }}&status=partial_completed" class="text-orange-500 hover:underline" title="部分完成">{{ pl.partial_completed }}</a>
+                                <a href="/playlists/{{ pl.id }}" class="text-orange-500 hover:underline" title="部分完成">{{ pl.partial_completed }}</a>
                                 {% endif %}
                                 {% if pl.failed > 0 %}
                                 <span class="text-gray-300">+</span>
-                                <a href="/?playlist_id={{ pl.id }}&status=failed" class="text-red-600 hover:underline" title="失败">{{ pl.failed }}</a>
+                                <a href="/playlists/{{ pl.id }}" class="text-red-600 hover:underline" title="失败">{{ pl.failed }}</a>
                                 {% endif %}
                                 {% if pl.pending > 0 %}
                                 <span class="text-gray-300">+</span>
-                                <a href="/?playlist_id={{ pl.id }}&status=pending" class="text-yellow-600 hover:underline" title="待处理">{{ pl.pending }}</a>
+                                <a href="/playlists/{{ pl.id }}" class="text-yellow-600 hover:underline" title="待处理">{{ pl.pending }}</a>
                                 {% endif %}
                                 {% if pl.unavailable > 0 %}
                                 <span class="text-gray-300">+</span>

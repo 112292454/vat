@@ -721,16 +721,20 @@ class VideoProcessor:
                     resp = requests.get(try_url, timeout=15, proxies=proxies)
                     resp.raise_for_status()
                     
-                    ct = resp.headers.get('content-type', '')
-                    ext = '.jpg'
-                    if 'png' in ct:
-                        ext = '.png'
-                    elif 'webp' in ct:
-                        ext = '.webp'
+                    # 统一转为 JPG 保存
+                    target = self.output_dir / "thumbnail.jpg"
+                    try:
+                        import io
+                        from PIL import Image
+                        img = Image.open(io.BytesIO(resp.content))
+                        if img.mode != "RGB":
+                            img = img.convert("RGB")
+                        img.save(target, "JPEG", quality=90)
+                    except ImportError:
+                        # PIL 不可用时直接保存原始格式
+                        target.write_bytes(resp.content)
                     
-                    target = self.output_dir / f"thumbnail{ext}"
-                    target.write_bytes(resp.content)
-                    self.progress_callback(f"封面已保存: thumbnail{ext} ({len(resp.content)//1024}KB)")
+                    self.progress_callback(f"封面已保存: thumbnail.jpg ({target.stat().st_size//1024}KB)")
                     return
                 except requests.exceptions.HTTPError as e:
                     if e.response is not None and e.response.status_code == 404 and try_url != urls_to_try[-1]:
@@ -1830,7 +1834,7 @@ class VideoProcessor:
                         self.progress_callback(f"使用本地封面: {cover_name}")
                         break
             
-            # 2. 如果没有本地封面，尝试下载 thumbnail URL
+            # 2. 如果没有本地封面，尝试下载 thumbnail URL 并转为 JPG
             if not cover_path:
                 thumbnail_url = metadata.get('thumbnail', '')
                 if thumbnail_url:
@@ -1844,20 +1848,21 @@ class VideoProcessor:
                         resp = requests.get(thumbnail_url, timeout=30, proxies=proxies)
                         resp.raise_for_status()
                         
-                        # 根据 content-type 确定扩展名
-                        content_type = resp.headers.get('content-type', '')
-                        ext = '.jpg'
-                        if 'png' in content_type:
-                            ext = '.png'
-                        elif 'webp' in content_type:
-                            ext = '.webp'
-                        
-                        # 保存到临时文件
+                        # 统一转为 JPG 保存到临时文件
                         temp_cover_file = tempfile.NamedTemporaryFile(
-                            suffix=ext, delete=False, prefix='cover_'
+                            suffix='.jpg', delete=False, prefix='cover_'
                         )
-                        temp_cover_file.write(resp.content)
                         temp_cover_file.close()
+                        try:
+                            import io as _io
+                            from PIL import Image as _Image
+                            img = _Image.open(_io.BytesIO(resp.content))
+                            if img.mode != "RGB":
+                                img = img.convert("RGB")
+                            img.save(temp_cover_file.name, "JPEG", quality=90)
+                        except ImportError:
+                            Path(temp_cover_file.name).write_bytes(resp.content)
+                        
                         cover_path = Path(temp_cover_file.name)
                         self.progress_callback(f"封面下载成功")
                     except Exception as e:

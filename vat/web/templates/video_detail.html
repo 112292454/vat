@@ -20,13 +20,11 @@
         <!-- 基本信息 -->
         <div class="bg-white rounded-lg shadow p-6">
             <div class="flex items-start space-x-4">
-                {% if metadata and metadata.thumbnail %}
-                <img src="{{ metadata.thumbnail }}" alt="" class="w-48 h-28 object-cover rounded-lg">
-                {% else %}
-                <div class="w-48 h-28 bg-gray-200 rounded-lg flex items-center justify-center text-4xl text-gray-400">
+                <img src="/api/thumbnail/{{ video.id }}" alt="" class="w-48 h-28 object-cover rounded-lg"
+                     onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">
+                <div class="w-48 h-28 bg-gray-200 rounded-lg flex items-center justify-center text-4xl text-gray-400" style="display:none">
                     🎬
                 </div>
-                {% endif %}
                 <div class="flex-1 min-w-0">
                     <h1 class="text-xl font-bold text-gray-900 mb-2">{{ video.title or '未知标题' }}</h1>
                     {% if translated_info and translated_info.title_optimized %}

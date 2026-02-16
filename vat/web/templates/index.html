@@ -149,13 +149,11 @@
                 </td>
                 <td class="px-4 py-3 cursor-pointer" onclick="window.location='/video/{{ video.id }}'" data-sort-value="{{ video.title }}">
                     <div class="flex items-center space-x-3">
-                        {% if video.thumbnail %}
-                        <img src="{{ video.thumbnail }}" alt="" class="w-20 h-12 object-cover rounded">
-                        {% else %}
-                        <div class="w-20 h-12 bg-gray-200 rounded flex items-center justify-center text-gray-400">
+                        <img src="/api/thumbnail/{{ video.id }}" alt="" class="w-20 h-12 object-cover rounded"
+                             onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">
+                        <div class="w-20 h-12 bg-gray-200 rounded flex items-center justify-center text-gray-400" style="display:none">
                             🎬
                         </div>
-                        {% endif %}
                         <div class="min-w-0 flex-1">
                             <div class="text-sm font-medium text-gray-900 truncate max-w-md hover:text-blue-600" title="{{ video.title }}">
                                 {{ video.title | truncate(50) }}

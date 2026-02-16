@@ -9,7 +9,7 @@ from typing import Optional, List, Dict, Any
 from datetime import datetime
 
 from fastapi import FastAPI, Request, Query
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi.middleware.cors import CORSMiddleware
@@ -95,6 +95,23 @@ def format_datetime(dt: Optional[datetime]) -> str:
 # 注册模板过滤器
 templates.env.filters["format_duration"] = format_duration
 templates.env.filters["format_datetime"] = format_datetime
+
+
+# ==================== 本地封面服务 ====================
+
+@app.get("/api/thumbnail/{video_id}")
+async def serve_thumbnail(video_id: str):
+    """返回视频本地封面文件（thumbnail.jpg 优先）"""
+    config = load_config()
+    base_dir = Path(config.storage.output_dir) / video_id
+    # 按优先级查找本地封面
+    for name in ["thumbnail", "cover"]:
+        for ext in ["jpg", "jpeg", "png", "webp"]:
+            p = base_dir / f"{name}.{ext}"
+            if p.exists() and p.stat().st_size > 0:
+                media_types = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png", "webp": "image/webp"}
+                return FileResponse(p, media_type=media_types.get(ext, "image/jpeg"))
+    return JSONResponse({"error": "not found"}, status_code=404)
 
 
 # ==================== 页面路由 ====================

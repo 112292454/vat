@@ -173,7 +173,7 @@ translator:
     # api_key: ""                             # 留空 = 使用全局 llm 配置（Google API）
     # base_url: ""                            # 留空 = 使用全局 llm 配置（Google API）
     enable_reflect: true                    # 反思翻译（启用后质量更高，但消耗更多 token）
-    batch_size: 40                          # 每批处理的字幕数量
+    batch_size: 100                          # 每批处理的字幕数量
     thread_num: 10                           # 并发线程数
     custom_prompt: "fubuki"                       # 自定义提示词文件名（相对于 vat/llm/prompts/custom/），如 "translate/example.md"，空字符串表示不使用
     enable_context: true                    # 是否启用前文上下文（新增）

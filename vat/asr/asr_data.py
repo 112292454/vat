@@ -580,7 +580,7 @@ class ASRData:
         # 注意：两层都必须有相同结构的 override block，否则部分渲染器（VSFilter等）
         # 在计算自动换行时会因 tag 解析差异导致两层换行位置不同。
         # Main 层使用 \blur0（无模糊）保持 override block 结构对称。
-        dlg_base = "Dialogue: 0,{},{},{},,0,0,0,,{{\\blur4}}{}\n"  # Layer 0（发光底层）
+        dlg_base = "Dialogue: 0,{},{},{},,0,0,0,,{{\\blur8}}{}\n"  # Layer 0（发光底层）
         dlg_main = "Dialogue: 1,{},{},{},,0,0,0,,{{\\blur0}}{}\n"  # Layer 1（主文字层，\blur0=无模糊）
         
         # 检测样式表中已有的 _Base 样式，用于决定 base 层使用哪个样式名

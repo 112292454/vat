@@ -1911,18 +1911,28 @@ class VideoProcessor:
             updated_metadata['uploaded_at'] = datetime.now().isoformat()
             self.db.update_video(self.video.id, metadata=updated_metadata)
             
-            # 添加到合集（如果配置了）
-            if bilibili_config.season_id:
-                self.progress_callback(f"添加到合集 {bilibili_config.season_id}...")
+            # 添加到合集
+            # 优先使用 per-playlist 的 season_id（playlist 详情页配置），
+            # 回退到全局 bilibili_config.season_id
+            effective_season_id = None
+            if effective_playlist_id and playlist_info:
+                pl_season = (playlist.metadata or {}).get('upload_config', {}).get('season_id')
+                if pl_season:
+                    effective_season_id = int(pl_season)
+            if not effective_season_id:
+                effective_season_id = bilibili_config.season_id
+            
+            if effective_season_id:
+                self.progress_callback(f"添加到合集 {effective_season_id}...")
                 try:
                     aid = uploader.bvid_to_aid(result.bvid)
-                    if aid and uploader.add_to_season(aid, bilibili_config.season_id):
+                    if aid and uploader.add_to_season(aid, effective_season_id):
                         self.progress_callback("✓ 已添加到合集")
                     else:
                         self.progress_callback("⚠ 添加到合集失败")
                         self.db.add_processing_note(
                             self.video_id, "upload",
-                            f"视频已上传但添加到合集 {bilibili_config.season_id} 失败"
+                            f"视频已上传但添加到合集 {effective_season_id} 失败"
                         )
                 except Exception as e:
                     self.progress_callback(f"⚠ 添加到合集异常: {e}")

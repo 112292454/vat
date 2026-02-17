@@ -680,7 +680,7 @@ def process(ctx, video_id, process_all, playlist, stages, gpu, force, dry_run, c
             return
         
         # 进入定时上传流程
-        _run_scheduled_uploads(config, db, logger, video_ids, upload_cron, force, dry_run)
+        _run_scheduled_uploads(config, db, logger, video_ids, upload_cron, force, dry_run, playlist_id=playlist)
         return
     
     # 显示执行计划
@@ -802,7 +802,7 @@ def process(ctx, video_id, process_all, playlist, stages, gpu, force, dry_run, c
         logger.info("处理完成，全部成功")
 
 
-def _run_scheduled_uploads(config, db, logger, video_ids, cron_expr, force, dry_run):
+def _run_scheduled_uploads(config, db, logger, video_ids, cron_expr, force, dry_run, playlist_id=None):
     """
     定时上传：按 cron 表达式逐个上传视频
     
@@ -817,6 +817,7 @@ def _run_scheduled_uploads(config, db, logger, video_ids, cron_expr, force, dry_
         cron_expr: cron 表达式
         force: 是否强制重新上传
         dry_run: 仅预览
+        playlist_id: 发起任务的 Playlist ID（上传时用于确定正确的 playlist 上下文）
     """
     import time
     from datetime import datetime
@@ -889,7 +890,8 @@ def _run_scheduled_uploads(config, db, logger, video_ids, cron_expr, force, dry_
                 gpu_id=None,
                 force=force,
                 video_index=i,
-                total_videos=len(queue)
+                total_videos=len(queue),
+                playlist_id=playlist_id
             )
             success = processor.process(steps=['upload'])
             if success:
@@ -1254,10 +1256,19 @@ def upload(ctx, video_id, upload_playlist_id, platform, season, dry_run):
         playlist_service = PlaylistService(db)
         pl = playlist_service.get_playlist(effective_playlist_id)
         if pl:
+            pl_upload_config = (pl.metadata or {}).get('upload_config', {})
+            # upload_order_index: 从 playlist_videos 关联表读取（per-playlist），
+            # 与 executor._run_upload 逻辑保持一致
+            pv_info = db.get_playlist_video_info(effective_playlist_id, video_id)
+            upload_order_index = pv_info.get('upload_order_index', 0) if pv_info else 0
+            if not upload_order_index:
+                # 回退到 video 级别数据
+                upload_order_index = (video.metadata or {}).get('upload_order_index', 0) or video.playlist_index or 0
             playlist_info = {
                 'name': pl.title,
                 'id': pl.id,
-                'index': video.playlist_index or 0,
+                'index': upload_order_index,
+                'uploader_name': pl_upload_config.get('uploader_name', ''),
             }
     
     # 渲染元数据

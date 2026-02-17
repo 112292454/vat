@@ -112,10 +112,12 @@ Reflect 不是多次 LLM 调用，而是单次调用中输出 3 个字段（init
 
 ## 五、B 站上传
 
-### Upload-1: 添加合集不稳定
+### Upload-1: 添加合集不稳定（已修复）
 
-- **现象**：视频上传成功，但添加到合集有时会失败
-- **状态**：已知问题，暂未定位根因
+- **现象**：视频上传成功，但添加到合集始终失败（API 返回 code=0 但实际未添加）
+- **根因**：B站创作中心 `episodes/add` 接口的参数格式与常规 REST API 不同——需要 `sectionId`（驼峰）+ `episodes`（含 aid/cid/title 的对象数组）+ JSON body + csrf 同时在 query string 和 body 中。之前使用的 `{id, aids}` 格式返回"空成功"（code=0 但不生效）
+- **修复**：通过逆向 B站创作中心前端 JS 找到正确格式，重写 `add_to_season`、`remove_from_season`。详见 `docs/bilibili_season_api.md`
+- **排序功能**：`sort_season_episodes` 已修复。关键是 `section` 对象必须包含 `id/type/seasonId/title` 四个字段，且 body 中不能有 `csrf`
 
 ### Upload-2: 视频编号（#N）与时间顺序不一致（已修复）
 

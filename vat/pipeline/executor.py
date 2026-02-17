@@ -1911,7 +1911,7 @@ class VideoProcessor:
             updated_metadata['uploaded_at'] = datetime.now().isoformat()
             self.db.update_video(self.video.id, metadata=updated_metadata)
             
-            # 添加到合集
+            # 添加到合集（上传完成后通过 episodes/add 接口添加）
             # 优先使用 per-playlist 的 season_id（playlist 详情页配置），
             # 回退到全局 bilibili_config.season_id
             effective_season_id = None
@@ -1923,16 +1923,26 @@ class VideoProcessor:
                 effective_season_id = bilibili_config.season_id
             
             if effective_season_id:
-                self.progress_callback(f"添加到合集 {effective_season_id}...")
+                self.progress_callback(f"尝试添加到合集 {effective_season_id}...")
                 try:
-                    aid = uploader.bvid_to_aid(result.bvid)
+                    # bvid_to_aid 对刚上传的视频可能查不到（B站后端索引延迟），重试几次
+                    import time
+                    aid = None
+                    for attempt in range(3):
+                        aid = uploader.bvid_to_aid(result.bvid)
+                        if aid:
+                            break
+                        self.progress_callback(f"等待视频索引... ({attempt + 1}/3)")
+                        time.sleep(5)
                     if aid and uploader.add_to_season(aid, effective_season_id):
                         self.progress_callback("✓ 已添加到合集")
+                        updated_metadata['bilibili_season_id'] = effective_season_id
+                        self.db.update_video(self.video.id, metadata=updated_metadata)
                     else:
-                        self.progress_callback("⚠ 添加到合集失败")
+                        self.progress_callback("⚠ 添加到合集失败，请检查 season_id 配置或在创作中心手动添加")
                         self.db.add_processing_note(
                             self.video_id, "upload",
-                            f"视频已上传但添加到合集 {effective_season_id} 失败"
+                            f"视频已上传但添加到合集 {effective_season_id} 失败，需手动操作"
                         )
                 except Exception as e:
                     self.progress_callback(f"⚠ 添加到合集异常: {e}")

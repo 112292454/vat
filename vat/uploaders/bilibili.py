@@ -367,7 +367,13 @@ class BilibiliUploader(BaseUploader):
     
     def add_to_season(self, aid: int, season_id: int) -> bool:
         """
-        将视频添加到合集
+        将视频添加到合集（新版合集/SEASON）
+        
+        通过逆向 B站创作中心前端 JS 发现的正确调用格式：
+        - 端点: /x2/creative/web/season/section/episodes/add
+        - 参数: sectionId (驼峰), episodes (对象数组含 aid/cid/title), csrf
+        - Content-Type: application/json
+        - csrf 同时在 query string 和 JSON body 中
         
         Args:
             aid: 视频AV号（整数）
@@ -380,23 +386,63 @@ class BilibiliUploader(BaseUploader):
         bili_jct = self.cookie_data.get('bili_jct', '')
         
         try:
-            # 添加视频到合集
+            # 1. 获取 section_id（合集下的分区ID）
+            season_info = self.get_season_episodes(season_id)
+            if not season_info:
+                logger.error(f"无法获取合集 {season_id} 的 section_id")
+                return False
+            section_id = season_info['section_id']
+            
+            # 检查视频是否已在合集中
+            existing_aids = [ep['aid'] for ep in season_info.get('episodes', [])]
+            if aid in existing_aids:
+                logger.info(f"视频 av{aid} 已在合集 {season_id} 中，跳过添加")
+                return True
+            
+            # 2. 获取视频的 cid 和 title（API 要求 episodes 对象包含这些字段）
+            resp = session.get(
+                'https://api.bilibili.com/x/web-interface/view',
+                params={'aid': aid},
+                timeout=10
+            )
+            view_data = resp.json()
+            if view_data.get('code') != 0:
+                logger.error(f"获取视频信息失败 av{aid}: {view_data.get('message')}")
+                return False
+            
+            pages = view_data['data'].get('pages', [])
+            cid = pages[0]['cid'] if pages else 0
+            title = view_data['data'].get('title', '')
+            
+            # 3. 调用 episodes/add（经验证的正确格式）
+            payload = {
+                'sectionId': section_id,
+                'episodes': [{
+                    'title': title,
+                    'aid': aid,
+                    'cid': cid,
+                    'charging_pay': 0,
+                }],
+                'csrf': bili_jct,
+            }
+            headers = {
+                'Content-Type': 'application/json; charset=UTF-8',
+                'Referer': 'https://member.bilibili.com/platform/upload-manager/article/season',
+                'Origin': 'https://member.bilibili.com',
+            }
             resp = session.post(
-                'https://member.bilibili.com/x2/creative/web/season/section/add',
-                data={
-                    'season_id': season_id,
-                    'aids': str(aid),
-                    'csrf': bili_jct,
-                },
+                f'https://member.bilibili.com/x2/creative/web/season/section/episodes/add?csrf={bili_jct}',
+                json=payload,
+                headers=headers,
                 timeout=10
             )
             data = resp.json()
             
             if data.get('code') == 0:
-                logger.info(f"成功添加视频 av{aid} 到合集 {season_id}")
+                logger.info(f"成功添加视频 av{aid} 到合集 {season_id} (section={section_id})")
                 return True
             else:
-                logger.error(f"添加到合集失败: {data.get('message')}")
+                logger.error(f"添加到合集失败: code={data.get('code')}, message={data.get('message')}")
                 return False
                 
         except Exception as e:
@@ -447,6 +493,317 @@ class BilibiliUploader(BaseUploader):
             logger.error(f"创建合集异常: {e}")
             return {'success': False, 'error': str(e)}
     
+    def get_season_episodes(self, season_id: int) -> Optional[Dict[str, Any]]:
+        """
+        获取合集内的视频列表（创作中心接口）
+        
+        需要先获取 section_id，然后才能进行排序/删除操作。
+        
+        Args:
+            season_id: 合集ID
+            
+        Returns:
+            {'section_id': int, 'episodes': [{'aid': int, 'title': str, ...}]}
+            失败返回 None
+        """
+        session = self._get_authenticated_session()
+        
+        try:
+            # 先获取合集信息（包含 section_id）
+            # list_seasons 返回的数据中包含 sections.sections[0].id
+            resp = session.get(
+                'https://member.bilibili.com/x2/creative/web/seasons',
+                params={'pn': 1, 'ps': 50},
+                timeout=10
+            )
+            data = resp.json()
+            
+            if data.get('code') != 0:
+                logger.error(f"获取合集列表失败: {data.get('message')}")
+                return None
+            
+            # 找到目标合集的 section_id
+            section_id = None
+            for item in data.get('data', {}).get('seasons', []):
+                season_info = item.get('season', {})
+                if season_info.get('id') == season_id:
+                    sections_data = item.get('sections', {}).get('sections', [])
+                    if sections_data:
+                        section_id = sections_data[0].get('id')
+                    break
+            
+            if section_id is None:
+                logger.error(f"未找到合集 {season_id} 的 section_id")
+                return None
+            
+            # 用 section_id 获取视频列表
+            resp2 = session.get(
+                'https://member.bilibili.com/x2/creative/web/season/section',
+                params={'id': section_id},
+                timeout=10
+            )
+            data2 = resp2.json()
+            
+            if data2.get('code') != 0:
+                logger.error(f"获取合集视频列表失败: {data2.get('message')}")
+                return None
+            
+            episodes = data2.get('data', {}).get('episodes', [])
+            logger.info(f"合集 {season_id} (section={section_id}) 共 {len(episodes)} 个视频")
+            
+            return {
+                'section_id': section_id,
+                'episodes': episodes,
+            }
+            
+        except Exception as e:
+            logger.error(f"获取合集视频列表异常: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+    
+    def remove_from_season(self, aids: List[int], season_id: int) -> bool:
+        """
+        从合集中移除视频
+        
+        通过逆向前端 JS 发现的正确调用格式：
+        - 端点: /x2/creative/web/season/section/episode/del（注意是单数 episode）
+        - 参数: {id: episode_id}，episode_id 是视频在合集中的内部ID，不是 aid
+        - 需要先通过 get_season_episodes 查找 aid → episode_id 的映射
+        - 每次只能删除一个 episode
+        
+        Args:
+            aids: 要移除的视频 AV 号列表
+            season_id: 合集ID
+            
+        Returns:
+            是否全部成功（部分成功也返回 False）
+        """
+        session = self._get_authenticated_session()
+        bili_jct = self.cookie_data.get('bili_jct', '')
+        
+        try:
+            # 获取合集视频列表，建立 aid → episode_id 映射
+            season_info = self.get_season_episodes(season_id)
+            if not season_info:
+                return False
+            
+            aid_to_episode_id = {ep['aid']: ep['id'] for ep in season_info.get('episodes', [])}
+            
+            success_count = 0
+            for aid in aids:
+                episode_id = aid_to_episode_id.get(aid)
+                if episode_id is None:
+                    logger.warning(f"视频 av{aid} 不在合集 {season_id} 中，跳过")
+                    continue
+                
+                resp = session.post(
+                    'https://member.bilibili.com/x2/creative/web/season/section/episode/del',
+                    data={'id': episode_id, 'csrf': bili_jct},
+                    timeout=10
+                )
+                data = resp.json()
+                
+                if data.get('code') == 0:
+                    logger.info(f"成功从合集 {season_id} 移除视频 av{aid} (episode={episode_id})")
+                    success_count += 1
+                else:
+                    logger.error(f"从合集移除视频 av{aid} 失败: code={data.get('code')}, message={data.get('message')}")
+            
+            total = len(aids)
+            if success_count == total:
+                logger.info(f"成功从合集 {season_id} 移除全部 {total} 个视频")
+                return True
+            else:
+                logger.warning(f"从合集 {season_id} 移除视频: {success_count}/{total} 成功")
+                return False
+                
+        except Exception as e:
+            logger.error(f"从合集移除视频异常: {e}")
+            return False
+    
+    def sort_season_episodes(self, season_id: int, aids_in_order: List[int]) -> bool:
+        """
+        对合集内的视频重新排序
+        
+        通过浏览器抓包发现的正确调用格式：
+        - 端点: /x2/creative/web/season/section/edit
+        - Content-Type: application/json
+        - csrf 只在 query string 中，body 中不含 csrf
+        - 参数: {
+            section: {id, type, seasonId, title},  // 必须包含完整的 section 信息
+            sorts: [{id: episode_id, sort: 序号(1-indexed)}],  // 必须包含所有视频
+            captcha_token: ""
+          }
+        - episode_id 是视频在合集中的内部ID，不是 aid
+        - sorts 必须包含合集中的所有视频，不能只传部分
+        
+        Args:
+            season_id: 合集ID
+            aids_in_order: 按期望顺序排列的 aid 列表，必须包含合集中的所有视频
+            
+        Returns:
+            是否成功
+        """
+        session = self._get_authenticated_session()
+        bili_jct = self.cookie_data.get('bili_jct', '')
+        
+        try:
+            # 获取合集当前状态
+            season_info = self.get_season_episodes(season_id)
+            if not season_info:
+                return False
+            
+            section_id = season_info['section_id']
+            all_episodes = season_info.get('episodes', [])
+            
+            # 建立 aid → episode 映射
+            aid_to_episode = {ep['aid']: ep for ep in all_episodes}
+            
+            # 校验所有 aid 都在合集中
+            missing = [aid for aid in aids_in_order if aid not in aid_to_episode]
+            if missing:
+                logger.error(f"以下 aid 不在合集 {season_id} 中: {missing}")
+                return False
+            
+            # 如果传入的 aids 不是全量，补充未列出的视频到末尾
+            listed_aids = set(aids_in_order)
+            remaining = [ep['aid'] for ep in all_episodes if ep['aid'] not in listed_aids]
+            full_order = list(aids_in_order) + remaining
+            
+            # 生成 sorts 数组（1-indexed）
+            sorts = []
+            for idx, aid in enumerate(full_order):
+                ep = aid_to_episode[aid]
+                sorts.append({'id': ep['id'], 'sort': idx + 1})
+            
+            # section 对象必须包含 id, type, seasonId, title
+            payload = {
+                'section': {
+                    'id': section_id,
+                    'type': 1,
+                    'seasonId': season_id,
+                    'title': '正片',
+                },
+                'sorts': sorts,
+                'captcha_token': '',
+            }
+            headers = {
+                'Content-Type': 'application/json',
+                'Referer': 'https://member.bilibili.com/platform/upload-manager/ep',
+                'Origin': 'https://member.bilibili.com',
+            }
+            resp = session.post(
+                f'https://member.bilibili.com/x2/creative/web/season/section/edit?csrf={bili_jct}',
+                json=payload,
+                headers=headers,
+                timeout=15
+            )
+            data = resp.json()
+            
+            if data.get('code') == 0:
+                logger.info(f"合集 {season_id} 排序成功，共 {len(sorts)} 个视频")
+                return True
+            else:
+                logger.error(f"合集排序失败: code={data.get('code')}, message={data.get('message')}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"合集排序异常: {e}")
+            return False
+    
+    def delete_video(self, aid: int) -> bool:
+        """
+        删除自己的视频（稿件）
+        
+        警告：此操作不可逆！
+        
+        Args:
+            aid: 视频AV号
+            
+        Returns:
+            是否成功
+        """
+        session = self._get_authenticated_session()
+        bili_jct = self.cookie_data.get('bili_jct', '')
+        
+        try:
+            resp = session.post(
+                'https://member.bilibili.com/x/web/archive/delete',
+                data={
+                    'aid': aid,
+                    'csrf': bili_jct,
+                },
+                timeout=10
+            )
+            data = resp.json()
+            
+            if data.get('code') == 0:
+                logger.info(f"成功删除视频 av{aid}")
+                return True
+            else:
+                logger.error(f"删除视频失败: {data.get('message')}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"删除视频异常: {e}")
+            return False
+    
+    def get_my_videos(self, page: int = 1, page_size: int = 30) -> Optional[Dict[str, Any]]:
+        """
+        获取自己的稿件列表
+        
+        Args:
+            page: 页码
+            page_size: 每页数量
+            
+        Returns:
+            {'total': int, 'videos': [{'aid': int, 'bvid': str, 'title': str, ...}]}
+            失败返回 None
+        """
+        session = self._get_authenticated_session()
+        
+        try:
+            resp = session.get(
+                'https://member.bilibili.com/x/web/archives',
+                params={
+                    'pn': page,
+                    'ps': page_size,
+                    'status': '',  # 空=全部
+                    'tid': 0,
+                    'keyword': '',
+                },
+                timeout=10
+            )
+            data = resp.json()
+            
+            if data.get('code') != 0:
+                logger.error(f"获取稿件列表失败: {data.get('message')}")
+                return None
+            
+            arc_data = data.get('data', {})
+            videos = []
+            for item in arc_data.get('arc_audits', []):
+                archive = item.get('Archive', {})
+                videos.append({
+                    'aid': archive.get('aid'),
+                    'bvid': archive.get('bvid'),
+                    'title': archive.get('title', ''),
+                    'state': archive.get('state', 0),  # 0=正常
+                    'state_desc': archive.get('state_desc', ''),
+                })
+            
+            return {
+                'total': arc_data.get('page', {}).get('count', 0),
+                'videos': videos,
+            }
+            
+        except Exception as e:
+            logger.error(f"获取稿件列表异常: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+    
     def bvid_to_aid(self, bvid: str) -> Optional[int]:
         """
         将BV号转换为AV号
@@ -457,10 +814,9 @@ class BilibiliUploader(BaseUploader):
         Returns:
             AV号，失败返回None
         """
-        import requests
-        
         try:
-            resp = requests.get(
+            session = self._get_authenticated_session()
+            resp = session.get(
                 'https://api.bilibili.com/x/web-interface/view',
                 params={'bvid': bvid},
                 timeout=10

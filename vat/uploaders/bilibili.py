@@ -957,69 +957,64 @@ class BilibiliUploader(BaseUploader):
         bili_jct = self.cookie_data.get('bili_jct', '')
         assert bili_jct, "bili_jct 为空，无法调用需要 CSRF 的 API（cookie 未正确加载？）"
         
-        # 1. 获取当前视频信息
-        detail = self.get_video_detail(aid)
-        if not detail:
+        # 1. 从创作中心 API 获取完整稿件信息（含正确的 filename、source 等）
+        #    端点: /x/client/archive/view（/x/web/archive/view 已失效返回 404）
+        archive_data = None
+        try:
+            archive_resp = session.get(
+                'https://member.bilibili.com/x/client/archive/view',
+                params={'aid': aid},
+                timeout=10
+            )
+            resp_data = archive_resp.json()
+            if resp_data.get('code') == 0:
+                archive_data = resp_data.get('data', {})
+        except Exception as e:
+            logger.warning(f"创作中心 API 获取 av{aid} 失败: {e}")
+        
+        if not archive_data:
+            logger.error(f"无法从创作中心获取视频 av{aid} 的稿件信息，跳过编辑")
             return False
         
-        # 2. 构建编辑请求（必须包含所有必填字段）
-        current_tags = detail.get('tag', '')  # 公共 API 返回逗号分隔字符串
-        # 如果 tag 是对象列表（部分接口格式），转换为逗号分隔字符串
-        if isinstance(current_tags, list):
-            current_tags = ','.join(t.get('tag_name', '') if isinstance(t, dict) else str(t) for t in current_tags)
+        arc = archive_data.get('archive', {})
+        arc_videos = archive_data.get('videos', [])
         
-        # 构建 videos 数组（必须包含所有分P）
+        # 2. 构建 videos 数组（必须包含所有分P，且 filename 必须正确）
         videos = []
-        for page in detail.get('pages', []):
+        for v in arc_videos:
             videos.append({
-                'filename': page.get('from', '') or '',  # 原始文件名（可能为空）
-                'title': page.get('part', 'P1'),
-                'desc': '',
-                'cid': page.get('cid'),
+                'filename': v.get('filename', ''),
+                'title': v.get('title', 'P1'),
+                'desc': v.get('desc', ''),
+                'cid': v.get('cid'),
             })
+        if not videos:
+            logger.error(f"视频 av{aid} 的 videos 为空，无法编辑")
+            return False
+        
+        # 3. 获取当前标签（需要公共 API，创作中心不直接返回 tag 字符串）
+        current_tags = ''
+        if not tags:
+            detail = self.get_video_detail(aid)
+            if detail:
+                current_tags = detail.get('tag', '')
+                if isinstance(current_tags, list):
+                    current_tags = ','.join(
+                        t.get('tag_name', '') if isinstance(t, dict) else str(t) for t in current_tags
+                    )
         
         payload = {
             'aid': aid,
-            'copyright': detail.get('copyright', 2),
-            'title': (title or detail.get('title', ''))[:80],
-            'desc': (desc if desc is not None else detail.get('desc', ''))[:2000],
+            'copyright': arc.get('copyright', 1),
+            'title': (title or arc.get('title', ''))[:80],
+            'desc': (desc if desc is not None else arc.get('desc', ''))[:2000],
             'tag': ','.join(tags[:12]) if tags else current_tags,
-            'tid': tid or detail.get('tid', 21),
-            'source': detail.get('redirect_url', '') or '',
-            'cover': detail.get('pic', '').replace('http:', ''),
+            'tid': tid or arc.get('tid', 21),
+            'source': arc.get('source', ''),
+            'cover': arc.get('cover', ''),
             'videos': videos,
             'csrf': bili_jct,
         }
-        
-        # 转载来源：从 staff 或 copyright 判断
-        if detail.get('copyright') == 2:
-            # 尝试从 honor_reply 或其他字段获取 source
-            # 公共 API 不直接返回 source 字段，但编辑时如果是转载必须填
-            # 尝试从创作中心 API 获取
-            try:
-                archive_resp = session.get(
-                    'https://member.bilibili.com/x/web/archive/view',
-                    params={'aid': aid},
-                    timeout=10
-                )
-                archive_data = archive_resp.json()
-                if archive_data.get('code') == 0:
-                    arc = archive_data.get('data', {}).get('archive', {})
-                    payload['source'] = arc.get('source', '')
-                    # 用创作中心返回的 videos 数据（更完整，包含 filename）
-                    arc_videos = archive_data.get('data', {}).get('videos', [])
-                    if arc_videos:
-                        videos = []
-                        for v in arc_videos:
-                            videos.append({
-                                'filename': v.get('filename', ''),
-                                'title': v.get('title', 'P1'),
-                                'desc': v.get('desc', ''),
-                                'cid': v.get('cid'),
-                            })
-                        payload['videos'] = videos
-            except Exception as e:
-                logger.debug(f"获取创作中心视频详情失败 av{aid}: {e}（使用公共 API 数据）")
         
         # 3. 提交编辑
         try:

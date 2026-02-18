@@ -479,10 +479,14 @@ class PlaylistService:
                     proxy=config.get_stage_proxy("video_info_translate") or "",
                 )
                 
-                title = video_info.get('title', '')
+                title = video_info.get('title')
+                if not title:
+                    raise ValueError(f"视频 {video_id} 的 video_info 中 title 缺失，无法翻译")
+                uploader = video_info.get('uploader')
+                if not uploader:
+                    logger.warning(f"视频 {video_id} 的 video_info 中 uploader 缺失，翻译质量可能下降")
                 description = video_info.get('description', '')
                 tags = video_info.get('tags', [])
-                uploader = video_info.get('uploader', '')
                 
                 translated_info = translator.translate(
                     title=title,

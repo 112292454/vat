@@ -539,6 +539,8 @@ class VideoProcessor:
                 existing_metadata = self.video.metadata or {}
                 metadata = {**existing_metadata, **result.get('metadata', {})}
                 title = result.get('title', '')
+                if not title:
+                    raise DownloadError("下载器未返回视频标题（title），数据异常")
                 
                 # 处理 YouTube 字幕（如果有）
                 subtitles = result.get('subtitles', {})
@@ -650,6 +652,8 @@ class VideoProcessor:
                             description = metadata.get('description', '')
                             tags = metadata.get('tags', [])
                             uploader = metadata.get('uploader', '')
+                            if not uploader:
+                                self.logger.warning("metadata 中 uploader 缺失，翻译质量可能下降")
                             
                             translated_info = translator.translate(
                                 title=title,

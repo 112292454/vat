@@ -408,14 +408,25 @@ class BilibiliUploader(BaseUploader):
                 return True
             
             # 2. 获取视频的 cid 和 title（API 要求 episodes 对象包含这些字段）
-            resp = session.get(
-                'https://api.bilibili.com/x/web-interface/view',
-                params={'aid': aid},
-                timeout=10
-            )
-            view_data = resp.json()
-            if view_data.get('code') != 0:
-                logger.error(f"获取视频信息失败 av{aid}: {view_data.get('message')}")
+            # 刚上传的视频可能还未被公共 API 索引，需要重试
+            import time as _time
+            view_data = None
+            for view_attempt in range(6):  # 最多重试6次，总等待 0+10+20+30+40+50=150s
+                resp = session.get(
+                    'https://api.bilibili.com/x/web-interface/view',
+                    params={'aid': aid},
+                    timeout=10
+                )
+                view_data = resp.json()
+                if view_data.get('code') == 0:
+                    break
+                if view_attempt < 5:
+                    delay = 10 * (view_attempt + 1)
+                    logger.info(f"视频 av{aid} 尚未索引，{delay}s 后重试... ({view_attempt + 1}/6)")
+                    _time.sleep(delay)
+            
+            if not view_data or view_data.get('code') != 0:
+                logger.error(f"获取视频信息失败 av{aid} (重试6次): {view_data.get('message') if view_data else '无响应'}")
                 return False
             
             pages = view_data['data'].get('pages', [])

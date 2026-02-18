@@ -1919,13 +1919,11 @@ class VideoProcessor:
             # 更新视频元数据（合并到现有 metadata）
             updated_metadata = dict(metadata)  # 复制现有 metadata
             updated_metadata['bilibili_bvid'] = result.bvid
+            updated_metadata['bilibili_aid'] = result.aid or 0
             updated_metadata['bilibili_url'] = f"https://www.bilibili.com/video/{result.bvid}"
             updated_metadata['uploaded_at'] = datetime.now().isoformat()
-            self.db.update_video(self.video.id, metadata=updated_metadata)
             
-            # 添加到合集（上传完成后通过 episodes/add 接口添加）
-            # 优先使用 per-playlist 的 season_id（playlist 详情页配置），
-            # 回退到全局 bilibili_config.season_id
+            # 确定目标合集ID：per-playlist 配置优先，回退到全局配置
             effective_season_id = None
             if effective_playlist_id and playlist_info:
                 pl_season = (playlist.metadata or {}).get('upload_config', {}).get('season_id')
@@ -1935,47 +1933,27 @@ class VideoProcessor:
                 effective_season_id = bilibili_config.season_id
             
             if effective_season_id:
-                self.progress_callback(f"尝试添加到合集 {effective_season_id}...")
-                try:
-                    # 优先使用上传响应中的 aid（B站 submit API 直接返回，无索引延迟）
-                    aid = result.aid if result.aid else None
-                    if aid:
-                        self.progress_callback(f"从上传响应获取 AV号: {aid}")
-                    else:
-                        # fallback: bvid_to_aid（刚上传的视频可能需要等待索引）
-                        self.logger.warning(f"上传响应中无 aid，回退到 bvid_to_aid 转换")
-                        import time
-                        for attempt in range(5):
-                            aid = uploader.bvid_to_aid(result.bvid)
-                            if aid:
-                                break
-                            delay = 10 * (attempt + 1)  # 10s, 20s, 30s, 40s, 50s
-                            self.progress_callback(f"等待视频索引... ({attempt + 1}/5, 等待{delay}s)")
-                            time.sleep(delay)
-                    if aid and uploader.add_to_season(aid, effective_season_id):
-                        self.progress_callback("✓ 已添加到合集")
-                        updated_metadata['bilibili_season_id'] = effective_season_id
-                        self.db.update_video(self.video.id, metadata=updated_metadata)
-                        # 按标题 #数字 自动排序（顺序上传时会自动跳过）
-                        try:
-                            if uploader.auto_sort_season(effective_season_id, newly_added_aid=aid):
-                                self.progress_callback("✓ 合集排序完成")
-                            else:
-                                self.progress_callback("⚠ 合集排序失败，可在创作中心手动调整")
-                        except Exception as sort_err:
-                            self.progress_callback(f"⚠ 合集排序异常: {sort_err}")
-                    else:
-                        self.progress_callback("⚠ 添加到合集失败，请检查 season_id 配置或在创作中心手动添加")
-                        self.db.add_processing_note(
-                            self.video_id, "upload",
-                            f"视频已上传但添加到合集 {effective_season_id} 失败，需手动操作"
-                        )
-                except Exception as e:
-                    self.progress_callback(f"⚠ 添加到合集异常: {e}")
-                    self.db.add_processing_note(
-                        self.video_id, "upload",
-                        f"视频已上传但添加到合集异常: {e}"
-                    )
+                updated_metadata['bilibili_target_season_id'] = effective_season_id
+                updated_metadata['bilibili_season_added'] = False
+                
+                # 尝试一次添加到合集（不阻塞重试，失败由 season-sync 处理）
+                aid = result.aid if result.aid else None
+                if aid:
+                    self.progress_callback(f"尝试添加到合集 {effective_season_id} (AV号: {aid})...")
+                    try:
+                        if uploader.add_to_season(aid, effective_season_id):
+                            self.progress_callback("✓ 已添加到合集")
+                            updated_metadata['bilibili_season_added'] = True
+                        else:
+                            self.progress_callback(
+                                "⚠ 添加到合集失败（视频可能尚未索引），将在全部上传后通过 season-sync 重试"
+                            )
+                    except Exception as e:
+                        self.progress_callback(f"⚠ 添加到合集异常: {e}，将通过 season-sync 重试")
+                else:
+                    self.progress_callback("⚠ 上传响应中无 AV号，将通过 season-sync 重试")
+            
+            self.db.update_video(self.video.id, metadata=updated_metadata)
             
             return True
                 

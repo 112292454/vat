@@ -800,6 +800,87 @@ def process(ctx, video_id, process_all, playlist, stages, gpu, force, dry_run, c
         logger.warning(f"处理完成，{len(failed_vids)} 个视频最终失败: {', '.join(failed_vids[:5])}")
     else:
         logger.info("处理完成，全部成功")
+    
+    # ========== 批量上传后自动 season-sync ==========
+    # 条件：stages 包含 upload 且有 playlist 上下文
+    has_upload = any(s == TaskStep.UPLOAD for s in target_steps)
+    if has_upload and playlist:
+        _auto_season_sync(config, db, logger, playlist)
+
+
+def _auto_season_sync(config, db, logger, playlist_id: str, retry_delay_minutes: int = 30):
+    """
+    批量上传后自动将视频添加到合集并排序。
+    
+    流程：
+    1. 立即尝试一次 season-sync
+    2. 如果有失败的（视频可能尚未被B站索引），等待后自动重试一次
+    
+    Args:
+        config: 配置对象
+        db: 数据库实例
+        logger: 日志器
+        playlist_id: Playlist ID
+        retry_delay_minutes: 重试等待时间（分钟），默认30分钟
+    """
+    try:
+        from ..uploaders.bilibili import BilibiliUploader, season_sync, BILIUP_AVAILABLE
+        
+        if not BILIUP_AVAILABLE:
+            return
+        
+        bilibili_config = config.uploader.bilibili
+        project_root = Path(__file__).parent.parent.parent
+        cookies_file = project_root / bilibili_config.cookies_file
+        
+        uploader = BilibiliUploader(
+            cookies_file=str(cookies_file),
+            line=bilibili_config.line,
+            threads=bilibili_config.threads
+        )
+        
+        # 第一次尝试
+        logger.info(f"=== Season Sync: 第1次尝试 (playlist={playlist_id}) ===")
+        result = season_sync(db, uploader, playlist_id)
+        
+        if result['total'] == 0:
+            logger.info("没有待同步的视频，跳过 season-sync")
+            return
+        
+        if result['failed'] == 0:
+            logger.info(f"Season sync 完成: 全部 {result['success']} 个视频已添加到合集")
+            return
+        
+        # 有失败的，等待后重试
+        logger.info(
+            f"Season sync 第1次: {result['success']} 成功, {result['failed']} 失败"
+            f"（可能B站尚未索引）。{retry_delay_minutes} 分钟后自动重试..."
+        )
+        
+        import time
+        time.sleep(retry_delay_minutes * 60)
+        
+        # 第二次尝试（重新创建 uploader 防止 session 过期）
+        uploader2 = BilibiliUploader(
+            cookies_file=str(cookies_file),
+            line=bilibili_config.line,
+            threads=bilibili_config.threads
+        )
+        
+        logger.info(f"=== Season Sync: 第2次尝试 (playlist={playlist_id}) ===")
+        result2 = season_sync(db, uploader2, playlist_id)
+        
+        if result2['failed'] == 0:
+            logger.info(f"Season sync 重试完成: 全部成功")
+        else:
+            logger.warning(
+                f"Season sync 重试后仍有 {result2['failed']} 个视频失败，"
+                f"请稍后手动运行: vat season-sync -p {playlist_id}"
+            )
+    except Exception as e:
+        logger.error(f"Season sync 异常: {e}")
+        import traceback
+        logger.debug(traceback.format_exc())
 
 
 def _run_scheduled_uploads(config, db, logger, video_ids, cron_expr, force, dry_run, playlist_id=None):
@@ -1200,6 +1281,94 @@ def playlist_delete(ctx, playlist_id, delete_videos, yes):
 
 
 # =============================================================================
+# 合集同步命令
+# =============================================================================
+
+@cli.command('season-sync')
+@click.option('--playlist', '-p', required=True, help='Playlist ID（必须指定）')
+@click.option('--retry-delay', default=30, type=int, help='失败后自动重试的等待时间（分钟），0=不自动重试')
+@click.pass_context
+def season_sync_cmd(ctx, playlist, retry_delay):
+    """将已上传但未入集的视频批量添加到B站合集并排序
+    
+    查找指定 playlist 中所有已上传到B站（有 aid）但尚未添加到目标合集的视频，
+    批量执行 add_to_season，然后对合集按 #数字 自动排序。
+    
+    示例:
+    
+      # 立即同步
+      vat season-sync -p PLAYLIST_ID
+      
+      # 同步，失败后等60分钟自动重试
+      vat season-sync -p PLAYLIST_ID --retry-delay 60
+      
+      # 同步，不自动重试
+      vat season-sync -p PLAYLIST_ID --retry-delay 0
+    """
+    config = get_config(ctx.obj.get('config_path'))
+    logger = get_logger()
+    db = Database(config.storage.database_path, output_base_dir=config.storage.output_dir)
+    
+    # 验证 playlist 存在
+    playlist_service = PlaylistService(db)
+    pl = playlist_service.get_playlist(playlist)
+    if not pl:
+        click.echo(f"错误: Playlist 不存在: {playlist}", err=True)
+        return
+    
+    click.echo(f"Playlist: {pl.title} ({playlist})")
+    
+    try:
+        from ..uploaders.bilibili import BilibiliUploader, season_sync, BILIUP_AVAILABLE
+        
+        if not BILIUP_AVAILABLE:
+            click.echo("错误: biliup 库不可用，请安装: pip install biliup", err=True)
+            return
+        
+        bilibili_config = config.uploader.bilibili
+        project_root = Path(__file__).parent.parent.parent
+        cookies_file = project_root / bilibili_config.cookies_file
+        
+        uploader = BilibiliUploader(
+            cookies_file=str(cookies_file),
+            line=bilibili_config.line,
+            threads=bilibili_config.threads
+        )
+        
+        # 第一次同步
+        click.echo("开始 season-sync...")
+        result = season_sync(db, uploader, playlist)
+        
+        click.echo(f"\n结果: {result['success']} 成功, {result['failed']} 失败, 共 {result['total']} 个")
+        
+        if result['failed'] > 0 and retry_delay > 0:
+            click.echo(f"\n有 {result['failed']} 个视频同步失败，{retry_delay} 分钟后自动重试...")
+            import time
+            time.sleep(retry_delay * 60)
+            
+            # 重试（重新创建 uploader）
+            uploader2 = BilibiliUploader(
+                cookies_file=str(cookies_file),
+                line=bilibili_config.line,
+                threads=bilibili_config.threads
+            )
+            click.echo("开始重试...")
+            result2 = season_sync(db, uploader2, playlist)
+            click.echo(f"重试结果: {result2['success']} 成功, {result2['failed']} 失败")
+            
+            if result2['failed'] > 0:
+                click.echo(f"仍有 {result2['failed']} 个视频失败，请稍后再次运行此命令")
+        elif result['failed'] > 0:
+            click.echo(f"有 {result['failed']} 个视频失败，请稍后重新运行: vat season-sync -p {playlist}")
+        
+        if result['total'] == 0:
+            click.echo("没有待同步的视频")
+    except Exception as e:
+        click.echo(f"错误: {e}", err=True)
+        logger.debug(f"season-sync 异常: {e}", exc_info=True)
+
+
+# =============================================================================
 # 上传命令
 # =============================================================================
 
@@ -1349,40 +1518,35 @@ def upload(ctx, video_id, upload_playlist_id, platform, season, dry_run):
             click.echo(f"  链接: https://www.bilibili.com/video/{result.bvid}")
             click.echo("=" * 50)
             
-            # 添加到合集
-            if season:
-                click.echo(f"\n添加到合集 {season}...")
-                aid = result.aid if result.aid else None
-                if aid:
-                    click.echo(f"  从上传响应获取 AV号: {aid}")
-                else:
-                    # fallback: bvid_to_aid（刚上传的视频可能需要等待索引）
-                    click.echo("  上传响应中无 aid，尝试 bvid_to_aid 转换...")
-                    import time as _time
-                    for attempt in range(5):
-                        aid = uploader.bvid_to_aid(result.bvid)
-                        if aid:
-                            break
-                        delay = 10 * (attempt + 1)
-                        click.echo(f"  等待视频索引... ({attempt + 1}/5, 等待{delay}s)")
-                        _time.sleep(delay)
-                if aid:
-                    if uploader.add_to_season(aid, season):
-                        click.echo(f"✓ 已添加到合集")
-                    else:
-                        click.echo(f"⚠ 添加到合集失败", err=True)
-                else:
-                    click.echo(f"⚠ 无法获取AV号，跳过添加合集", err=True)
-            
             # 更新数据库（合并到现有 metadata）
             video_obj = db.get_video(video_id)
             updated_metadata = dict(video_obj.metadata) if video_obj and video_obj.metadata else {}
             updated_metadata.update({
                 'bilibili_bvid': result.bvid,
+                'bilibili_aid': result.aid or 0,
                 'bilibili_url': f"https://www.bilibili.com/video/{result.bvid}",
                 'uploaded_at': datetime.now().isoformat(),
-                'bilibili_season_id': season,
             })
+            
+            # 添加到合集（尝试一次，不阻塞重试）
+            season_added = False
+            if season:
+                updated_metadata['bilibili_target_season_id'] = season
+                aid = result.aid if result.aid else None
+                if aid:
+                    click.echo(f"\n添加到合集 {season} (AV号: {aid})...")
+                    try:
+                        if uploader.add_to_season(aid, season):
+                            click.echo(f"✓ 已添加到合集")
+                            season_added = True
+                        else:
+                            click.echo(f"⚠ 添加到合集失败（视频可能尚未索引），请稍后运行 season-sync", err=True)
+                    except Exception as e:
+                        click.echo(f"⚠ 添加到合集异常: {e}，请稍后运行 season-sync", err=True)
+                else:
+                    click.echo(f"⚠ 上传响应中无 AV号，请稍后运行 season-sync", err=True)
+                updated_metadata['bilibili_season_added'] = season_added
+            
             db.update_video(video_id, metadata=updated_metadata)
         else:
             click.echo(f"✗ 上传失败: {result.error}", err=True)

@@ -408,25 +408,16 @@ class BilibiliUploader(BaseUploader):
                 return True
             
             # 2. 获取视频的 cid 和 title（API 要求 episodes 对象包含这些字段）
-            # 刚上传的视频可能还未被公共 API 索引，需要重试
-            import time as _time
-            view_data = None
-            for view_attempt in range(6):  # 最多重试6次，总等待 0+10+20+30+40+50=150s
-                resp = session.get(
-                    'https://api.bilibili.com/x/web-interface/view',
-                    params={'aid': aid},
-                    timeout=10
-                )
-                view_data = resp.json()
-                if view_data.get('code') == 0:
-                    break
-                if view_attempt < 5:
-                    delay = 10 * (view_attempt + 1)
-                    logger.info(f"视频 av{aid} 尚未索引，{delay}s 后重试... ({view_attempt + 1}/6)")
-                    _time.sleep(delay)
-            
-            if not view_data or view_data.get('code') != 0:
-                logger.error(f"获取视频信息失败 av{aid} (重试6次): {view_data.get('message') if view_data else '无响应'}")
+            # 注意：刚上传的视频可能还未被公共 API 索引（需要转码/审核），
+            # 此处仅尝试一次，延迟重试由外部 season_sync 负责。
+            resp = session.get(
+                'https://api.bilibili.com/x/web-interface/view',
+                params={'aid': aid},
+                timeout=10
+            )
+            view_data = resp.json()
+            if view_data.get('code') != 0:
+                logger.warning(f"获取视频信息失败 av{aid}: {view_data.get('message')}（可能尚未索引，稍后通过 season-sync 重试）")
                 return False
             
             pages = view_data['data'].get('pages', [])
@@ -937,6 +928,97 @@ class BilibiliUploader(BaseUploader):
         except Exception as e:
             logger.error(f"BV号转换异常: {e}")
             return None
+
+
+def season_sync(db, uploader: BilibiliUploader, playlist_id: str) -> Dict[str, Any]:
+    """
+    批量将已上传但未入集的视频添加到 B站 合集，然后按 #数字 排序。
+    
+    查找指定 playlist 中所有满足以下条件的视频：
+    - metadata 中有 bilibili_aid（已上传到B站）
+    - metadata 中有 bilibili_target_season_id（配置了目标合集）
+    - bilibili_season_added != True（尚未成功添加到合集）
+    
+    Args:
+        db: 数据库实例
+        uploader: B站上传器实例（已认证）
+        playlist_id: Playlist ID，限定处理范围
+        
+    Returns:
+        {
+            'total': int,       # 待处理总数
+            'success': int,     # 成功数
+            'failed': int,      # 失败数
+            'skipped': int,     # 跳过数（已在合集中）
+            'season_ids': set,  # 涉及的合集ID（用于排序）
+            'failed_videos': list,  # 失败的 video_id 列表
+        }
+    """
+    from vat.services.playlist_service import PlaylistService
+    
+    playlist_service = PlaylistService(db)
+    videos = playlist_service.get_playlist_videos(playlist_id)
+    
+    # 筛选待同步的视频
+    pending = []
+    for v in videos:
+        meta = v.metadata or {}
+        aid = meta.get('bilibili_aid')
+        target_season = meta.get('bilibili_target_season_id')
+        already_added = meta.get('bilibili_season_added', False)
+        
+        if aid and target_season and not already_added:
+            pending.append((v, int(aid), int(target_season)))
+    
+    result = {
+        'total': len(pending),
+        'success': 0,
+        'failed': 0,
+        'skipped': 0,
+        'season_ids': set(),
+        'failed_videos': [],
+    }
+    
+    if not pending:
+        logger.info(f"Playlist {playlist_id}: 没有待同步的视频")
+        return result
+    
+    logger.info(f"Playlist {playlist_id}: 找到 {len(pending)} 个待同步视频")
+    
+    for video, aid, season_id in pending:
+        result['season_ids'].add(season_id)
+        try:
+            if uploader.add_to_season(aid, season_id):
+                result['success'] += 1
+                # 更新 DB 标记
+                updated_meta = dict(video.metadata or {})
+                updated_meta['bilibili_season_added'] = True
+                db.update_video(video.id, metadata=updated_meta)
+                logger.info(f"✓ {video.title or video.id} -> 合集 {season_id}")
+            else:
+                result['failed'] += 1
+                result['failed_videos'].append(video.id)
+                logger.warning(f"✗ {video.title or video.id} -> 合集 {season_id} 失败")
+        except Exception as e:
+            result['failed'] += 1
+            result['failed_videos'].append(video.id)
+            logger.error(f"✗ {video.title or video.id} -> 合集 {season_id} 异常: {e}")
+    
+    # 对涉及的每个合集执行排序
+    for season_id in result['season_ids']:
+        try:
+            if uploader.auto_sort_season(season_id):
+                logger.info(f"✓ 合集 {season_id} 排序完成")
+            else:
+                logger.warning(f"⚠ 合集 {season_id} 排序失败")
+        except Exception as e:
+            logger.warning(f"⚠ 合集 {season_id} 排序异常: {e}")
+    
+    logger.info(
+        f"Season sync 完成: {result['success']} 成功, "
+        f"{result['failed']} 失败, {result['skipped']} 跳过"
+    )
+    return result
 
 
 def create_bilibili_uploader(config: Any) -> BilibiliUploader:

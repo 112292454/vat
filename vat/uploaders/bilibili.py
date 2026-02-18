@@ -4,6 +4,7 @@ B站上传器实现
 直接使用 biliup 库的 Web 端 API 上传（TV 端 API 已停用）
 """
 import json
+import re
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 from dataclasses import dataclass
@@ -712,6 +713,83 @@ class BilibiliUploader(BaseUploader):
             logger.error(f"合集排序异常: {e}")
             return False
     
+    @staticmethod
+    def _extract_title_index(title: str) -> Optional[int]:
+        """从标题中提取 #数字，如 '【xxx】翻译标题 | #42' → 42"""
+        m = re.search(r'#(\d+)\s*$', title)
+        return int(m.group(1)) if m else None
+
+    def auto_sort_season(self, season_id: int, newly_added_aid: Optional[int] = None) -> bool:
+        """
+        按标题中的 #数字 对合集自动排序
+        
+        规则：
+        - 从每个视频标题末尾解析 #数字 作为排序键
+        - 无 #数字 的视频视为最老，排在最前面（按 episode_id 保持相对顺序）
+        - 如果新添加的视频 #数字 >= 当前合集中最大的 #数字，
+          说明是顺序上传（追加到末尾即为正确位置），跳过排序
+        
+        Args:
+            season_id: 合集ID
+            newly_added_aid: 刚添加的视频 aid，用于判断是否需要排序
+            
+        Returns:
+            是否成功（跳过排序也算成功）
+        """
+        try:
+            season_info = self.get_season_episodes(season_id)
+            if not season_info:
+                return False
+            
+            episodes = season_info.get('episodes', [])
+            if len(episodes) <= 1:
+                return True
+            
+            # 解析每个 episode 的 #数字
+            ep_with_idx = []
+            for ep in episodes:
+                idx = self._extract_title_index(ep.get('title', ''))
+                ep_with_idx.append((ep, idx))
+            
+            # 判断是否需要排序：新视频的 # 是最大的 → 顺序上传，跳过
+            if newly_added_aid is not None:
+                new_ep_idx = None
+                max_existing_idx = -1
+                for ep, idx in ep_with_idx:
+                    if ep['aid'] == newly_added_aid:
+                        new_ep_idx = idx
+                    else:
+                        if idx is not None and idx > max_existing_idx:
+                            max_existing_idx = idx
+                
+                if new_ep_idx is not None and new_ep_idx >= max_existing_idx:
+                    logger.info(f"视频 av{newly_added_aid} (#{new_ep_idx}) 已在合集末尾，无需排序")
+                    return True
+            
+            # 排序：无 #数字 的排最前（用 -1），有 #数字 的按数字升序
+            # 同为无 #数字 的保持原始相对顺序（episode_id）
+            def sort_key(item):
+                ep, idx = item
+                if idx is None:
+                    return (0, ep['id'])  # 无编号：排最前，按 episode_id 保序
+                return (1, idx)           # 有编号：排后面，按 #数字
+            
+            sorted_eps = sorted(ep_with_idx, key=sort_key)
+            sorted_aids = [ep['aid'] for ep, _ in sorted_eps]
+            
+            # 检查排序前后是否一致，一致则跳过
+            current_aids = [ep['aid'] for ep in episodes]
+            if sorted_aids == current_aids:
+                logger.info(f"合集 {season_id} 已是正确顺序，无需排序")
+                return True
+            
+            logger.info(f"合集 {season_id} 需要排序，当前 {len(episodes)} 个视频")
+            return self.sort_season_episodes(season_id, sorted_aids)
+            
+        except Exception as e:
+            logger.error(f"合集自动排序异常: {e}")
+            return False
+
     def delete_video(self, aid: int) -> bool:
         """
         删除自己的视频（稿件）

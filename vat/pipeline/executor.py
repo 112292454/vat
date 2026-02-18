@@ -1938,6 +1938,14 @@ class VideoProcessor:
                         self.progress_callback("✓ 已添加到合集")
                         updated_metadata['bilibili_season_id'] = effective_season_id
                         self.db.update_video(self.video.id, metadata=updated_metadata)
+                        # 按标题 #数字 自动排序（顺序上传时会自动跳过）
+                        try:
+                            if uploader.auto_sort_season(effective_season_id, newly_added_aid=aid):
+                                self.progress_callback("✓ 合集排序完成")
+                            else:
+                                self.progress_callback("⚠ 合集排序失败，可在创作中心手动调整")
+                        except Exception as sort_err:
+                            self.progress_callback(f"⚠ 合集排序异常: {sort_err}")
                     else:
                         self.progress_callback("⚠ 添加到合集失败，请检查 season_id 配置或在创作中心手动添加")
                         self.db.add_processing_note(

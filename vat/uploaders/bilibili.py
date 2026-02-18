@@ -417,7 +417,7 @@ class BilibiliUploader(BaseUploader):
             )
             view_data = resp.json()
             if view_data.get('code') != 0:
-                logger.warning(f"获取视频信息失败 av{aid}: {view_data.get('message')}（可能尚未索引，稍后通过 season-sync 重试）")
+                logger.warning(f"获取视频信息失败 av{aid}: {view_data.get('message')}（可能尚未索引，稍后通过 upload sync 重试）")
                 return False
             
             pages = view_data['data'].get('pages', [])
@@ -900,6 +900,161 @@ class BilibiliUploader(BaseUploader):
             traceback.print_exc()
             return None
     
+    def get_video_detail(self, aid: int) -> Optional[Dict[str, Any]]:
+        """
+        获取视频详情（公共 API），返回完整视频信息。
+        
+        Args:
+            aid: 视频AV号
+            
+        Returns:
+            视频信息字典（含 aid, bvid, title, desc, tid, tag, copyright, source, cover, pages 等），
+            失败返回 None
+        """
+        session = self._get_authenticated_session()
+        try:
+            resp = session.get(
+                'https://api.bilibili.com/x/web-interface/view',
+                params={'aid': aid},
+                timeout=10
+            )
+            data = resp.json()
+            if data.get('code') != 0:
+                logger.error(f"获取视频详情失败 av{aid}: {data.get('message')}")
+                return None
+            return data['data']
+        except Exception as e:
+            logger.error(f"获取视频详情异常 av{aid}: {e}")
+            return None
+    
+    def edit_video_info(
+        self,
+        aid: int,
+        title: Optional[str] = None,
+        desc: Optional[str] = None,
+        tags: Optional[List[str]] = None,
+        tid: Optional[int] = None,
+    ) -> bool:
+        """
+        修改已上传视频的标题、简介、标签、分区等信息。
+        
+        流程：先获取当前视频信息，修改指定字段，然后提交编辑。
+        
+        API 端点: POST https://member.bilibili.com/x/vu/web/edit?csrf={bili_jct}
+        Content-Type: application/json
+        
+        Args:
+            aid: 视频AV号
+            title: 新标题（None=不修改）
+            desc: 新简介（None=不修改）
+            tags: 新标签列表（None=不修改）
+            tid: 新分区ID（None=不修改）
+            
+        Returns:
+            是否成功
+        """
+        session = self._get_authenticated_session()
+        bili_jct = self.cookie_data.get('bili_jct', '')
+        assert bili_jct, "bili_jct 为空，无法调用需要 CSRF 的 API（cookie 未正确加载？）"
+        
+        # 1. 获取当前视频信息
+        detail = self.get_video_detail(aid)
+        if not detail:
+            return False
+        
+        # 2. 构建编辑请求（必须包含所有必填字段）
+        current_tags = detail.get('tag', '')  # 公共 API 返回逗号分隔字符串
+        # 如果 tag 是对象列表（部分接口格式），转换为逗号分隔字符串
+        if isinstance(current_tags, list):
+            current_tags = ','.join(t.get('tag_name', '') if isinstance(t, dict) else str(t) for t in current_tags)
+        
+        # 构建 videos 数组（必须包含所有分P）
+        videos = []
+        for page in detail.get('pages', []):
+            videos.append({
+                'filename': page.get('from', '') or '',  # 原始文件名（可能为空）
+                'title': page.get('part', 'P1'),
+                'desc': '',
+                'cid': page.get('cid'),
+            })
+        
+        payload = {
+            'aid': aid,
+            'copyright': detail.get('copyright', 2),
+            'title': (title or detail.get('title', ''))[:80],
+            'desc': (desc if desc is not None else detail.get('desc', ''))[:2000],
+            'tag': ','.join(tags[:12]) if tags else current_tags,
+            'tid': tid or detail.get('tid', 21),
+            'source': detail.get('redirect_url', '') or '',
+            'cover': detail.get('pic', '').replace('http:', ''),
+            'videos': videos,
+            'csrf': bili_jct,
+        }
+        
+        # 转载来源：从 staff 或 copyright 判断
+        if detail.get('copyright') == 2:
+            # 尝试从 honor_reply 或其他字段获取 source
+            # 公共 API 不直接返回 source 字段，但编辑时如果是转载必须填
+            # 尝试从创作中心 API 获取
+            try:
+                archive_resp = session.get(
+                    'https://member.bilibili.com/x/web/archive/view',
+                    params={'aid': aid},
+                    timeout=10
+                )
+                archive_data = archive_resp.json()
+                if archive_data.get('code') == 0:
+                    arc = archive_data.get('data', {}).get('archive', {})
+                    payload['source'] = arc.get('source', '')
+                    # 用创作中心返回的 videos 数据（更完整，包含 filename）
+                    arc_videos = archive_data.get('data', {}).get('videos', [])
+                    if arc_videos:
+                        videos = []
+                        for v in arc_videos:
+                            videos.append({
+                                'filename': v.get('filename', ''),
+                                'title': v.get('title', 'P1'),
+                                'desc': v.get('desc', ''),
+                                'cid': v.get('cid'),
+                            })
+                        payload['videos'] = videos
+            except Exception as e:
+                logger.debug(f"获取创作中心视频详情失败 av{aid}: {e}（使用公共 API 数据）")
+        
+        # 3. 提交编辑
+        try:
+            headers = {
+                'Content-Type': 'application/json; charset=UTF-8',
+                'Referer': 'https://member.bilibili.com/platform/upload/video/frame',
+                'Origin': 'https://member.bilibili.com',
+            }
+            resp = session.post(
+                f'https://member.bilibili.com/x/vu/web/edit?csrf={bili_jct}',
+                json=payload,
+                headers=headers,
+                timeout=15
+            )
+            data = resp.json()
+            
+            if data.get('code') == 0:
+                changes = []
+                if title:
+                    changes.append(f"标题→{title[:30]}")
+                if desc is not None:
+                    changes.append(f"简介({len(desc)}字)")
+                if tags:
+                    changes.append(f"标签({len(tags)}个)")
+                if tid:
+                    changes.append(f"分区→{tid}")
+                logger.info(f"成功编辑视频 av{aid}: {', '.join(changes) or '无变更'}")
+                return True
+            else:
+                logger.error(f"编辑视频失败 av{aid}: code={data.get('code')}, message={data.get('message')}")
+                return False
+        except Exception as e:
+            logger.error(f"编辑视频异常 av{aid}: {e}")
+            return False
+
     def bvid_to_aid(self, bvid: str) -> Optional[int]:
         """
         将BV号转换为AV号

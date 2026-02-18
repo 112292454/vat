@@ -310,21 +310,6 @@ def pipeline(ctx, url, playlist, file, gpus, force):
             )
 
 
-@cli.command()
-@click.option('--video-id', '-v', help='视频ID')
-@click.option('--all-completed', is_flag=True, help='上传所有已完成的视频')
-@click.option('--title', help='视频标题')
-@click.option('--desc', help='视频描述')
-@click.option('--tags', help='标签（逗号分隔）')
-@click.pass_context
-def upload(ctx, video_id, all_completed, title, desc, tags):
-    """上传视频到B站"""
-    config = get_config(ctx.obj.get('config_path'))
-    logger = get_logger()
-    
-    click.echo("上传功能尚未完全实现")
-    # TODO: 实现上传逻辑
-
 
 @cli.command()
 @click.option('--video-id', '-v', help='查看特定视频的状态')
@@ -416,16 +401,40 @@ def status(ctx, video_id, filter_failed, filter_pending):
 
 @cli.command()
 @click.option('--video-id', '-v', multiple=True, help='视频ID（可多次指定）')
-@click.option('--all', 'clean_all', is_flag=True, help='清理所有视频的处理产物')
+@click.option('--all', 'clean_all', is_flag=True, help='清理所有视频')
+@click.option('--records', is_flag=True, help='同时删除数据库记录')
+@click.option('--include-source', is_flag=True, help='同时删除原始下载文件（需配合 --records）')
 @click.option('--yes', '-y', is_flag=True, help='跳过确认')
 @click.pass_context
-def clean(ctx, video_id, clean_all, yes):
-    """清理处理产物（保留原始下载文件）"""
+def clean(ctx, video_id, clean_all, records, include_source, yes):
+    """清理视频数据
+    
+    默认只删除处理产物（保留原始下载文件和数据库记录）。
+    
+    示例:
+    
+      # 清理处理产物（保留下载文件和记录）
+      vat clean -v VIDEO_ID
+      
+      # 删除记录和处理产物（保留原始下载文件）
+      vat clean -v VIDEO_ID --records
+      
+      # 完全删除（记录+所有文件）
+      vat clean -v VIDEO_ID --records --include-source
+      
+      # 清理所有视频的处理产物
+      vat clean --all
+    """
+    import shutil
     from vat.utils.file_ops import delete_processed_files
     
     config = get_config(ctx.obj.get('config_path'))
     logger = get_logger()
     db = Database(config.storage.database_path, output_base_dir=config.storage.output_dir)
+    
+    if include_source and not records:
+        click.echo("错误: --include-source 需配合 --records 使用", err=True)
+        return
     
     # 收集视频
     if clean_all:
@@ -446,7 +455,16 @@ def clean(ctx, video_id, clean_all, yes):
         click.echo("没有待清理的视频")
         return
     
-    click.echo(f"将清理 {len(videos)} 个视频的处理产物（保留原始下载文件）")
+    # 描述操作
+    if records and include_source:
+        action = "删除记录+所有文件（含原始下载）"
+    elif records:
+        action = "删除记录+处理产物（保留原始下载文件）"
+    else:
+        action = "清理处理产物（保留原始下载文件和记录）"
+    
+    click.echo(f"操作: {action}")
+    click.echo(f"视频数: {len(videos)}")
     if not yes and not click.confirm("确认?"):
         click.echo("已取消")
         return
@@ -456,64 +474,25 @@ def clean(ctx, video_id, clean_all, yes):
         if v.output_dir:
             output_dir = Path(v.output_dir)
             if output_dir.exists():
-                deleted = delete_processed_files(output_dir)
-                if deleted:
-                    total_deleted += len(deleted)
-                    click.echo(f"  {v.id[:12]}: 删除 {len(deleted)} 个文件")
-    
-    click.echo(f"\n清理完成，共删除 {total_deleted} 个处理产物")
-
-
-@cli.command('delete')
-@click.option('--video-id', '-v', multiple=True, help='视频ID（可多次指定）')
-@click.option('--delete-files', is_flag=True, help='同时删除所有文件（包括原始下载）')
-@click.option('--yes', '-y', is_flag=True, help='跳过确认')
-@click.pass_context
-def delete_video(ctx, video_id, delete_files, yes):
-    """删除视频记录（默认保留原始下载文件）"""
-    import shutil
-    from vat.utils.file_ops import delete_processed_files
-    
-    config = get_config(ctx.obj.get('config_path'))
-    logger = get_logger()
-    db = Database(config.storage.database_path, output_base_dir=config.storage.output_dir)
-    
-    if not video_id:
-        click.echo("错误: 请指定 --video-id", err=True)
-        return
-    
-    videos = []
-    for vid in video_id:
-        v = db.get_video(vid)
-        if v:
-            videos.append(v)
-        else:
-            click.echo(f"警告: 视频不存在: {vid}", err=True)
-    
-    if not videos:
-        click.echo("没有待删除的视频")
-        return
-    
-    action = "删除记录+所有文件" if delete_files else "删除记录+处理产物（保留原始下载）"
-    click.echo(f"将{action}，共 {len(videos)} 个视频")
-    if not yes and not click.confirm("确认?"):
-        click.echo("已取消")
-        return
-    
-    for v in videos:
-        if v.output_dir:
-            output_dir = Path(v.output_dir)
-            if output_dir.exists():
-                if delete_files:
+                if records and include_source:
                     shutil.rmtree(output_dir)
+                    total_deleted += 1
                 else:
-                    delete_processed_files(output_dir)
+                    deleted = delete_processed_files(output_dir)
+                    if deleted:
+                        total_deleted += len(deleted)
+                        if not records:
+                            click.echo(f"  {v.id[:12]}: 删除 {len(deleted)} 个文件")
         
-        db.delete_video(v.id)
-        title = v.title[:30] if v.title else v.id
-        click.echo(f"  ✓ 已删除: {title}")
+        if records:
+            db.delete_video(v.id)
+            title = v.title[:30] if v.title else v.id
+            click.echo(f"  ✓ 已删除: {title}")
     
-    click.echo(f"\n删除完成")
+    if records:
+        click.echo(f"\n删除完成，共处理 {len(videos)} 个视频")
+    else:
+        click.echo(f"\n清理完成，共删除 {total_deleted} 个处理产物")
 
 
 # ==================== 新增命令：process (支持细粒度阶段) ====================
@@ -801,7 +780,7 @@ def process(ctx, video_id, process_all, playlist, stages, gpu, force, dry_run, c
     else:
         logger.info("处理完成，全部成功")
     
-    # ========== 批量上传后自动 season-sync ==========
+    # ========== 批量上传后自动 upload sync ==========
     # 条件：stages 包含 upload 且有 playlist 上下文
     has_upload = any(s == TaskStep.UPLOAD for s in target_steps)
     if has_upload and playlist:
@@ -875,7 +854,7 @@ def _auto_season_sync(config, db, logger, playlist_id: str, retry_delay_minutes:
         else:
             logger.warning(
                 f"Season sync 重试后仍有 {result2['failed']} 个视频失败，"
-                f"请稍后手动运行: vat season-sync -p {playlist_id}"
+                f"请稍后手动运行: vat upload sync -p {playlist_id}"
             )
     except Exception as e:
         logger.error(f"Season sync 异常: {e}")
@@ -1281,108 +1260,32 @@ def playlist_delete(ctx, playlist_id, delete_videos, yes):
 
 
 # =============================================================================
-# 合集同步命令
+# 上传命令组
 # =============================================================================
 
-@cli.command('season-sync')
-@click.option('--playlist', '-p', required=True, help='Playlist ID（必须指定）')
-@click.option('--retry-delay', default=30, type=int, help='失败后自动重试的等待时间（分钟），0=不自动重试')
-@click.pass_context
-def season_sync_cmd(ctx, playlist, retry_delay):
-    """将已上传但未入集的视频批量添加到B站合集并排序
-    
-    查找指定 playlist 中所有已上传到B站（有 aid）但尚未添加到目标合集的视频，
-    批量执行 add_to_season，然后对合集按 #数字 自动排序。
-    
-    示例:
-    
-      # 立即同步
-      vat season-sync -p PLAYLIST_ID
-      
-      # 同步，失败后等60分钟自动重试
-      vat season-sync -p PLAYLIST_ID --retry-delay 60
-      
-      # 同步，不自动重试
-      vat season-sync -p PLAYLIST_ID --retry-delay 0
-    """
-    config = get_config(ctx.obj.get('config_path'))
-    logger = get_logger()
-    db = Database(config.storage.database_path, output_base_dir=config.storage.output_dir)
-    
-    # 验证 playlist 存在
-    playlist_service = PlaylistService(db)
-    pl = playlist_service.get_playlist(playlist)
-    if not pl:
-        click.echo(f"错误: Playlist 不存在: {playlist}", err=True)
-        return
-    
-    click.echo(f"Playlist: {pl.title} ({playlist})")
-    
-    try:
-        from ..uploaders.bilibili import BilibiliUploader, season_sync, BILIUP_AVAILABLE
-        
-        if not BILIUP_AVAILABLE:
-            click.echo("错误: biliup 库不可用，请安装: pip install biliup", err=True)
-            return
-        
-        bilibili_config = config.uploader.bilibili
-        project_root = Path(__file__).parent.parent.parent
-        cookies_file = project_root / bilibili_config.cookies_file
-        
-        uploader = BilibiliUploader(
-            cookies_file=str(cookies_file),
-            line=bilibili_config.line,
-            threads=bilibili_config.threads
-        )
-        
-        # 第一次同步
-        click.echo("开始 season-sync...")
-        result = season_sync(db, uploader, playlist)
-        
-        click.echo(f"\n结果: {result['success']} 成功, {result['failed']} 失败, 共 {result['total']} 个")
-        
-        if result['failed'] > 0 and retry_delay > 0:
-            click.echo(f"\n有 {result['failed']} 个视频同步失败，{retry_delay} 分钟后自动重试...")
-            import time
-            time.sleep(retry_delay * 60)
-            
-            # 重试（重新创建 uploader）
-            uploader2 = BilibiliUploader(
-                cookies_file=str(cookies_file),
-                line=bilibili_config.line,
-                threads=bilibili_config.threads
-            )
-            click.echo("开始重试...")
-            result2 = season_sync(db, uploader2, playlist)
-            click.echo(f"重试结果: {result2['success']} 成功, {result2['failed']} 失败")
-            
-            if result2['failed'] > 0:
-                click.echo(f"仍有 {result2['failed']} 个视频失败，请稍后再次运行此命令")
-        elif result['failed'] > 0:
-            click.echo(f"有 {result['failed']} 个视频失败，请稍后重新运行: vat season-sync -p {playlist}")
-        
-        if result['total'] == 0:
-            click.echo("没有待同步的视频")
-    except Exception as e:
-        click.echo(f"错误: {e}", err=True)
-        logger.debug(f"season-sync 异常: {e}", exc_info=True)
+@cli.group()
+def upload():
+    """上传相关命令（单视频上传、批量上传、合集同步等）"""
+    pass
 
 
-# =============================================================================
-# 上传命令
-# =============================================================================
-
-@cli.command()
+@upload.command('video')
 @click.argument('video_id')
 @click.option('--platform', '-p', default='bilibili', help='上传平台 (目前仅支持 bilibili)')
 @click.option('--playlist', 'upload_playlist_id', default=None, help='指定上传上下文的 Playlist ID（视频属于多个 playlist 时用于确定正确的上下文）')
 @click.option('--season', '-s', type=int, help='添加到合集ID (上传后自动添加)')
 @click.option('--dry-run', is_flag=True, help='仅预览，不实际上传')
 @click.pass_context
-def upload(ctx, video_id, upload_playlist_id, platform, season, dry_run):
-    """上传视频到指定平台
+def upload_video(ctx, video_id, upload_playlist_id, platform, season, dry_run):
+    """上传单个视频到指定平台
     
     VIDEO_ID: 视频ID
+    
+    示例:
+    
+      vat upload video VIDEO_ID
+      vat upload video VIDEO_ID --season 7376902
+      vat upload video VIDEO_ID --playlist PLAYLIST_ID --season 7376902
     """
     config = get_config(ctx.obj.get('config_path'))
     db = Database(config.storage.database_path, output_base_dir=config.storage.output_dir)
@@ -1540,11 +1443,11 @@ def upload(ctx, video_id, upload_playlist_id, platform, season, dry_run):
                             click.echo(f"✓ 已添加到合集")
                             season_added = True
                         else:
-                            click.echo(f"⚠ 添加到合集失败（视频可能尚未索引），请稍后运行 season-sync", err=True)
+                            click.echo(f"⚠ 添加到合集失败（视频可能尚未索引），请稍后运行 vat upload sync", err=True)
                     except Exception as e:
-                        click.echo(f"⚠ 添加到合集异常: {e}，请稍后运行 season-sync", err=True)
+                        click.echo(f"⚠ 添加到合集异常: {e}，请稍后运行 vat upload sync", err=True)
                 else:
-                    click.echo(f"⚠ 上传响应中无 AV号，请稍后运行 season-sync", err=True)
+                    click.echo(f"⚠ 上传响应中无 AV号，请稍后运行 vat upload sync", err=True)
                 updated_metadata['bilibili_season_added'] = season_added
             
             db.update_video(video_id, metadata=updated_metadata)
@@ -1552,6 +1455,392 @@ def upload(ctx, video_id, upload_playlist_id, platform, season, dry_run):
             click.echo(f"✗ 上传失败: {result.error}", err=True)
     else:
         click.echo(f"✗ 不支持的平台: {platform}", err=True)
+
+
+@upload.command('sync')
+@click.option('--playlist', '-p', required=True, help='Playlist ID（必须指定）')
+@click.option('--retry-delay', default=30, type=int, help='失败后自动重试的等待时间（分钟），0=不自动重试')
+@click.pass_context
+def upload_sync(ctx, playlist, retry_delay):
+    """将已上传但未入集的视频批量添加到B站合集并排序
+    
+    查找指定 playlist 中所有已上传到B站（有 aid）但尚未添加到目标合集的视频，
+    批量执行 add_to_season，然后对合集按 #数字 自动排序。
+    
+    示例:
+    
+      # 立即同步
+      vat upload sync -p PLAYLIST_ID
+      
+      # 同步，失败后等60分钟自动重试
+      vat upload sync -p PLAYLIST_ID --retry-delay 60
+      
+      # 同步，不自动重试
+      vat upload sync -p PLAYLIST_ID --retry-delay 0
+    """
+    config = get_config(ctx.obj.get('config_path'))
+    logger = get_logger()
+    db = Database(config.storage.database_path, output_base_dir=config.storage.output_dir)
+    
+    # 验证 playlist 存在
+    playlist_service = PlaylistService(db)
+    pl = playlist_service.get_playlist(playlist)
+    if not pl:
+        click.echo(f"错误: Playlist 不存在: {playlist}", err=True)
+        return
+    
+    click.echo(f"Playlist: {pl.title} ({playlist})")
+    
+    try:
+        from ..uploaders.bilibili import BilibiliUploader, season_sync, BILIUP_AVAILABLE
+        
+        if not BILIUP_AVAILABLE:
+            click.echo("错误: biliup 库不可用，请安装: pip install biliup", err=True)
+            return
+        
+        bilibili_config = config.uploader.bilibili
+        project_root = Path(__file__).parent.parent.parent
+        cookies_file = project_root / bilibili_config.cookies_file
+        
+        uploader = BilibiliUploader(
+            cookies_file=str(cookies_file),
+            line=bilibili_config.line,
+            threads=bilibili_config.threads
+        )
+        
+        # 第一次同步
+        click.echo("开始 upload sync...")
+        result = season_sync(db, uploader, playlist)
+        
+        click.echo(f"\n结果: {result['success']} 成功, {result['failed']} 失败, 共 {result['total']} 个")
+        
+        if result['failed'] > 0 and retry_delay > 0:
+            click.echo(f"\n有 {result['failed']} 个视频同步失败，{retry_delay} 分钟后自动重试...")
+            import time
+            time.sleep(retry_delay * 60)
+            
+            # 重试（重新创建 uploader）
+            uploader2 = BilibiliUploader(
+                cookies_file=str(cookies_file),
+                line=bilibili_config.line,
+                threads=bilibili_config.threads
+            )
+            click.echo("开始重试...")
+            result2 = season_sync(db, uploader2, playlist)
+            click.echo(f"重试结果: {result2['success']} 成功, {result2['failed']} 失败")
+            
+            if result2['failed'] > 0:
+                click.echo(f"仍有 {result2['failed']} 个视频失败，请稍后再次运行此命令")
+        elif result['failed'] > 0:
+            click.echo(f"有 {result['failed']} 个视频失败，请稍后重新运行: vat upload sync -p {playlist}")
+        
+        if result['total'] == 0:
+            click.echo("没有待同步的视频")
+    except Exception as e:
+        click.echo(f"错误: {e}", err=True)
+        logger.debug(f"upload sync 异常: {e}", exc_info=True)
+
+
+@upload.command('update-info')
+@click.option('--playlist', '-p', required=True, help='Playlist ID（必须指定）')
+@click.option('--dry-run', is_flag=True, help='仅预览，不实际修改')
+@click.option('--yes', '-y', is_flag=True, help='跳过确认')
+@click.pass_context
+def upload_update_info(ctx, playlist, dry_run, yes):
+    """批量更新已上传视频的标题和简介（重新渲染模板）
+    
+    读取 playlist 中所有已上传到B站的视频，使用当前模板和翻译结果
+    重新渲染标题/简介，然后调用B站 API 更新。
+    
+    适用场景：修改了翻译提示词并重新翻译后，需要同步更新B站视频信息。
+    
+    示例:
+    
+      vat upload update-info -p PLAYLIST_ID --dry-run
+      vat upload update-info -p PLAYLIST_ID -y
+    """
+    config = get_config(ctx.obj.get('config_path'))
+    logger = get_logger()
+    db = Database(config.storage.database_path, output_base_dir=config.storage.output_dir)
+    
+    from ..uploaders.template import render_upload_metadata
+    
+    playlist_service = PlaylistService(db)
+    pl = playlist_service.get_playlist(playlist)
+    if not pl:
+        click.echo(f"错误: Playlist 不存在: {playlist}", err=True)
+        return
+    
+    # 获取模板配置
+    bilibili_config = config.uploader.bilibili
+    templates = {}
+    if bilibili_config.templates:
+        templates = {
+            'title': bilibili_config.templates.title,
+            'description': bilibili_config.templates.description,
+            'custom_vars': bilibili_config.templates.custom_vars,
+        }
+    
+    pl_upload_config = (pl.metadata or {}).get('upload_config', {})
+    
+    # 筛选已上传的视频
+    videos = playlist_service.get_playlist_videos(playlist)
+    uploaded = []
+    for v in videos:
+        meta = v.metadata or {}
+        aid = meta.get('bilibili_aid')
+        if aid:
+            uploaded.append((v, int(aid)))
+    
+    if not uploaded:
+        click.echo("没有已上传到B站的视频")
+        return
+    
+    click.echo(f"Playlist: {pl.title}")
+    click.echo(f"已上传视频: {len(uploaded)} 个")
+    
+    # 预览模式：显示新旧对比
+    update_list = []
+    for v, aid in uploaded:
+        pv_info = db.get_playlist_video_info(playlist, v.id)
+        upload_order_index = pv_info.get('upload_order_index', 0) if pv_info else 0
+        if not upload_order_index:
+            upload_order_index = (v.metadata or {}).get('upload_order_index', 0) or v.playlist_index or 0
+        
+        playlist_info = {
+            'name': pl.title,
+            'id': pl.id,
+            'index': upload_order_index,
+            'uploader_name': pl_upload_config.get('uploader_name', ''),
+        }
+        rendered = render_upload_metadata(v, templates, playlist_info)
+        new_title = rendered['title'][:80]
+        new_desc = rendered['description'][:2000]
+        
+        # 获取翻译结果中的标签和分区
+        meta = v.metadata or {}
+        translated = meta.get('translated', {})
+        new_tags = translated.get('tags', None)
+        new_tid = translated.get('recommended_tid', None)
+        
+        update_list.append({
+            'video': v,
+            'aid': aid,
+            'new_title': new_title,
+            'new_desc': new_desc,
+            'new_tags': new_tags,
+            'new_tid': new_tid,
+        })
+    
+    if dry_run:
+        click.echo("\n--dry-run 模式，预览更新:")
+        for i, item in enumerate(update_list, 1):
+            click.echo(f"\n  [{i}] av{item['aid']}")
+            click.echo(f"    新标题: {item['new_title'][:60]}")
+            click.echo(f"    新简介: {item['new_desc'][:80]}...")
+        click.echo(f"\n共 {len(update_list)} 个视频待更新")
+        return
+    
+    if not yes and not click.confirm(f"\n确认更新 {len(update_list)} 个视频的标题和简介?"):
+        click.echo("已取消")
+        return
+    
+    # 执行更新
+    try:
+        from ..uploaders.bilibili import BilibiliUploader
+        
+        project_root = Path(__file__).parent.parent.parent
+        cookies_file = project_root / bilibili_config.cookies_file
+        uploader = BilibiliUploader(
+            cookies_file=str(cookies_file),
+            line=bilibili_config.line,
+            threads=bilibili_config.threads
+        )
+        
+        success = 0
+        failed = 0
+        for i, item in enumerate(update_list, 1):
+            v = item['video']
+            title_short = item['new_title'][:40]
+            click.echo(f"[{i}/{len(update_list)}] av{item['aid']}: {title_short}...")
+            
+            if uploader.edit_video_info(
+                aid=item['aid'],
+                title=item['new_title'],
+                desc=item['new_desc'],
+                tags=item['new_tags'],
+                tid=item['new_tid'],
+            ):
+                success += 1
+                click.echo(f"  ✓ 已更新")
+            else:
+                failed += 1
+                click.echo(f"  ✗ 更新失败", err=True)
+            
+            # 简单限速，避免触发B站反爬
+            import time
+            time.sleep(1)
+        
+        click.echo(f"\n完成: {success} 成功, {failed} 失败")
+    except Exception as e:
+        click.echo(f"错误: {e}", err=True)
+        logger.debug(f"update-info 异常: {e}", exc_info=True)
+
+
+@upload.command('sync-db')
+@click.option('--season', '-s', required=True, type=int, help='B站合集ID')
+@click.option('--playlist', '-p', required=True, help='对应的 Playlist ID')
+@click.option('--dry-run', is_flag=True, help='仅预览匹配结果，不实际修改DB')
+@click.pass_context
+def upload_sync_db(ctx, season, playlist, dry_run):
+    """将B站合集中的视频信息同步回数据库
+    
+    从B站合集获取所有视频的 aid/bvid，通过转载来源（source URL）匹配到
+    数据库中的视频记录，补全 bilibili_aid、bilibili_bvid、
+    bilibili_target_season_id、bilibili_season_added 等字段。
+    
+    适用场景：数据库重构后，已上传视频的B站信息丢失，需要重新同步。
+    
+    示例:
+    
+      vat upload sync-db -s 7376902 -p PLAYLIST_ID --dry-run
+      vat upload sync-db -s 7376902 -p PLAYLIST_ID
+    """
+    config = get_config(ctx.obj.get('config_path'))
+    logger = get_logger()
+    db = Database(config.storage.database_path, output_base_dir=config.storage.output_dir)
+    
+    playlist_service = PlaylistService(db)
+    pl = playlist_service.get_playlist(playlist)
+    if not pl:
+        click.echo(f"错误: Playlist 不存在: {playlist}", err=True)
+        return
+    
+    try:
+        from ..uploaders.bilibili import BilibiliUploader
+        
+        bilibili_config = config.uploader.bilibili
+        project_root = Path(__file__).parent.parent.parent
+        cookies_file = project_root / bilibili_config.cookies_file
+        uploader = BilibiliUploader(
+            cookies_file=str(cookies_file),
+            line=bilibili_config.line,
+            threads=bilibili_config.threads
+        )
+        
+        # 1. 获取合集中的所有视频
+        click.echo(f"获取合集 {season} 的视频列表...")
+        season_info = uploader.get_season_episodes(season)
+        if not season_info:
+            click.echo("错误: 无法获取合集信息", err=True)
+            return
+        
+        episodes = season_info.get('episodes', [])
+        click.echo(f"合集中共 {len(episodes)} 个视频")
+        
+        # 2. 获取 playlist 中的视频，建立 source_url → video 映射
+        pl_videos = playlist_service.get_playlist_videos(playlist)
+        url_to_video = {}
+        aid_to_video = {}
+        for v in pl_videos:
+            if v.source_url:
+                # 标准化 YouTube URL（去除多余参数）
+                normalized = v.source_url.split('&')[0] if '&' in v.source_url else v.source_url
+                url_to_video[normalized] = v
+                url_to_video[v.source_url] = v
+            # 如果 DB 中已有 bilibili_aid，也建立映射
+            meta = v.metadata or {}
+            if meta.get('bilibili_aid'):
+                aid_to_video[int(meta['bilibili_aid'])] = v
+        
+        # 3. 建立 video_id → video 映射（从 source_url 提取 YouTube video ID）
+        import re
+        vid_to_video = {}
+        for v in pl_videos:
+            if v.source_url:
+                yt_match = re.search(r'[?&]v=([a-zA-Z0-9_-]+)', v.source_url)
+                if yt_match:
+                    vid_to_video[yt_match.group(1)] = v
+            # 也用 video.id 本身（通常就是 YouTube video ID）
+            vid_to_video[v.id] = v
+        
+        # 4. 对每个 episode，尝试匹配 DB 记录
+        matched = []
+        unmatched = []
+        
+        for ep in episodes:
+            aid = ep.get('aid')
+            bvid_ep = ep.get('bvid', '')
+            
+            # 方法1: aid 直接匹配（DB 中已有 bilibili_aid 的情况）
+            if aid in aid_to_video:
+                matched.append((ep, aid_to_video[aid], 'aid'))
+                continue
+            
+            # 方法2: 从B站视频描述中提取 YouTube video ID 匹配
+            # 公共 API 的 desc 中包含上传模板渲染的 source_url
+            detail = uploader.get_video_detail(aid)
+            if detail:
+                desc = detail.get('desc', '')
+                yt_match = re.search(r'youtube\.com/watch\?v=([a-zA-Z0-9_-]+)', desc)
+                if yt_match:
+                    yt_vid = yt_match.group(1)
+                    if yt_vid in vid_to_video:
+                        matched.append((ep, vid_to_video[yt_vid], 'desc'))
+                        continue
+            
+            unmatched.append(ep)
+            import time
+            time.sleep(0.3)  # 限速
+        
+        # 4. 显示匹配结果
+        click.echo(f"\n匹配结果: {len(matched)} 匹配, {len(unmatched)} 未匹配")
+        
+        if matched:
+            click.echo("\n已匹配:")
+            for ep, v, method in matched:
+                meta = v.metadata or {}
+                has_info = '已有' if meta.get('bilibili_aid') else '缺失'
+                click.echo(f"  av{ep['aid']} → {v.id[:12]} ({v.title[:30] if v.title else '-'}) [{method}] bilibili信息:{has_info}")
+        
+        if unmatched:
+            click.echo("\n未匹配（需手动处理）:")
+            for ep in unmatched:
+                click.echo(f"  av{ep['aid']}: {ep.get('title', '?')[:40]}")
+        
+        if dry_run:
+            click.echo("\n--dry-run 模式，不修改数据库")
+            return
+        
+        # 5. 更新 DB
+        updated = 0
+        for ep, v, method in matched:
+            meta = dict(v.metadata) if v.metadata else {}
+            aid = ep['aid']
+            
+            # 获取 bvid（如果还没有）
+            bvid = meta.get('bilibili_bvid', '')
+            if not bvid:
+                detail = uploader.get_video_detail(aid)
+                if detail:
+                    bvid = detail.get('bvid', '')
+            
+            meta['bilibili_aid'] = aid
+            if bvid:
+                meta['bilibili_bvid'] = bvid
+                meta['bilibili_url'] = f"https://www.bilibili.com/video/{bvid}"
+            meta['bilibili_target_season_id'] = season
+            meta['bilibili_season_added'] = True
+            
+            db.update_video(v.id, metadata=meta)
+            updated += 1
+        
+        click.echo(f"\n✓ 已更新 {updated} 个视频的数据库记录")
+        
+    except Exception as e:
+        click.echo(f"错误: {e}", err=True)
+        import traceback
+        logger.debug(traceback.format_exc())
 
 
 # =============================================================================
@@ -1602,7 +1891,7 @@ def bilibili_list_seasons(ctx):
     headers = ['ID', '名称', '视频数']
     click.echo(tabulate(table_data, headers=headers, tablefmt='simple'))
     click.echo()
-    click.echo("使用示例: vat upload VIDEO_ID --season SEASON_ID")
+    click.echo("使用示例: vat upload video VIDEO_ID --season SEASON_ID")
 
 
 @bilibili.command('create-season')
@@ -1705,7 +1994,7 @@ def bilibili_status(ctx):
         click.echo("  运行: vat bilibili login")
 
 
-@cli.command('upload-playlist')
+@upload.command('playlist')
 @click.argument('playlist_id')
 @click.option('--platform', '-p', default='bilibili', help='上传平台')
 @click.option('--season', '-s', type=int, help='添加到合集ID')
@@ -1716,6 +2005,12 @@ def upload_playlist(ctx, playlist_id, platform, season, limit, dry_run):
     """批量上传播放列表中的视频
     
     PLAYLIST_ID: 播放列表ID
+    
+    示例:
+    
+      vat upload playlist PLAYLIST_ID
+      vat upload playlist PLAYLIST_ID --season 7376902
+      vat upload playlist PLAYLIST_ID --limit 5 --dry-run
     """
     config = get_config(ctx.obj.get('config_path'))
     db = Database(config.storage.database_path, output_base_dir=config.storage.output_dir)
@@ -1764,7 +2059,7 @@ def upload_playlist(ctx, playlist_id, platform, season, limit, dry_run):
     success_count = 0
     for i, v in enumerate(ready_videos, 1):
         click.echo(f"\n[{i}/{len(ready_videos)}] 上传: {v.title[:40]}...")
-        ctx.invoke(upload, video_id=v.id, upload_playlist_id=playlist_id, platform=platform, season=season, dry_run=False)
+        ctx.invoke(upload_video, video_id=v.id, upload_playlist_id=playlist_id, platform=platform, season=season, dry_run=False)
         success_count += 1
     
     click.echo(f"\n完成: 成功上传 {success_count}/{len(ready_videos)} 个视频")

@@ -293,12 +293,17 @@ vat status
 | `vat asr -v ID` | 仅语音识别 |
 | `vat translate -v ID` | 仅翻译 |
 | `vat embed -v ID` | 仅嵌入字幕 |
-| `vat upload VIDEO_ID` | 上传到 B 站 |
+| `vat upload video VIDEO_ID` | 上传到 B 站 |
+| `vat upload playlist PLAYLIST_ID` | 批量上传播放列表 |
+| `vat upload sync -p PLAYLIST_ID` | 合集同步（添加+排序） |
+| `vat upload update-info -p PLAYLIST_ID` | 批量更新B站视频标题/简介 |
+| `vat upload sync-db -s SEASON -p PLAYLIST` | 同步B站合集信息回数据库 |
 | `vat process -v ID -s upload --upload-cron "0 12,18 * * *"` | 定时上传（每天 12/18 点） |
 | `vat playlist sync URL` | 同步播放列表 |
 | `vat playlist refresh ID` | 刷新视频信息（补全缺失的封面、时长等） |
 | `vat status` | 查看处理状态 |
 | `vat clean -v ID` | 清理中间产物 |
+| `vat clean -v ID --records` | 清理产物+删除记录 |
 | `vat bilibili login` | B 站登录获取 Cookie |
 
 ### 输出文件

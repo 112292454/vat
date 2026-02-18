@@ -1936,7 +1936,7 @@ class VideoProcessor:
                 updated_metadata['bilibili_target_season_id'] = effective_season_id
                 updated_metadata['bilibili_season_added'] = False
                 
-                # 尝试一次添加到合集（不阻塞重试，失败由 season-sync 处理）
+                # 尝试一次添加到合集（不阻塞重试，失败由 upload sync 处理）
                 aid = result.aid if result.aid else None
                 if aid:
                     self.progress_callback(f"尝试添加到合集 {effective_season_id} (AV号: {aid})...")
@@ -1946,12 +1946,12 @@ class VideoProcessor:
                             updated_metadata['bilibili_season_added'] = True
                         else:
                             self.progress_callback(
-                                "⚠ 添加到合集失败（视频可能尚未索引），将在全部上传后通过 season-sync 重试"
+                                "⚠ 添加到合集失败（视频可能尚未索引），将在全部上传后通过 upload sync 重试"
                             )
                     except Exception as e:
-                        self.progress_callback(f"⚠ 添加到合集异常: {e}，将通过 season-sync 重试")
+                        self.progress_callback(f"⚠ 添加到合集异常: {e}，将通过 upload sync 重试")
                 else:
-                    self.progress_callback("⚠ 上传响应中无 AV号，将通过 season-sync 重试")
+                    self.progress_callback("⚠ 上传响应中无 AV号，将通过 upload sync 重试")
             
             self.db.update_video(self.video.id, metadata=updated_metadata)
             

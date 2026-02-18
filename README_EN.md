@@ -276,12 +276,17 @@ vat status
 | `vat asr -v ID` | ASR only |
 | `vat translate -v ID` | Translation only |
 | `vat embed -v ID` | Subtitle embedding only |
-| `vat upload VIDEO_ID` | Upload to Bilibili |
+| `vat upload video VIDEO_ID` | Upload to Bilibili |
+| `vat upload playlist PLAYLIST_ID` | Batch upload playlist |
+| `vat upload sync -p PLAYLIST_ID` | Season sync (add + sort) |
+| `vat upload update-info -p PLAYLIST_ID` | Batch update Bilibili video title/desc |
+| `vat upload sync-db -s SEASON -p PLAYLIST` | Sync Bilibili season info back to DB |
 | `vat process -v ID -s upload --upload-cron "0 12,18 * * *"` | Scheduled upload (daily 12/18) |
 | `vat playlist sync URL` | Sync playlist |
 | `vat playlist refresh ID` | Refresh video info (fill missing covers, duration, etc.) |
 | `vat status` | View processing status |
 | `vat clean -v ID` | Clean intermediate files |
+| `vat clean -v ID --records` | Clean files + delete records |
 | `vat bilibili login` | Bilibili login for cookies |
 
 ### Output Files

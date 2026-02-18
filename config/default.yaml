@@ -49,8 +49,8 @@ downloader:
   
   # 视频信息翻译（下载/同步时翻译标题、描述、标签，推荐B站分区，需要一定润色能力）
   # 留空则继承全局 llm 配置
-  # video_info_translate:
-  #   model: "gpt-4o-mini"                      # 若需要润色能力，可用稍好的模型
+  video_info_translate:
+    model: "gemini-3-pro-preview"                      # 若需要润色能力，可用稍好的模型
   #   api_key: "${VAT_RESELLER_APIKEY}"         # 中转站 API Key
   #   base_url: "https://api.videocaptioner.cn" # 中转站 Base URL
 
@@ -290,7 +290,7 @@ proxy:
   # optimize: ""                            # 优化 LLM（fallback: translate → llm → http_proxy）
   # split: ""                               # 断句 LLM
   # scene_identify: ""                      # 场景识别 LLM
-  # video_info_translate: ""                # 视频信息翻译 LLM
+  video_info_translate: "http://localhost:7990"                # 视频信息翻译 LLM
 
 # =============================================================================
 # Web UI 配置

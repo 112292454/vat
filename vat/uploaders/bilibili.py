@@ -218,9 +218,12 @@ class BilibiliUploader(BaseUploader):
         Returns:
             UploadResult: 上传结果
         """
+        title = metadata.get('title')
+        if not title:
+            raise ValueError(f"upload_with_metadata: metadata 中缺少 title，不能用文件名 '{video_path.stem}' 替代")
         return self.upload(
             video_path=video_path,
-            title=metadata.get('title', video_path.stem),
+            title=title,
             description=metadata.get('desc', ''),
             tid=metadata.get('tid', 21),
             tags=metadata.get('tags', [])
@@ -385,6 +388,7 @@ class BilibiliUploader(BaseUploader):
         """
         session = self._get_authenticated_session()
         bili_jct = self.cookie_data.get('bili_jct', '')
+        assert bili_jct, "bili_jct 为空，无法调用需要 CSRF 的 API（cookie 未正确加载？）"
         
         try:
             # 1. 获取 section_id（合集下的分区ID）
@@ -412,8 +416,13 @@ class BilibiliUploader(BaseUploader):
                 return False
             
             pages = view_data['data'].get('pages', [])
-            cid = pages[0]['cid'] if pages else 0
+            if not pages:
+                logger.error(f"视频 av{aid} 的 pages 为空，无法获取 cid")
+                return False
+            cid = pages[0]['cid']
             title = view_data['data'].get('title', '')
+            if not title:
+                logger.warning(f"视频 av{aid} 的 title 为空")
             
             # 3. 调用 episodes/add（经验证的正确格式）
             payload = {
@@ -463,6 +472,7 @@ class BilibiliUploader(BaseUploader):
         """
         session = self._get_authenticated_session()
         bili_jct = self.cookie_data.get('bili_jct', '')
+        assert bili_jct, "bili_jct 为空，无法调用需要 CSRF 的 API（cookie 未正确加载？）"
         
         try:
             resp = session.post(
@@ -582,6 +592,7 @@ class BilibiliUploader(BaseUploader):
         """
         session = self._get_authenticated_session()
         bili_jct = self.cookie_data.get('bili_jct', '')
+        assert bili_jct, "bili_jct 为空，无法调用需要 CSRF 的 API（cookie 未正确加载？）"
         
         try:
             # 获取合集视频列表，建立 aid → episode_id 映射
@@ -648,6 +659,7 @@ class BilibiliUploader(BaseUploader):
         """
         session = self._get_authenticated_session()
         bili_jct = self.cookie_data.get('bili_jct', '')
+        assert bili_jct, "bili_jct 为空，无法调用需要 CSRF 的 API（cookie 未正确加载？）"
         
         try:
             # 获取合集当前状态
@@ -804,6 +816,7 @@ class BilibiliUploader(BaseUploader):
         """
         session = self._get_authenticated_session()
         bili_jct = self.cookie_data.get('bili_jct', '')
+        assert bili_jct, "bili_jct 为空，无法调用需要 CSRF 的 API（cookie 未正确加载？）"
         
         try:
             resp = session.post(

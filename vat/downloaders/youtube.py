@@ -234,10 +234,14 @@ class YouTubeDownloader(BaseDownloader):
         if not video_id:
             raise RuntimeError(f"视频信息中缺少ID: {url}")
         
-        title = info.get('title', 'Unknown')
+        title = info.get('title', '')
+        if not title:
+            raise RuntimeError(f"yt-dlp 未返回视频标题: {url}")
         description = info.get('description', '')
         duration = info.get('duration', 0)
         uploader = info.get('uploader', '')
+        if not uploader:
+            logger.warning(f"yt-dlp 未返回 uploader: {url}，翻译质量可能受影响")
         upload_date = info.get('upload_date', '')
         
         # 记录可用字幕信息

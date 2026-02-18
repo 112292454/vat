@@ -1166,8 +1166,8 @@ class VideoProcessor:
             if scene_prompt:
                 self.progress_callback(f"使用场景{prompt_key}提示词: {scene_id}")
                 return f"{scene_prompt}\n\n{base_prompt}" if base_prompt else scene_prompt
-        except Exception:
-            pass
+        except Exception as e:
+            self.logger.debug(f"加载场景提示词失败 (scene={scene_id}, key={prompt_key}): {e}")
         
         return base_prompt
     
@@ -1797,6 +1797,14 @@ class VideoProcessor:
         rendered = render_upload_metadata(self.video, templates, playlist_info)
         title = rendered['title']
         description = rendered['description']
+        
+        # 校验：渲染后的标题必须包含有意义的翻译内容
+        # 如果翻译失败，translated_title 为空，标题可能只剩模板骨架
+        if not title or len(title.strip()) < 5:
+            raise UploadError(
+                f"渲染后的标题过短或为空: '{title}'，可能是翻译结果缺失。"
+                f"请检查视频 {self.video.id} 的 metadata['translated'] 是否存在。"
+            )
         
         # 获取翻译信息中的标签和分区
         metadata = self.video.metadata or {}

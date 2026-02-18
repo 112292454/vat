@@ -120,6 +120,11 @@ def build_upload_context(
     """
     metadata = video_record.metadata or {}
     translated = metadata.get('translated', {})
+    if not translated:
+        logger.warning(
+            f"视频 {video_record.id} 的 metadata 中没有 translated 字段，"
+            f"模板中翻译相关变量将为空（标题可能显示为空或原文）"
+        )
     
     # 从 metadata 或 _video_info 获取视频信息
     video_info = metadata.get('_video_info', {})
@@ -130,12 +135,14 @@ def build_upload_context(
     if original_date_raw and len(original_date_raw) == 8:
         try:
             original_date = f"{original_date_raw[:4]}-{original_date_raw[4:6]}-{original_date_raw[6:8]}"
-        except:
-            pass
+        except (ValueError, IndexError) as e:
+            logger.debug(f"解析上传日期失败 '{original_date_raw}': {e}")
     
     # 频道信息（从 metadata 获取，Video 模型没有这些字段）
     channel_id = metadata.get('channel_id', '') or video_info.get('channel_id', '')
     channel_name = metadata.get('uploader', '') or video_info.get('uploader', '')
+    if not channel_name:
+        logger.warning(f"视频 {video_record.id} 的 uploader/channel_name 为空，标题前缀将缺失")
     channel_url = f"https://www.youtube.com/channel/{channel_id}" if channel_id else ''
     
     # 时长
@@ -162,8 +169,8 @@ def build_upload_context(
         'original_date': original_date,
         'original_date_raw': original_date_raw,
         
-        # 翻译后的标题/简介
-        'translated_title': translated.get('title_optimized', '') or translated.get('title_translated', '') or video_record.title or '',
+        # 翻译后的标题/简介（不静默回退到原始标题——未翻译的日文标题发到B站不可接受）
+        'translated_title': translated.get('title_translated', '') or translated.get('title_optimized', ''),
         'translated_desc': translated.get('description_translated', '') or translated.get('description_optimized', ''),
         'tldr': translated.get('description_summary', '') or translated.get('tldr', ''),
         
@@ -177,7 +184,11 @@ def build_upload_context(
     # 播放列表信息
     if playlist_info:
         context['playlist_name'] = playlist_info.get('name', '')
-        context['playlist_index'] = playlist_info.get('index', 0)
+        playlist_index = playlist_info.get('index')
+        if playlist_index is None:
+            logger.warning(f"视频 {video_record.id} 的 playlist_info 中缺少 index 字段")
+            playlist_index = ''
+        context['playlist_index'] = playlist_index
         context['playlist_id'] = playlist_info.get('id', '')
         # 自定义主播名称（覆盖原频道名）
         custom_uploader = playlist_info.get('uploader_name', '')

@@ -26,6 +26,7 @@ class UploadResult:
     """上传结果"""
     success: bool
     bvid: str = ""
+    aid: int = 0
     error: str = ""
     
     def __bool__(self):
@@ -191,9 +192,11 @@ class BilibiliUploader(BaseUploader):
                 ret = bili.submit_web()
                 
                 if ret.get('code') == 0:
-                    bvid = ret.get('data', {}).get('bvid', '')
-                    logger.info(f"上传成功: {title}, BV号: {bvid}")
-                    return UploadResult(success=True, bvid=bvid)
+                    resp_data = ret.get('data', {})
+                    bvid = resp_data.get('bvid', '')
+                    aid = resp_data.get('aid', 0)
+                    logger.info(f"上传成功: {title}, BV号: {bvid}, AV号: {aid}")
+                    return UploadResult(success=True, bvid=bvid, aid=aid)
                 else:
                     error_msg = ret.get('message', '未知错误')
                     logger.error(f"上传失败: {error_msg}")

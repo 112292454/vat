@@ -569,13 +569,13 @@ class Config:
         # 下载器配置
         downloader_data = data['downloader']
         youtube = YouTubeDownloaderConfig(**downloader_data['youtube'])
-        vit_data = downloader_data.get('video_info_translate', {})
+        vit_data = downloader_data.get('video_info_translate') or {}
         vit_config = VideoInfoTranslateConfig(
             model=vit_data.get('model', ''),
             api_key=vit_data.get('api_key', ''),
             base_url=vit_data.get('base_url', ''),
         )
-        si_data = downloader_data.get('scene_identify', {})
+        si_data = downloader_data.get('scene_identify') or {}
         si_config = SceneIdentifyConfig(
             model=si_data.get('model', ''),
             api_key=si_data.get('api_key', ''),

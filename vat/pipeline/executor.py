@@ -1937,15 +1937,21 @@ class VideoProcessor:
             if effective_season_id:
                 self.progress_callback(f"尝试添加到合集 {effective_season_id}...")
                 try:
-                    # bvid_to_aid 对刚上传的视频可能查不到（B站后端索引延迟），重试几次
-                    import time
-                    aid = None
-                    for attempt in range(3):
-                        aid = uploader.bvid_to_aid(result.bvid)
-                        if aid:
-                            break
-                        self.progress_callback(f"等待视频索引... ({attempt + 1}/3)")
-                        time.sleep(5)
+                    # 优先使用上传响应中的 aid（B站 submit API 直接返回，无索引延迟）
+                    aid = result.aid if result.aid else None
+                    if aid:
+                        self.progress_callback(f"从上传响应获取 AV号: {aid}")
+                    else:
+                        # fallback: bvid_to_aid（刚上传的视频可能需要等待索引）
+                        self.logger.warning(f"上传响应中无 aid，回退到 bvid_to_aid 转换")
+                        import time
+                        for attempt in range(5):
+                            aid = uploader.bvid_to_aid(result.bvid)
+                            if aid:
+                                break
+                            delay = 10 * (attempt + 1)  # 10s, 20s, 30s, 40s, 50s
+                            self.progress_callback(f"等待视频索引... ({attempt + 1}/5, 等待{delay}s)")
+                            time.sleep(delay)
                     if aid and uploader.add_to_season(aid, effective_season_id):
                         self.progress_callback("✓ 已添加到合集")
                         updated_metadata['bilibili_season_id'] = effective_season_id

@@ -1352,7 +1352,20 @@ def upload(ctx, video_id, upload_playlist_id, platform, season, dry_run):
             # 添加到合集
             if season:
                 click.echo(f"\n添加到合集 {season}...")
-                aid = uploader.bvid_to_aid(result.bvid)
+                aid = result.aid if result.aid else None
+                if aid:
+                    click.echo(f"  从上传响应获取 AV号: {aid}")
+                else:
+                    # fallback: bvid_to_aid（刚上传的视频可能需要等待索引）
+                    click.echo("  上传响应中无 aid，尝试 bvid_to_aid 转换...")
+                    import time as _time
+                    for attempt in range(5):
+                        aid = uploader.bvid_to_aid(result.bvid)
+                        if aid:
+                            break
+                        delay = 10 * (attempt + 1)
+                        click.echo(f"  等待视频索引... ({attempt + 1}/5, 等待{delay}s)")
+                        _time.sleep(delay)
                 if aid:
                     if uploader.add_to_season(aid, season):
                         click.echo(f"✓ 已添加到合集")

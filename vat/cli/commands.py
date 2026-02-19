@@ -2324,9 +2324,11 @@ def _find_local_video_cli(aid: int, config, db, uploader) -> Optional[Path]:
             archive = detail.get('archive', {})
             bili_title = archive.get('title', '')
             # 从 source 字段和 desc 字段中搜索 YouTube URL
+            # 注意：创作中心 API 的 desc 截断到 250 字符，需补充公共 API 获取完整 desc
             source = archive.get('source', '')
             desc = archive.get('desc', '')
-            for text in [source, desc]:
+            full_desc = uploader._get_full_desc(aid)
+            for text in [source, full_desc or desc, desc]:
                 yt_match = re.search(r'youtube\.com/watch\?v=([a-zA-Z0-9_-]+)', text)
                 if yt_match:
                     yt_video_id = yt_match.group(1)

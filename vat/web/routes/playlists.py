@@ -1,9 +1,8 @@
 """
 Playlist 管理 API
 """
-import threading
 from typing import Optional, List, Dict, Any
-from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks
+from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 
 from vat.database import Database
@@ -120,71 +119,56 @@ async def get_playlist(
     }
 
 
-def _run_sync_in_background(
-    playlist_url: str,
-    playlist_id: str,
-    auto_add_videos: bool,
-    fetch_upload_dates: bool
-):
-    """后台执行同步任务"""
-    from vat.config import load_config
-    from vat.downloaders import YouTubeDownloader
-    
-    config = load_config()
-    db = Database(config.storage.database_path, output_base_dir=config.storage.output_dir)
-    downloader = YouTubeDownloader(
-        proxy=config.get_stage_proxy("downloader"),
-        video_format=config.downloader.youtube.format,
-        cookies_file=config.downloader.youtube.cookies_file,
-        remote_components=config.downloader.youtube.remote_components,
-    )
-    service = PlaylistService(db, downloader)
-    
-    _sync_status[playlist_id] = {"status": "syncing", "message": "正在同步..."}
-    
-    try:
-        result = service.sync_playlist(
-            playlist_url,
-            auto_add_videos=auto_add_videos,
-            fetch_upload_dates=fetch_upload_dates,
-            progress_callback=lambda msg: _update_sync_message(playlist_id, msg),
-            target_playlist_id=playlist_id
-        )
-        _sync_status[playlist_id] = {
-            "status": "completed",
-            "message": f"同步完成: 新增 {result.new_count} 个视频",
-            "result": {
-                "new_videos": result.new_count,
-                "existing_videos": result.existing_count,
-                "total_videos": result.total_videos
-            }
-        }
-    except Exception as e:
-        logger.error(f"同步 Playlist {playlist_id} 失败: {e}")
-        _sync_status[playlist_id] = {"status": "failed", "message": str(e)}
+def _get_job_manager():
+    """获取 JobManager 实例"""
+    from vat.web.routes.tasks import get_job_manager
+    return get_job_manager()
 
 
-def _update_sync_message(playlist_id: str, message: str):
-    """更新同步进度消息"""
-    if playlist_id in _sync_status:
-        _sync_status[playlist_id]["message"] = message
+def _query_job_status(status_dict: dict, playlist_id: str) -> dict:
+    """通用的 job 状态查询（从 status_dict 中查找 job_id 并查询 JobManager）"""
+    entry = status_dict.get(playlist_id)
+    if not entry or 'job_id' not in entry:
+        return {"status": "idle", "message": ""}
+    
+    jm = _get_job_manager()
+    job_id = entry['job_id']
+    jm.update_job_status(job_id)
+    job = jm.get_job(job_id)
+    
+    if not job:
+        return {"status": "idle", "message": ""}
+    
+    status_map = {
+        'pending': 'syncing',
+        'running': 'syncing',
+        'completed': 'completed',
+        'failed': 'failed',
+        'cancelled': 'cancelled',
+    }
+    
+    log_lines = jm.get_log_content(job_id, tail_lines=3)
+    last_msg = log_lines[-1] if log_lines else ''
+    
+    return {
+        "status": status_map.get(job.status.value, job.status.value),
+        "message": job.error or last_msg,
+        "job_id": job_id,
+    }
 
 
 @router.get("/{playlist_id}/sync-status")
 async def get_sync_status(playlist_id: str):
-    """获取同步状态"""
-    status = _sync_status.get(playlist_id, {"status": "idle", "message": ""})
-    return status
+    """获取同步状态（通过 JobManager 查询）"""
+    return _query_job_status(_sync_status, playlist_id)
 
 
 @router.post("", response_model=SyncResponse)
 async def add_playlist(
     request: AddPlaylistRequest,
-    background_tasks: BackgroundTasks,
     db: Database = Depends(get_db)
 ):
-    """添加 Playlist（URL），后台执行同步"""
-    # 先快速获取 playlist 基本信息
+    """添加 Playlist（URL），通过 JobManager 后台执行同步"""
     from vat.downloaders import YouTubeDownloader
     from vat.config import load_config
     
@@ -197,29 +181,34 @@ async def add_playlist(
     )
     
     try:
-        # 快速获取 playlist 信息（不获取视频详情）
         playlist_info = downloader.get_playlist_info(request.url)
         if not playlist_info:
             raise HTTPException(400, "无法获取 Playlist 信息")
         
         playlist_id = playlist_info['id']
         
-        # 检查是否已在同步中
-        if playlist_id in _sync_status and _sync_status[playlist_id].get("status") == "syncing":
-            return SyncResponse(
-                playlist_id=playlist_id,
-                message="同步已在进行中",
-                syncing=True
-            )
+        # 检查是否已有 running job
+        existing = _sync_status.get(playlist_id, {})
+        if existing.get('job_id'):
+            jm = _get_job_manager()
+            jm.update_job_status(existing['job_id'])
+            ej = jm.get_job(existing['job_id'])
+            if ej and ej.status.value == 'running':
+                return SyncResponse(
+                    playlist_id=playlist_id,
+                    message="同步已在进行中",
+                    syncing=True
+                )
         
-        # 启动后台同步任务
-        background_tasks.add_task(
-            _run_sync_in_background,
-            request.url,
-            playlist_id,
-            request.auto_sync,
-            request.fetch_upload_dates
+        # 通过 JobManager 提交 sync-playlist 任务
+        jm = _get_job_manager()
+        job_id = jm.submit_job(
+            video_ids=[],
+            steps=['sync-playlist'],
+            task_type='sync-playlist',
+            task_params={'playlist_id': playlist_id, 'url': request.url},
         )
+        _sync_status[playlist_id] = {'job_id': job_id}
         
         return SyncResponse(
             playlist_id=playlist_id,
@@ -236,32 +225,34 @@ async def add_playlist(
 async def sync_playlist(
     playlist_id: str,
     request: SyncPlaylistRequest = None,
-    background_tasks: BackgroundTasks = None,
     db: Database = Depends(get_db)
 ):
-    """同步 Playlist（增量更新），后台执行"""
+    """同步 Playlist（增量更新），通过 JobManager 后台执行"""
     pl = db.get_playlist(playlist_id)
     if not pl:
         raise HTTPException(404, "Playlist not found")
     
-    # 检查是否已在同步中
-    if playlist_id in _sync_status and _sync_status[playlist_id].get("status") == "syncing":
-        return SyncResponse(
-            playlist_id=playlist_id,
-            message="同步已在进行中",
-            syncing=True
-        )
+    # 检查是否已有 running job
+    existing = _sync_status.get(playlist_id, {})
+    if existing.get('job_id'):
+        jm = _get_job_manager()
+        jm.update_job_status(existing['job_id'])
+        ej = jm.get_job(existing['job_id'])
+        if ej and ej.status.value == 'running':
+            return SyncResponse(
+                playlist_id=playlist_id,
+                message="同步已在进行中",
+                syncing=True
+            )
     
-    fetch_dates = request.fetch_upload_dates if request else True
-    
-    # 启动后台同步任务
-    background_tasks.add_task(
-        _run_sync_in_background,
-        pl.source_url,
-        playlist_id,
-        True,
-        fetch_dates
+    jm = _get_job_manager()
+    job_id = jm.submit_job(
+        video_ids=[],
+        steps=['sync-playlist'],
+        task_type='sync-playlist',
+        task_params={'playlist_id': playlist_id},
     )
+    _sync_status[playlist_id] = {'job_id': job_id}
     
     return SyncResponse(
         playlist_id=playlist_id,
@@ -302,62 +293,20 @@ class RefreshPlaylistRequest(BaseModel):
 
 
 # 全局刷新状态存储（与 sync 独立）
-_refresh_status = {}  # playlist_id -> {status, message, result}
+_refresh_status = {}  # playlist_id -> {job_id: str}
 
-
-def _update_refresh_message(playlist_id: str, message: str):
-    """更新刷新进度消息"""
-    if playlist_id in _refresh_status:
-        _refresh_status[playlist_id]["message"] = message
-
-
-def _run_refresh_in_background(
-    playlist_id: str,
-    force_refetch: bool,
-    force_retranslate: bool
-):
-    """后台执行刷新任务"""
-    from vat.config import load_config
-    from vat.downloaders import YouTubeDownloader
-    
-    config = load_config()
-    db = Database(config.storage.database_path, output_base_dir=config.storage.output_dir)
-    downloader = YouTubeDownloader(
-        proxy=config.get_stage_proxy("downloader"),
-        video_format=config.downloader.youtube.format,
-        cookies_file=config.downloader.youtube.cookies_file,
-        remote_components=config.downloader.youtube.remote_components,
-    )
-    service = PlaylistService(db, downloader)
-    
-    _refresh_status[playlist_id] = {"status": "refreshing", "message": "正在刷新..."}
-    
-    try:
-        result = service.refresh_videos(
-            playlist_id,
-            force_refetch=force_refetch,
-            force_retranslate=force_retranslate,
-            callback=lambda msg: _update_refresh_message(playlist_id, msg)
-        )
-        _refresh_status[playlist_id] = {
-            "status": "completed",
-            "message": f"刷新完成: 成功 {result['refreshed']}, 失败 {result['failed']}, 跳过 {result['skipped']}",
-            "result": result
-        }
-    except Exception as e:
-        logger.error(f"刷新 Playlist {playlist_id} 失败: {e}")
-        _refresh_status[playlist_id] = {"status": "failed", "message": str(e)}
+# 全局重新翻译状态存储
+_retranslate_status = {}  # playlist_id -> {job_id: str}
 
 
 @router.post("/{playlist_id}/refresh")
 async def refresh_playlist_videos(
     playlist_id: str,
     request: RefreshPlaylistRequest = None,
-    background_tasks: BackgroundTasks = None,
     db: Database = Depends(get_db)
 ):
     """
-    刷新 Playlist 视频信息（补全缺失的封面、时长、日期等）
+    刷新 Playlist 视频信息（通过 JobManager 后台执行）
     
     默认 merge 模式：仅补全缺失字段，不破坏已有翻译结果。
     """
@@ -365,50 +314,66 @@ async def refresh_playlist_videos(
     if not pl:
         raise HTTPException(404, "Playlist not found")
     
-    # 检查是否已在刷新中
-    if playlist_id in _refresh_status and _refresh_status[playlist_id].get("status") == "refreshing":
-        return {"status": "refreshing", "message": "刷新已在进行中"}
+    # 检查是否已有 running job
+    existing = _refresh_status.get(playlist_id, {})
+    if existing.get('job_id'):
+        jm = _get_job_manager()
+        jm.update_job_status(existing['job_id'])
+        ej = jm.get_job(existing['job_id'])
+        if ej and ej.status.value == 'running':
+            return {"status": "refreshing", "message": "刷新已在进行中"}
     
     force_refetch = request.force_refetch if request else False
     force_retranslate = request.force_retranslate if request else False
     
-    background_tasks.add_task(
-        _run_refresh_in_background,
-        playlist_id,
-        force_refetch,
-        force_retranslate
+    jm = _get_job_manager()
+    job_id = jm.submit_job(
+        video_ids=[],
+        steps=['refresh-playlist'],
+        task_type='refresh-playlist',
+        task_params={
+            'playlist_id': playlist_id,
+            'force_refetch': force_refetch,
+            'force_retranslate': force_retranslate,
+        },
     )
+    _refresh_status[playlist_id] = {'job_id': job_id}
     
-    return {"status": "started", "message": "已启动后台刷新"}
+    return {"status": "started", "message": "已启动后台刷新", "job_id": job_id}
 
 
 @router.get("/{playlist_id}/refresh-status")
 async def get_refresh_status(playlist_id: str):
-    """获取刷新状态"""
-    status = _refresh_status.get(playlist_id, {"status": "idle", "message": ""})
-    return status
+    """获取刷新状态（通过 JobManager 查询）"""
+    result = _query_job_status(_refresh_status, playlist_id)
+    # 兼容原有的 refreshing 状态名
+    if result.get('status') == 'syncing':
+        result['status'] = 'refreshing'
+    return result
 
 
 @router.post("/{playlist_id}/retranslate")
 async def retranslate_playlist_videos(
     playlist_id: str,
-    background_tasks: BackgroundTasks,
     service: PlaylistService = Depends(get_playlist_service)
 ):
     """
-    重新翻译 Playlist 中所有视频的标题/简介
-    
-    用于在更新翻译逻辑或提示词后，批量更新已有视频的翻译结果。
+    重新翻译 Playlist 中所有视频的标题/简介（通过 JobManager 后台执行）
     """
     pl = service.get_playlist(playlist_id)
     if not pl:
         raise HTTPException(404, "Playlist not found")
     
-    def run_retranslate():
-        service.retranslate_videos(playlist_id)
+    jm = _get_job_manager()
+    job_id = jm.submit_job(
+        video_ids=[],
+        steps=['retranslate-playlist'],
+        task_type='retranslate-playlist',
+        task_params={'playlist_id': playlist_id},
+    )
+    _retranslate_status[playlist_id] = {'job_id': job_id}
     
-    background_tasks.add_task(run_retranslate)
-    return {"status": "started", "message": "重新翻译任务已启动"}
+    return {"status": "started", "message": "重新翻译任务已启动", "job_id": job_id}
 
 
 @router.post("/{playlist_id}/backfill-index")

@@ -314,6 +314,16 @@ vat status
 | `vat bilibili login` | B 站登录获取 Cookie |
 | `vat bilibili rejected` | 列出被退回的稿件及违规详情 |
 | `vat bilibili fix --aid AID` | 累积式修复被退回稿件（合并历史+新违规遮罩，优先本地文件，降级从B站下载） |
+| `vat tools fix-violation --aid AID` | 同上（支持 JobManager 子进程调度） |
+| `vat tools sync-playlist --playlist ID` | 同步 YouTube Playlist（增量更新） |
+| `vat tools refresh-playlist --playlist ID` | 刷新 Playlist 视频信息 |
+| `vat tools retranslate-playlist --playlist ID` | 重新翻译 Playlist 视频标题/简介 |
+| `vat tools upload-sync --playlist ID` | 批量添加视频到B站合集 |
+| `vat tools update-info --playlist ID` | 批量更新已上传视频的标题和简介 |
+| `vat tools sync-db --season S --playlist ID` | 从B站合集同步信息回数据库 |
+| `vat tools season-sync --playlist ID` | 合集同步（添加+排序） |
+
+> `vat tools` 子命令与原有 CLI 命令功能相同，区别在于输出标准化进度标记（`[N%]`/`[SUCCESS]`/`[FAILED]`），可被 WebUI 的 JobManager 作为子进程调度和监控。
 
 ### 输出文件
 

@@ -371,9 +371,11 @@ def _find_local_video(aid: int) -> Optional[Path]:
             archive = detail.get('archive', {})
             bili_title = archive.get('title', '')
             # 从 source 字段和 desc 字段中搜索 YouTube URL
+            # 注意：创作中心 API 的 desc 截断到 250 字符，需补充公共 API 获取完整 desc
             source = archive.get('source', '')
             desc = archive.get('desc', '')
-            for text in [source, desc]:
+            full_desc = uploader._get_full_desc(aid)
+            for text in [source, full_desc or desc, desc]:
                 yt_match = re.search(r'youtube\.com/watch\?v=([a-zA-Z0-9_-]+)', text)
                 if yt_match:
                     yt_video_id = yt_match.group(1)
@@ -513,70 +515,34 @@ def _download_from_bilibili(aid: int, bvid: str) -> Optional[Path]:
         return None
 
 
-def _run_fix_task(aid: int, video_path: Optional[Path], mask_text: str, margin: float,
-                   previous_ranges: list):
-    """后台线程执行累积式遮罩+上传替换（使用 BilibiliUploader.fix_violation 封装）"""
-    task = _fix_tasks[aid]
-    try:
-        task['status'] = 'masking'
-        task['message'] = '正在获取违规信息并处理...'
-        
-        uploader = _get_uploader(with_upload_params=True)
-        
-        def _update_status(msg):
-            task['message'] = msg
-            logger.info(msg)
-        
-        result = uploader.fix_violation(
-            aid=aid,
-            video_path=video_path,
-            mask_text=mask_text,
-            margin_sec=margin,
-            previous_ranges=previous_ranges,
-            dry_run=False,
-            callback=_update_status,
-        )
-        
-        if result['success']:
-            task['status'] = 'completed'
-            task['message'] = result['message']
-            task['all_ranges'] = [list(r) for r in result['all_ranges']]
-            task['source'] = result['source']
-        else:
-            task['status'] = 'failed'
-            task['message'] = result['message']
-            if result.get('masked_path'):
-                task['masked_path'] = result['masked_path']
-            
-    except Exception as e:
-        logger.error(f"修复任务异常 (aid={aid}): {e}", exc_info=True)
-        task['status'] = 'failed'
-        task['message'] = f'异常: {e}'
-
-
 @router.post("/fix/{aid}")
 async def fix_rejected_video(aid: int, request: Request):
-    """启动审核退回修复任务（累积式遮罩+上传替换）
+    """启动审核退回修复任务（通过 JobManager 子进程执行）
     
-    使用 BilibiliUploader.fix_violation 封装：
+    使用 vat tools fix-violation 子进程执行：
     - 自动获取退回信息和违规时间段
     - 合并历史已 mask 的 ranges + 本次新违规
     - 优先本地文件，降级从 B站下载
     """
     try:
+        from .tasks import get_job_manager
+        jm = get_job_manager()
+        
         # 检查是否已有任务在运行
-        existing = _fix_tasks.get(aid, {})
-        if existing.get('status') in ('masking', 'uploading'):
-            return JSONResponse({
-                "success": False,
-                "error": f"aid={aid} 已有修复任务在运行: {existing.get('message')}"
-            })
+        existing_job_id = _fix_tasks.get(aid, {}).get('job_id')
+        if existing_job_id:
+            jm.update_job_status(existing_job_id)
+            existing_job = jm.get_job(existing_job_id)
+            if existing_job and existing_job.status.value == 'running':
+                return JSONResponse({
+                    "success": False,
+                    "error": f"aid={aid} 已有修复任务在运行 (job={existing_job_id})"
+                })
         
         body = await request.json()
         video_path_str = body.get('video_path')
         margin = body.get('margin', 1.0)
         mask_text = body.get('mask_text', '此处内容因合规要求已被遮罩')
-        previous_ranges = body.get('previous_ranges', [])
         
         # 确定视频来源
         video_path = None
@@ -585,31 +551,31 @@ async def fix_rejected_video(aid: int, request: Request):
             if not video_path.exists():
                 return JSONResponse({"success": False, "error": f"文件不存在: {video_path_str}"})
         else:
-            # 自动查找本地文件
             video_path = _find_local_video(aid)
-            # 如果没找到，fix_violation 会自动从 B站下载
         
-        # 转换 previous_ranges
-        prev = [(r[0], r[1]) for r in previous_ranges] if previous_ranges else []
-        
-        # 初始化任务状态
-        _fix_tasks[aid] = {
-            'status': 'pending',
-            'message': '任务已创建',
-            'video_path': str(video_path) if video_path else None,
+        # 通过 JobManager 提交 tools 任务
+        task_params = {
+            'aid': aid,
+            'margin': margin,
+            'mask_text': mask_text,
         }
+        if video_path:
+            task_params['video_path'] = str(video_path)
         
-        # 启动后台线程
-        thread = threading.Thread(
-            target=_run_fix_task,
-            args=(aid, video_path, mask_text, margin, prev),
-            daemon=True
+        job_id = jm.submit_job(
+            video_ids=[],
+            steps=['fix-violation'],
+            task_type='fix-violation',
+            task_params=task_params,
         )
-        thread.start()
+        
+        # 记录 aid → job_id 映射（供 status 端点查询）
+        _fix_tasks[aid] = {'job_id': job_id}
         
         return JSONResponse({
             "success": True,
             "message": "修复任务已启动",
+            "job_id": job_id,
             "video_path": str(video_path) if video_path else "将从B站下载",
         })
         
@@ -620,11 +586,39 @@ async def fix_rejected_video(aid: int, request: Request):
 
 @router.get("/fix/{aid}/status")
 async def get_fix_status(aid: int):
-    """获取修复任务状态"""
-    task = _fix_tasks.get(aid)
-    if not task:
+    """获取修复任务状态（通过 JobManager 查询）"""
+    entry = _fix_tasks.get(aid)
+    if not entry or 'job_id' not in entry:
         return JSONResponse({"status": "none", "message": "无任务记录"})
-    return JSONResponse(task)
+    
+    from .tasks import get_job_manager
+    jm = get_job_manager()
+    job_id = entry['job_id']
+    jm.update_job_status(job_id)
+    job = jm.get_job(job_id)
+    
+    if not job:
+        return JSONResponse({"status": "none", "message": "任务记录已删除"})
+    
+    # 转换为原有响应格式
+    status_map = {
+        'pending': 'pending',
+        'running': 'masking',
+        'completed': 'completed',
+        'failed': 'failed',
+        'cancelled': 'cancelled',
+    }
+    
+    # 从日志获取最新消息
+    log_lines = jm.get_log_content(job_id, tail_lines=3)
+    last_msg = log_lines[-1] if log_lines else ''
+    
+    return JSONResponse({
+        "status": status_map.get(job.status.value, job.status.value),
+        "message": job.error or last_msg,
+        "job_id": job_id,
+        "progress": job.progress,
+    })
 
 
 # =============================================================================
@@ -793,62 +787,26 @@ async def do_season_sync(playlist_id: str):
         if patched > 0:
             logger.info(f"为 {patched} 个视频补充了 bilibili_target_season_id={season_id}")
         
-        # 初始化任务状态
+        # 通过 JobManager 提交 season-sync 任务
+        from .tasks import get_job_manager
+        jm = get_job_manager()
+        
+        job_id = jm.submit_job(
+            video_ids=[],
+            steps=['season-sync'],
+            task_type='season-sync',
+            task_params={'playlist_id': playlist_id},
+        )
+        
         _sync_tasks[playlist_id] = {
-            'status': 'running',
-            'message': '正在同步...',
+            'job_id': job_id,
             'season_id': season_id,
-            'result': None,
         }
-        
-        def sync_task():
-            try:
-                from ...uploaders.bilibili import season_sync
-                # 重新创建 DB 和 uploader（线程安全）
-                task_config = load_config()
-                task_db = Database(task_config.storage.database_path, output_base_dir=task_config.storage.output_dir)
-                task_uploader = _get_uploader()
-                
-                result = season_sync(task_db, task_uploader, playlist_id)
-                
-                # set 不能 JSON 序列化
-                serializable_result = {
-                    'total': result['total'],
-                    'success': result['success'],
-                    'failed': result['failed'],
-                    'skipped': result['skipped'],
-                    'failed_videos': result['failed_videos'],
-                }
-                
-                if result['failed'] == 0:
-                    _sync_tasks[playlist_id] = {
-                        'status': 'completed',
-                        'message': f"同步完成: {result['success']} 个视频已添加到合集",
-                        'season_id': season_id,
-                        'result': serializable_result,
-                    }
-                else:
-                    _sync_tasks[playlist_id] = {
-                        'status': 'partial',
-                        'message': f"部分完成: {result['success']} 成功, {result['failed']} 失败",
-                        'season_id': season_id,
-                        'result': serializable_result,
-                    }
-            except Exception as e:
-                logger.error(f"Season sync 任务异常 (playlist={playlist_id}): {e}", exc_info=True)
-                _sync_tasks[playlist_id] = {
-                    'status': 'failed',
-                    'message': f"同步失败: {e}",
-                    'season_id': season_id,
-                    'result': None,
-                }
-        
-        thread = threading.Thread(target=sync_task, daemon=True)
-        thread.start()
         
         return JSONResponse({
             "success": True,
             "message": f"同步任务已启动 (playlist={playlist_id}, season={season_id})",
+            "job_id": job_id,
             "patched": patched,
         })
     except Exception as e:
@@ -858,11 +816,37 @@ async def do_season_sync(playlist_id: str):
 
 @router.get("/season-sync/{playlist_id}/status")
 async def get_season_sync_status(playlist_id: str):
-    """获取 season sync 任务状态"""
-    task = _sync_tasks.get(playlist_id)
-    if not task:
+    """获取 season sync 任务状态（通过 JobManager 查询）"""
+    entry = _sync_tasks.get(playlist_id)
+    if not entry or 'job_id' not in entry:
         return JSONResponse({"status": "none", "message": "无同步任务"})
-    return JSONResponse(task)
+    
+    from .tasks import get_job_manager
+    jm = get_job_manager()
+    job_id = entry['job_id']
+    jm.update_job_status(job_id)
+    job = jm.get_job(job_id)
+    
+    if not job:
+        return JSONResponse({"status": "none", "message": "任务记录已删除"})
+    
+    status_map = {
+        'pending': 'pending',
+        'running': 'running',
+        'completed': 'completed',
+        'failed': 'failed',
+        'cancelled': 'cancelled',
+    }
+    
+    log_lines = jm.get_log_content(job_id, tail_lines=3)
+    last_msg = log_lines[-1] if log_lines else ''
+    
+    return JSONResponse({
+        "status": status_map.get(job.status.value, job.status.value),
+        "message": job.error or last_msg,
+        "season_id": entry.get('season_id'),
+        "job_id": job_id,
+    })
 
 
 @router.post("/season/{season_id}/sort")

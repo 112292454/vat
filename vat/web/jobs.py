@@ -30,6 +30,19 @@ class JobStatus(Enum):
     CANCELLED = "cancelled"
 
 
+# 支持的 tools 任务类型（非 process 类型）
+TOOLS_TASK_TYPES = {
+    'fix-violation',
+    'sync-playlist',
+    'refresh-playlist',
+    'retranslate-playlist',
+    'upload-sync',
+    'update-info',
+    'sync-db',
+    'season-sync',
+}
+
+
 @dataclass
 class WebJob:
     """Web 任务记录"""
@@ -49,9 +62,16 @@ class WebJob:
     upload_cron: Optional[str] = None
     concurrency: int = 1
     fail_fast: bool = False
+    task_type: str = 'process'       # 'process' | tools 任务类型
+    task_params: Optional[Dict] = None  # tools 任务的额外参数
+    
+    @property
+    def is_tools_task(self) -> bool:
+        """是否为 tools 类型任务（非视频处理 pipeline）"""
+        return self.task_type != 'process'
     
     def to_dict(self) -> Dict:
-        return {
+        d = {
             "job_id": self.job_id,
             "task_id": self.job_id,  # 兼容模板使用 task_id
             "video_ids": self.video_ids,
@@ -69,7 +89,10 @@ class WebJob:
             "upload_cron": self.upload_cron,
             "concurrency": self.concurrency,
             "fail_fast": self.fail_fast,
+            "task_type": self.task_type,
+            "task_params": self.task_params or {},
         }
+        return d
 
 
 class JobManager:
@@ -129,6 +152,8 @@ class JobManager:
                 "ALTER TABLE web_jobs ADD COLUMN upload_cron TEXT",
                 "ALTER TABLE web_jobs ADD COLUMN concurrency INTEGER DEFAULT 1",
                 "ALTER TABLE web_jobs ADD COLUMN fail_fast INTEGER DEFAULT 0",
+                "ALTER TABLE web_jobs ADD COLUMN task_type TEXT DEFAULT 'process'",
+                "ALTER TABLE web_jobs ADD COLUMN task_params TEXT DEFAULT '{}'",
             ]:
                 try:
                     cursor.execute(col_sql)
@@ -146,10 +171,19 @@ class JobManager:
         upload_cron: Optional[str] = None,
         upload_batch_size: int = 1,
         upload_mode: str = 'cron',
-        fail_fast: bool = False
+        fail_fast: bool = False,
+        task_type: str = 'process',
+        task_params: Optional[Dict] = None
     ) -> str:
         """
         提交任务并立即启动子进程执行
+        
+        Args:
+            video_ids: 视频ID列表（process 类型必填；tools 类型可为空列表）
+            steps: 处理步骤列表（process 类型为步骤名；tools 类型为 [task_type]）
+            task_type: 任务类型，'process' 或 TOOLS_TASK_TYPES 中的值
+            task_params: tools 任务的额外参数（JSON 可序列化的 dict）
+            其他参数: 仅对 process 类型有效
         
         Returns:
             job_id
@@ -164,8 +198,9 @@ class JobManager:
             cursor = conn.cursor()
             cursor.execute("""
                 INSERT INTO web_jobs 
-                (job_id, video_ids, steps, gpu_device, force, status, log_file, created_at, upload_cron, concurrency, fail_fast)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (job_id, video_ids, steps, gpu_device, force, status, log_file, created_at,
+                 upload_cron, concurrency, fail_fast, task_type, task_params)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 job_id,
                 json.dumps(video_ids),
@@ -177,13 +212,19 @@ class JobManager:
                 now,
                 upload_cron,
                 concurrency,
-                1 if fail_fast else 0
+                1 if fail_fast else 0,
+                task_type,
+                json.dumps(task_params or {}),
             ))
         
         # 启动子进程
-        self._start_job_process(job_id, video_ids, steps, gpu_device, force, log_file, concurrency, playlist_id, upload_cron, upload_batch_size, upload_mode, fail_fast)
+        self._start_job_process(
+            job_id, video_ids, steps, gpu_device, force, log_file,
+            concurrency, playlist_id, upload_cron, upload_batch_size,
+            upload_mode, fail_fast, task_type, task_params
+        )
         
-        logger.info(f"任务已提交: {job_id}, 视频数: {len(video_ids)}, 步骤: {steps}")
+        logger.info(f"任务已提交: {job_id}, type={task_type}, 步骤: {steps}")
         return job_id
     
     def _start_job_process(
@@ -199,10 +240,62 @@ class JobManager:
         upload_cron: Optional[str] = None,
         upload_batch_size: int = 1,
         upload_mode: str = 'cron',
-        fail_fast: bool = False
+        fail_fast: bool = False,
+        task_type: str = 'process',
+        task_params: Optional[Dict] = None
     ):
         """启动子进程执行任务"""
-        # 构建 CLI 命令
+        if task_type != 'process':
+            cmd = self._build_tools_command(task_type, task_params or {})
+        else:
+            cmd = self._build_process_command(
+                video_ids, steps, gpu_device, force, concurrency,
+                playlist_id, upload_cron, upload_batch_size, upload_mode, fail_fast
+            )
+        
+        logger.info(f"启动命令: {' '.join(cmd)}")
+        
+        # 打开日志文件
+        log_fd = open(log_file, "w", buffering=1)  # 行缓冲
+        
+        # 启动子进程（PYTHONUNBUFFERED=1 确保日志实时写入文件，不被缓冲）
+        env = os.environ.copy()
+        env["PYTHONUNBUFFERED"] = "1"
+        
+        process = subprocess.Popen(
+            cmd,
+            stdout=log_fd,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,  # 独立进程组，不受父进程影响
+            cwd=str(Path(__file__).parent.parent.parent),  # VAT 项目根目录
+            env=env,
+        )
+        
+        # 更新数据库
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                UPDATE web_jobs 
+                SET status = ?, pid = ?, started_at = ?
+                WHERE job_id = ?
+            """, (JobStatus.RUNNING.value, process.pid, datetime.now(), job_id))
+        
+        logger.info(f"任务进程已启动: {job_id}, PID: {process.pid}")
+    
+    @staticmethod
+    def _build_process_command(
+        video_ids: List[str],
+        steps: List[str],
+        gpu_device: str,
+        force: bool,
+        concurrency: int,
+        playlist_id: Optional[str],
+        upload_cron: Optional[str],
+        upload_batch_size: int,
+        upload_mode: str,
+        fail_fast: bool
+    ) -> List[str]:
+        """构建 vat process 命令"""
         cmd = ["python", "-m", "vat", "process"]
         
         for vid in video_ids:
@@ -235,32 +328,70 @@ class JobManager:
         if fail_fast:
             cmd.append("--fail-fast")
         
-        # 打开日志文件
-        log_fd = open(log_file, "w", buffering=1)  # 行缓冲
+        return cmd
+    
+    @staticmethod
+    def _build_tools_command(task_type: str, params: Dict) -> List[str]:
+        """根据 task_type 和 params 构建 vat tools <subcommand> 命令
         
-        # 启动子进程（PYTHONUNBUFFERED=1 确保日志实时写入文件，不被缓冲）
-        env = os.environ.copy()
-        env["PYTHONUNBUFFERED"] = "1"
+        每个 task_type 对应一个 vat tools 子命令，参数从 params dict 映射到 CLI 选项。
+        """
+        cmd = ["python", "-m", "vat", "tools", task_type]
         
-        process = subprocess.Popen(
-            cmd,
-            stdout=log_fd,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,  # 独立进程组，不受父进程影响
-            cwd=str(Path(__file__).parent.parent.parent),  # VAT 项目根目录
-            env=env,
-        )
+        # 通用映射：params 中的 key 转换为 CLI 选项
+        # 布尔值 True → --flag，False → 不加
+        # 其他值 → --key value
+        PARAM_MAP = {
+            'fix-violation': {
+                'aid': '--aid',
+                'video_path': '--video-path',
+                'margin': '--margin',
+                'mask_text': '--mask-text',
+                'dry_run': '--dry-run',
+            },
+            'sync-playlist': {
+                'playlist_id': '--playlist',
+                'url': '--url',
+                'fetch_upload_dates': '--fetch-dates',
+            },
+            'refresh-playlist': {
+                'playlist_id': '--playlist',
+                'force_refetch': '--force-refetch',
+                'force_retranslate': '--force-retranslate',
+            },
+            'retranslate-playlist': {
+                'playlist_id': '--playlist',
+            },
+            'upload-sync': {
+                'playlist_id': '--playlist',
+                'retry_delay': '--retry-delay',
+            },
+            'update-info': {
+                'playlist_id': '--playlist',
+                'dry_run': '--dry-run',
+            },
+            'sync-db': {
+                'season_id': '--season',
+                'playlist_id': '--playlist',
+                'dry_run': '--dry-run',
+            },
+            'season-sync': {
+                'playlist_id': '--playlist',
+            },
+        }
         
-        # 更新数据库
-        with self._get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("""
-                UPDATE web_jobs 
-                SET status = ?, pid = ?, started_at = ?
-                WHERE job_id = ?
-            """, (JobStatus.RUNNING.value, process.pid, datetime.now(), job_id))
+        mapping = PARAM_MAP.get(task_type, {})
+        for key, flag in mapping.items():
+            value = params.get(key)
+            if value is None:
+                continue
+            if isinstance(value, bool):
+                if value:
+                    cmd.append(flag)
+            else:
+                cmd.extend([flag, str(value)])
         
-        logger.info(f"任务进程已启动: {job_id}, PID: {process.pid}")
+        return cmd
     
     def get_job(self, job_id: str) -> Optional[WebJob]:
         """获取任务信息"""
@@ -373,10 +504,11 @@ class JobManager:
                     """, (progress, job_id))
             return
         
-        # 进程已结束，先清理该 job 关联视频中残留的 running 状态 task
-        self._cleanup_orphaned_running_tasks(job)
+        # tools 任务没有 tasks 表记录，无需清理孤儿 task
+        if not job.is_tools_task:
+            self._cleanup_orphaned_running_tasks(job)
         
-        # 基于数据库中视频任务的实际状态判定 job 状态
+        # 判定 job 结果
         status, error, progress = self._determine_job_result(job)
         
         with self._get_connection() as conn:
@@ -428,9 +560,10 @@ class JobManager:
             logger.error(f"清理孤儿 running tasks 失败: {e}")
     
     def _determine_job_result(self, job: WebJob) -> tuple:
-        """基于数据库中视频任务的实际状态判定 job 结果
+        """判定 job 结果
         
-        查询 tasks 表中每个视频的各步骤状态，而非扫描日志文件。
+        - process 类型：查询 tasks 表中每个视频的各步骤状态
+        - tools 类型：检查日志中的 [SUCCESS] / [FAILED:msg] 标记
         
         Args:
             job: WebJob 对象
@@ -438,8 +571,11 @@ class JobManager:
         Returns:
             (status: JobStatus, error: Optional[str], progress: float)
         """
+        if job.is_tools_task:
+            return self._determine_tools_job_result(job)
+        
         video_ids = job.video_ids
-        requested_steps = job.steps  # 请求执行的步骤名称列表
+        requested_steps = job.steps
         
         if not video_ids or not requested_steps:
             return JobStatus.COMPLETED, None, 1.0
@@ -517,6 +653,45 @@ class JobManager:
             error_msg = "\n".join(error_parts)
             return JobStatus.FAILED, error_msg, progress
 
+    def _determine_tools_job_result(self, job: WebJob) -> tuple:
+        """基于日志标记判定 tools 任务结果
+        
+        tools 子命令在完成时输出:
+        - [SUCCESS] 成功完成
+        - [SUCCESS] 成功信息... 成功并带消息
+        - [FAILED] 失败原因... 失败并带原因
+        """
+        import re
+        
+        if not job.log_file or not Path(job.log_file).exists():
+            return JobStatus.FAILED, "日志文件不存在", 0.0
+        
+        try:
+            log_content = Path(job.log_file).read_text()
+            lines = log_content.strip().split("\n")
+            
+            # 从后往前搜索结果标记
+            for line in reversed(lines):
+                if '[SUCCESS]' in line:
+                    # 提取 [SUCCESS] 后的消息
+                    msg_match = re.search(r'\[SUCCESS\]\s*(.*)', line)
+                    msg = msg_match.group(1).strip() if msg_match else ''
+                    return JobStatus.COMPLETED, None, 1.0
+                if '[FAILED]' in line:
+                    msg_match = re.search(r'\[FAILED\]\s*(.*)', line)
+                    error_msg = msg_match.group(1).strip() if msg_match else '未知错误'
+                    progress = self._parse_progress_from_log(job.log_file)
+                    return JobStatus.FAILED, error_msg, progress
+            
+            # 日志中没有明确标记，进程已结束但无标记——可能崩溃
+            progress = self._parse_progress_from_log(job.log_file)
+            # 检查最后几行是否有错误信息
+            last_lines = lines[-5:] if len(lines) >= 5 else lines
+            error_hint = '\n'.join(last_lines)[-200:]
+            return JobStatus.FAILED, f"进程异常终止\n{error_hint}", progress
+        except Exception as e:
+            return JobStatus.FAILED, f"日志解析失败: {e}", 0.0
+    
     def cleanup_all_orphaned_running_tasks(self):
         """全局清理：将所有没有活跃 job 进程的 running tasks 标记为 failed
         
@@ -645,6 +820,19 @@ class JobManager:
         except (IndexError, KeyError):
             fail_fast = False
         
+        # task_type 列可能不存在（旧数据库），安全读取
+        try:
+            task_type = row['task_type'] or 'process'
+        except (IndexError, KeyError):
+            task_type = 'process'
+        
+        # task_params 列可能不存在（旧数据库），安全读取
+        try:
+            task_params_raw = row['task_params'] or '{}'
+            task_params = json.loads(task_params_raw) if isinstance(task_params_raw, str) else task_params_raw
+        except (IndexError, KeyError):
+            task_params = {}
+        
         return WebJob(
             job_id=row['job_id'],
             video_ids=json.loads(row['video_ids']),
@@ -662,4 +850,6 @@ class JobManager:
             upload_cron=upload_cron,
             concurrency=concurrency,
             fail_fast=fail_fast,
+            task_type=task_type,
+            task_params=task_params,
         )

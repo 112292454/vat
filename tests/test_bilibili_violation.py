@@ -63,6 +63,26 @@ class TestParseViolationTime:
         """超过1小时的时间"""
         result = BilibiliUploader._parse_violation_time("P1(01:30:00-01:30:10)")
         assert result == [(5400, 5410)]
+    
+    def test_bracket_format_mmss(self):
+        """B站新格式：【MM:SS-MM:SS】"""
+        result = BilibiliUploader._parse_violation_time("您的视频【23:28-23:29】【内容】根据相关法律法规")
+        assert result == [(1408, 1409)]
+    
+    def test_bracket_format_hhmmss(self):
+        """B站新格式：【HH:MM:SS-HH:MM:SS】"""
+        result = BilibiliUploader._parse_violation_time("您的视频【00:23:28-00:23:29】内容违规")
+        assert result == [(1408, 1409)]
+    
+    def test_bracket_format_multiple(self):
+        """B站新格式多段"""
+        result = BilibiliUploader._parse_violation_time("视频【10:00-10:05】【20:00-20:10】有问题")
+        assert result == [(600, 605), (1200, 1210)]
+    
+    def test_p_format_takes_priority(self):
+        """P格式优先于【】格式"""
+        result = BilibiliUploader._parse_violation_time("P1(00:10:00-00:10:05) 视频【20:00-20:10】")
+        assert result == [(600, 605)]  # 只返回P格式结果
 
 
 class TestTimeToSeconds:
@@ -80,8 +100,15 @@ class TestTimeToSeconds:
     def test_invalid(self):
         assert BilibiliUploader._time_to_seconds("invalid") is None
     
-    def test_two_parts(self):
-        assert BilibiliUploader._time_to_seconds("20:18") is None
+    def test_two_parts_mmss(self):
+        """MM:SS 格式"""
+        assert BilibiliUploader._time_to_seconds("20:18") == 1218
+    
+    def test_two_parts_zero(self):
+        assert BilibiliUploader._time_to_seconds("0:05") == 5
+    
+    def test_single_part(self):
+        assert BilibiliUploader._time_to_seconds("123") is None
 
 
 class TestMergeRanges:

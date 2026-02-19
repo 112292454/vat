@@ -2317,23 +2317,29 @@ def _find_local_video_cli(aid: int, config, db, uploader) -> Optional[Path]:
     yt_video_id = None
     bili_title = None
     
-    # 方法1: source URL → YouTube video ID → DB
+    # 方法1: source URL / desc 中提取 YouTube video ID → DB
     try:
         detail = uploader.get_archive_detail(aid)
         if detail:
             archive = detail.get('archive', {})
             bili_title = archive.get('title', '')
+            # 从 source 字段和 desc 字段中搜索 YouTube URL
             source = archive.get('source', '')
-            yt_match = re.search(r'youtube\.com/watch\?v=([a-zA-Z0-9_-]+)', source)
-            if yt_match:
-                yt_video_id = yt_match.group(1)
+            desc = archive.get('desc', '')
+            for text in [source, desc]:
+                yt_match = re.search(r'youtube\.com/watch\?v=([a-zA-Z0-9_-]+)', text)
+                if yt_match:
+                    yt_video_id = yt_match.group(1)
+                    break
+            
+            if yt_video_id:
                 click.echo(f"  稿件对应 YouTube 视频: {yt_video_id}")
                 
                 video = db.get_video(yt_video_id)
                 if video:
                     path = _resolve_video_file_cli(video, config)
                     if path:
-                        click.echo(f"  通过 source URL 找到本地视频: {path}")
+                        click.echo(f"  通过 YouTube ID 找到本地视频: {path}")
                         return path
     except Exception as e:
         click.echo(f"  通过 source URL 查找失败: {e}", err=True)

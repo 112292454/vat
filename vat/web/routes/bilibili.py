@@ -363,24 +363,30 @@ def _find_local_video(aid: int) -> Optional[Path]:
     yt_video_id = None  # 记录提取到的 YouTube video ID，供后续 fallback 使用
     bili_title = None    # B站稿件标题，用于标题匹配
     
-    # 方法1: 从 B站稿件获取 source URL → 提取 YouTube video ID → DB 匹配
+    # 方法1: 从 B站稿件 source / desc 提取 YouTube video ID → DB 匹配
     try:
         uploader = _get_uploader()
         detail = uploader.get_archive_detail(aid)
         if detail:
             archive = detail.get('archive', {})
             bili_title = archive.get('title', '')
+            # 从 source 字段和 desc 字段中搜索 YouTube URL
             source = archive.get('source', '')
-            yt_match = re.search(r'youtube\.com/watch\?v=([a-zA-Z0-9_-]+)', source)
-            if yt_match:
-                yt_video_id = yt_match.group(1)
+            desc = archive.get('desc', '')
+            for text in [source, desc]:
+                yt_match = re.search(r'youtube\.com/watch\?v=([a-zA-Z0-9_-]+)', text)
+                if yt_match:
+                    yt_video_id = yt_match.group(1)
+                    break
+            
+            if yt_video_id:
                 logger.info(f"稿件 av{aid} 对应 YouTube 视频: {yt_video_id}")
                 
                 video = db.get_video(yt_video_id)
                 if video:
                     path = _resolve_video_file(video, config)
                     if path:
-                        logger.info(f"通过 source URL 找到本地视频: {path}")
+                        logger.info(f"通过 YouTube ID 找到本地视频: {path}")
                         return path
     except Exception as e:
         logger.warning(f"通过 source URL 查找视频失败: {e}")

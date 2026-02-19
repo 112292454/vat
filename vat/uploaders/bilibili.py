@@ -1116,12 +1116,18 @@ class BilibiliUploader(BaseUploader):
                 for pd in problem_detail:
                     vt = pd.get('violation_time', '')
                     vp = pd.get('violation_position', '')
-                    is_full = vp == '内容全程' or (not vt and not vp)
+                    reason = pd.get('reject_reason', '')
                     
+                    # 优先从 violation_time 解析；若为空，尝试从 reason 中提取
                     time_ranges = self._parse_violation_time(vt) if vt else []
+                    if not time_ranges and reason:
+                        time_ranges = self._parse_violation_time(reason)
+                    
+                    # is_full_video: 明确标注「内容全程」或 无任何可解析的时间段
+                    is_full = vp == '内容全程' or (not vt and not vp and not time_ranges)
                     
                     problems.append({
-                        'reason': pd.get('reject_reason', ''),
+                        'reason': reason,
                         'violation_time': vt,
                         'violation_position': vp,
                         'time_ranges': time_ranges,
@@ -1145,40 +1151,57 @@ class BilibiliUploader(BaseUploader):
             return []
     
     @staticmethod
-    def _parse_violation_time(violation_time: str) -> List[tuple]:
+    def _parse_violation_time(text: str) -> List[tuple]:
         """
         解析违规时间字符串为 (start_seconds, end_seconds) 列表
         
-        支持的格式：
-        - "P1(00:20:18-00:20:24)"  — 单段
-        - "P1(00:20:18-00:20:24)、P1(00:23:33-00:23:35)"  — 多段（中文顿号分隔）
-        - "P1(00:20:18-00:20:24), P1(00:23:33-00:23:35)"  — 多段（逗号分隔）
+        支持的格式（按优先级）：
+        - "P1(00:20:18-00:20:24)"  — 标准格式
+        - "P1(00:20:18-00:20:24)、P1(00:23:33-00:23:35)"  — 多段
+        - "【23:28-23:29】"  — B站新格式（MM:SS 在中括号内）
+        - "【00:23:28-00:23:29】"  — B站新格式（HH:MM:SS 在中括号内）
+        
+        也支持从 reject_reason 文本中提取（如 "您的视频【23:28-23:29】..."）
         
         Returns:
             [(start_sec, end_sec), ...]
         """
         ranges = []
-        # 匹配所有 P数字(HH:MM:SS-HH:MM:SS) 模式
-        pattern = r'P\d+\((\d{2}:\d{2}:\d{2})-(\d{2}:\d{2}:\d{2})\)'
-        for m in re.finditer(pattern, violation_time):
-            start_str, end_str = m.group(1), m.group(2)
-            start_sec = BilibiliUploader._time_to_seconds(start_str)
-            end_sec = BilibiliUploader._time_to_seconds(end_str)
+        
+        # 格式1: P数字(HH:MM:SS-HH:MM:SS)
+        pattern_p = r'P\d+\((\d{2}:\d{2}:\d{2})-(\d{2}:\d{2}:\d{2})\)'
+        for m in re.finditer(pattern_p, text):
+            start_sec = BilibiliUploader._time_to_seconds(m.group(1))
+            end_sec = BilibiliUploader._time_to_seconds(m.group(2))
             if start_sec is not None and end_sec is not None:
                 ranges.append((start_sec, end_sec))
         
-        if not ranges and violation_time.strip():
-            logger.warning(f"无法解析违规时间: {violation_time}")
+        # 格式2: 【时间-时间】（支持 MM:SS 或 HH:MM:SS）
+        if not ranges:
+            pattern_bracket = r'【(\d{1,2}:\d{2}(?::\d{2})?)[\s]*[-–—][\s]*(\d{1,2}:\d{2}(?::\d{2})?)】'
+            for m in re.finditer(pattern_bracket, text):
+                start_sec = BilibiliUploader._time_to_seconds(m.group(1))
+                end_sec = BilibiliUploader._time_to_seconds(m.group(2))
+                if start_sec is not None and end_sec is not None:
+                    ranges.append((start_sec, end_sec))
+        
+        if not ranges and text.strip():
+            logger.warning(f"无法解析违规时间: {text}")
         
         return ranges
     
     @staticmethod
     def _time_to_seconds(time_str: str) -> Optional[float]:
-        """将 HH:MM:SS 转换为秒数"""
+        """将 HH:MM:SS 或 MM:SS 转换为秒数"""
         parts = time_str.split(':')
         if len(parts) == 3:
             try:
                 return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
+            except ValueError:
+                return None
+        elif len(parts) == 2:
+            try:
+                return int(parts[0]) * 60 + int(parts[1])
             except ValueError:
                 return None
         return None
@@ -1502,7 +1525,7 @@ class BilibiliUploader(BaseUploader):
         aid: int,
         video_path: Optional[Path] = None,
         mask_text: str = "此处内容因平台合规要求已被遮罩",
-        margin_sec: float = 1.0,
+        margin_sec: float = 2.0,
         previous_ranges: Optional[List[tuple]] = None,
         dry_run: bool = False,
         callback: Optional[callable] = None,

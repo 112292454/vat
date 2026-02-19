@@ -316,6 +316,14 @@ async def list_rejected_videos(keyword: str = ""):
                 })
             
             fixable = bool(all_ranges) and not is_full
+            
+            # 如果视频仍在退回列表中，说明 B站当前状态就是"退回"
+            # 之前 completed/failed 的修复任务已过时，清除旧状态以允许重新修复
+            old_status = _fix_tasks.get(v['aid'], {}).get('status')
+            if old_status in ('completed', 'failed'):
+                _fix_tasks.pop(v['aid'], None)
+                old_status = None
+            
             result.append({
                 'aid': v['aid'],
                 'bvid': v['bvid'],
@@ -325,7 +333,7 @@ async def list_rejected_videos(keyword: str = ""):
                 'all_ranges': all_ranges,
                 'is_full_video': is_full,
                 'fixable': fixable,
-                'fix_status': _fix_tasks.get(v['aid'], {}).get('status'),
+                'fix_status': old_status,
             })
         
         return JSONResponse({"success": True, "videos": result})

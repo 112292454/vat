@@ -4,7 +4,7 @@ B站设置相关路由
 import json
 import threading
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
 from fastapi import APIRouter, Request, Form, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
@@ -507,46 +507,40 @@ def _download_from_bilibili(aid: int, bvid: str) -> Optional[Path]:
         return None
 
 
-def _run_fix_task(aid: int, violation_ranges: list, video_path: Path, mask_text: str, margin: float):
-    """后台线程执行遮罩+上传替换"""
+def _run_fix_task(aid: int, video_path: Optional[Path], mask_text: str, margin: float,
+                   previous_ranges: list):
+    """后台线程执行累积式遮罩+上传替换（使用 BilibiliUploader.fix_violation 封装）"""
     task = _fix_tasks[aid]
     try:
         task['status'] = 'masking'
-        task['message'] = '正在遮罩违规片段...'
+        task['message'] = '正在获取违规信息并处理...'
         
-        # ffmpeg 遮罩
-        ffmpeg = FFmpegWrapper()
-        masked_path = video_path.parent / f"{video_path.stem}_masked{video_path.suffix}"
+        uploader = _get_uploader(with_upload_params=True)
         
-        ok = ffmpeg.mask_violation_segments(
+        def _update_status(msg):
+            task['message'] = msg
+            logger.info(msg)
+        
+        result = uploader.fix_violation(
+            aid=aid,
             video_path=video_path,
-            output_path=masked_path,
-            violation_ranges=violation_ranges,
             mask_text=mask_text,
             margin_sec=margin,
+            previous_ranges=previous_ranges,
+            dry_run=False,
+            callback=_update_status,
         )
         
-        if not ok:
-            task['status'] = 'failed'
-            task['message'] = '遮罩处理失败'
-            return
-        
-        task['status'] = 'uploading'
-        task['message'] = f'遮罩完成，正在上传替换 ({masked_path.stat().st_size / 1024 / 1024:.0f}MB)...'
-        
-        # 上传替换
-        uploader = _get_uploader(with_upload_params=True)
-        replace_ok = uploader.replace_video(aid, masked_path)
-        
-        if replace_ok:
+        if result['success']:
             task['status'] = 'completed'
-            task['message'] = '修复完成，已重新提交审核'
-            # 清理遮罩临时文件
-            masked_path.unlink(missing_ok=True)
+            task['message'] = result['message']
+            task['all_ranges'] = [list(r) for r in result['all_ranges']]
+            task['source'] = result['source']
         else:
             task['status'] = 'failed'
-            task['message'] = '上传替换失败，遮罩文件已保留'
-            task['masked_path'] = str(masked_path)
+            task['message'] = result['message']
+            if result.get('masked_path'):
+                task['masked_path'] = result['masked_path']
             
     except Exception as e:
         logger.error(f"修复任务异常 (aid={aid}): {e}", exc_info=True)
@@ -556,7 +550,13 @@ def _run_fix_task(aid: int, violation_ranges: list, video_path: Path, mask_text:
 
 @router.post("/fix/{aid}")
 async def fix_rejected_video(aid: int, request: Request):
-    """启动审核退回修复任务（遮罩+上传替换）"""
+    """启动审核退回修复任务（累积式遮罩+上传替换）
+    
+    使用 BilibiliUploader.fix_violation 封装：
+    - 自动获取退回信息和违规时间段
+    - 合并历史已 mask 的 ranges + 本次新违规
+    - 优先本地文件，降级从 B站下载
+    """
     try:
         # 检查是否已有任务在运行
         existing = _fix_tasks.get(aid, {})
@@ -570,44 +570,33 @@ async def fix_rejected_video(aid: int, request: Request):
         video_path_str = body.get('video_path')
         margin = body.get('margin', 1.0)
         mask_text = body.get('mask_text', '此处内容因合规要求已被遮罩')
-        violation_ranges = body.get('violation_ranges', [])
+        previous_ranges = body.get('previous_ranges', [])
         
-        if not violation_ranges:
-            return JSONResponse({"success": False, "error": "无违规时间段"})
-        
-        # 转换为 tuple 列表
-        ranges = [(r[0], r[1]) for r in violation_ranges]
-        
-        # 查找本地视频
-        bvid = body.get('bvid', '')
+        # 确定视频来源
+        video_path = None
         if video_path_str:
             video_path = Path(video_path_str)
             if not video_path.exists():
                 return JSONResponse({"success": False, "error": f"文件不存在: {video_path_str}"})
         else:
+            # 自动查找本地文件
             video_path = _find_local_video(aid)
-            if not video_path:
-                # fallback: 从 B站下载原视频
-                video_path = _download_from_bilibili(aid, bvid)
-                if not video_path:
-                    return JSONResponse({
-                        "success": False,
-                        "error": "未找到本地视频文件，且从B站下载失败。请手动指定路径",
-                        "need_path": True
-                    })
+            # 如果没找到，fix_violation 会自动从 B站下载
+        
+        # 转换 previous_ranges
+        prev = [(r[0], r[1]) for r in previous_ranges] if previous_ranges else []
         
         # 初始化任务状态
         _fix_tasks[aid] = {
             'status': 'pending',
             'message': '任务已创建',
-            'video_path': str(video_path),
-            'violation_ranges': ranges,
+            'video_path': str(video_path) if video_path else None,
         }
         
         # 启动后台线程
         thread = threading.Thread(
             target=_run_fix_task,
-            args=(aid, ranges, video_path, mask_text, margin),
+            args=(aid, video_path, mask_text, margin, prev),
             daemon=True
         )
         thread.start()
@@ -615,7 +604,7 @@ async def fix_rejected_video(aid: int, request: Request):
         return JSONResponse({
             "success": True,
             "message": "修复任务已启动",
-            "video_path": str(video_path),
+            "video_path": str(video_path) if video_path else "将从B站下载",
         })
         
     except Exception as e:
@@ -630,3 +619,256 @@ async def get_fix_status(aid: int):
     if not task:
         return JSONResponse({"status": "none", "message": "无任务记录"})
     return JSONResponse(task)
+
+
+# =============================================================================
+# 合集同步管理
+# =============================================================================
+
+# 同步任务状态（内存存储，key=playlist_id）
+_sync_tasks: Dict[str, Dict[str, Any]] = {}
+
+
+@router.get("/season/{season_id}/episodes")
+async def get_season_episodes(season_id: int):
+    """获取合集内的视频列表"""
+    try:
+        uploader = _get_uploader()
+        info = uploader.get_season_episodes(season_id)
+        if not info:
+            return JSONResponse({"success": False, "error": f"无法获取合集 {season_id} 的视频列表"})
+        
+        episodes = []
+        for ep in info.get('episodes', []):
+            episodes.append({
+                'id': ep.get('id'),
+                'aid': ep.get('aid'),
+                'title': ep.get('title', ''),
+                'cover': ep.get('cover', ''),
+            })
+        
+        return JSONResponse({
+            "success": True,
+            "season_id": season_id,
+            "section_id": info['section_id'],
+            "episodes": episodes,
+            "total": len(episodes),
+        })
+    except Exception as e:
+        logger.error(f"获取合集视频列表失败: {e}")
+        return JSONResponse({"success": False, "error": str(e)})
+
+
+@router.get("/sync-playlists")
+async def get_sync_playlists():
+    """获取所有配置了 season_id 的 playlist，以及各自的待同步视频数
+    
+    返回每个 playlist 的：
+    - 基本信息（id, title, video_count）
+    - 关联的 season_id
+    - 待同步视频数（已上传到B站但 bilibili_season_added != True 的）
+    - 已同步视频数
+    """
+    try:
+        config = load_config()
+        db = Database(config.storage.database_path, output_base_dir=config.storage.output_dir)
+        from ...services.playlist_service import PlaylistService
+        playlist_service = PlaylistService(db)
+        
+        # 全局默认 season_id
+        upload_mgr = get_upload_config_manager()
+        upload_config = upload_mgr.load()
+        global_season_id = upload_config.bilibili.season_id
+        
+        playlists = playlist_service.list_playlists()
+        result = []
+        
+        for pl in playlists:
+            meta = pl.metadata or {}
+            # per-playlist season_id 优先，回退到全局
+            pl_season = meta.get('upload_config', {}).get('season_id')
+            season_id = int(pl_season) if pl_season else (global_season_id if global_season_id else None)
+            
+            if not season_id:
+                continue  # 跳过没有关联合集的 playlist
+            
+            # 统计待同步 / 已同步
+            videos = playlist_service.get_playlist_videos(pl.id)
+            pending_count = 0
+            synced_count = 0
+            total_uploaded = 0
+            
+            for v in videos:
+                vmeta = v.metadata or {}
+                aid = vmeta.get('bilibili_aid')
+                target_season = vmeta.get('bilibili_target_season_id')
+                already_added = vmeta.get('bilibili_season_added', False)
+                
+                if aid:
+                    total_uploaded += 1
+                    if target_season and already_added:
+                        synced_count += 1
+                    elif target_season and not already_added:
+                        pending_count += 1
+                    elif not target_season and season_id:
+                        # 有 aid 但没有 target_season 记录（可能是旧数据/手动上传）
+                        # 视为待同步候选
+                        pending_count += 1
+            
+            # 检查是否有正在运行的同步任务
+            sync_task = _sync_tasks.get(pl.id, {})
+            
+            result.append({
+                'playlist_id': pl.id,
+                'title': pl.title or pl.id,
+                'video_count': pl.video_count,
+                'season_id': season_id,
+                'total_uploaded': total_uploaded,
+                'pending_count': pending_count,
+                'synced_count': synced_count,
+                'sync_status': sync_task.get('status'),
+                'sync_message': sync_task.get('message'),
+            })
+        
+        return JSONResponse({"success": True, "playlists": result})
+    except Exception as e:
+        logger.error(f"获取同步 playlist 列表失败: {e}")
+        return JSONResponse({"success": False, "error": str(e)})
+
+
+@router.post("/season-sync/{playlist_id}")
+async def do_season_sync(playlist_id: str):
+    """以 playlist 为单位执行 season sync
+    
+    查找 playlist 中所有已上传到B站但未入集的视频，批量添加到目标合集并排序。
+    在后台线程中执行，避免阻塞。
+    """
+    # 检查是否有正在运行的任务
+    existing = _sync_tasks.get(playlist_id, {})
+    if existing.get('status') == 'running':
+        return JSONResponse({
+            "success": False,
+            "error": f"Playlist {playlist_id} 已有同步任务在运行"
+        })
+    
+    try:
+        config = load_config()
+        db = Database(config.storage.database_path, output_base_dir=config.storage.output_dir)
+        from ...services.playlist_service import PlaylistService
+        playlist_service = PlaylistService(db)
+        
+        pl = playlist_service.get_playlist(playlist_id)
+        if not pl:
+            return JSONResponse({"success": False, "error": f"Playlist 不存在: {playlist_id}"})
+        
+        # 确定 season_id
+        meta = pl.metadata or {}
+        pl_season = meta.get('upload_config', {}).get('season_id')
+        upload_mgr = get_upload_config_manager()
+        upload_config = upload_mgr.load()
+        global_season_id = upload_config.bilibili.season_id
+        season_id = int(pl_season) if pl_season else (global_season_id if global_season_id else None)
+        
+        if not season_id:
+            return JSONResponse({"success": False, "error": f"Playlist {playlist_id} 未配置目标合集"})
+        
+        # 对于没有 bilibili_target_season_id 但有 bilibili_aid 的视频，补充标记
+        videos = playlist_service.get_playlist_videos(playlist_id)
+        patched = 0
+        for v in videos:
+            vmeta = v.metadata or {}
+            if vmeta.get('bilibili_aid') and not vmeta.get('bilibili_target_season_id'):
+                updated = dict(vmeta)
+                updated['bilibili_target_season_id'] = season_id
+                updated['bilibili_season_added'] = False
+                db.update_video(v.id, metadata=updated)
+                patched += 1
+        
+        if patched > 0:
+            logger.info(f"为 {patched} 个视频补充了 bilibili_target_season_id={season_id}")
+        
+        # 初始化任务状态
+        _sync_tasks[playlist_id] = {
+            'status': 'running',
+            'message': '正在同步...',
+            'season_id': season_id,
+            'result': None,
+        }
+        
+        def sync_task():
+            try:
+                from ...uploaders.bilibili import season_sync
+                # 重新创建 DB 和 uploader（线程安全）
+                task_config = load_config()
+                task_db = Database(task_config.storage.database_path, output_base_dir=task_config.storage.output_dir)
+                task_uploader = _get_uploader()
+                
+                result = season_sync(task_db, task_uploader, playlist_id)
+                
+                # set 不能 JSON 序列化
+                serializable_result = {
+                    'total': result['total'],
+                    'success': result['success'],
+                    'failed': result['failed'],
+                    'skipped': result['skipped'],
+                    'failed_videos': result['failed_videos'],
+                }
+                
+                if result['failed'] == 0:
+                    _sync_tasks[playlist_id] = {
+                        'status': 'completed',
+                        'message': f"同步完成: {result['success']} 个视频已添加到合集",
+                        'season_id': season_id,
+                        'result': serializable_result,
+                    }
+                else:
+                    _sync_tasks[playlist_id] = {
+                        'status': 'partial',
+                        'message': f"部分完成: {result['success']} 成功, {result['failed']} 失败",
+                        'season_id': season_id,
+                        'result': serializable_result,
+                    }
+            except Exception as e:
+                logger.error(f"Season sync 任务异常 (playlist={playlist_id}): {e}", exc_info=True)
+                _sync_tasks[playlist_id] = {
+                    'status': 'failed',
+                    'message': f"同步失败: {e}",
+                    'season_id': season_id,
+                    'result': None,
+                }
+        
+        thread = threading.Thread(target=sync_task, daemon=True)
+        thread.start()
+        
+        return JSONResponse({
+            "success": True,
+            "message": f"同步任务已启动 (playlist={playlist_id}, season={season_id})",
+            "patched": patched,
+        })
+    except Exception as e:
+        logger.error(f"启动 season sync 失败: {e}", exc_info=True)
+        return JSONResponse({"success": False, "error": str(e)})
+
+
+@router.get("/season-sync/{playlist_id}/status")
+async def get_season_sync_status(playlist_id: str):
+    """获取 season sync 任务状态"""
+    task = _sync_tasks.get(playlist_id)
+    if not task:
+        return JSONResponse({"status": "none", "message": "无同步任务"})
+    return JSONResponse(task)
+
+
+@router.post("/season/{season_id}/sort")
+async def sort_season(season_id: int):
+    """触发合集自动排序（按标题中的 #数字）"""
+    try:
+        uploader = _get_uploader()
+        ok = uploader.auto_sort_season(season_id)
+        if ok:
+            return JSONResponse({"success": True, "message": f"合集 {season_id} 排序完成"})
+        else:
+            return JSONResponse({"success": False, "error": f"合集 {season_id} 排序失败"})
+    except Exception as e:
+        logger.error(f"合集排序失败: {e}")
+        return JSONResponse({"success": False, "error": str(e)})

@@ -1376,6 +1376,289 @@ class BilibiliUploader(BaseUploader):
             logger.error(f"BV号转换异常: {e}")
             return None
 
+    # =========================================================================
+    # 违规视频修复功能
+    # =========================================================================
+
+    def download_video(self, aid: int, output_path: Path, quality: int = 127) -> bool:
+        """
+        从 B站下载已上传的视频（DASH 视频+音频流，ffmpeg 合并）。
+        
+        用于违规视频修复的降级路径：当本地原始文件不存在时，从 B站下载当前版本。
+        注意：B站会对上传视频重新编码（分辨率/码率/编码均可能降低），
+        下载的版本质量低于原始上传文件。应优先使用本地原始文件。
+        
+        Args:
+            aid: 稿件 AV号
+            output_path: 输出文件路径（.mp4）
+            quality: 期望画质 ID（127=8K, 120=4K, 116=1080P60, 112=1080P+, 80=1080P）
+            
+        Returns:
+            是否成功
+        """
+        import subprocess
+        import requests as req
+        
+        session = self._get_authenticated_session()
+        
+        # 1. 获取 cid
+        # 优先从创作中心获取（支持未发布/退回视频），回退到公共 API
+        cid = None
+        detail = self.get_archive_detail(aid)
+        if detail and detail.get('videos'):
+            cid = detail['videos'][0].get('cid')
+        
+        if not cid:
+            resp = session.get(
+                f'https://api.bilibili.com/x/web-interface/view?aid={aid}',
+                timeout=10
+            )
+            view_data = resp.json()
+            if view_data.get('code') == 0:
+                pages = view_data.get('data', {}).get('pages', [])
+                if pages:
+                    cid = pages[0].get('cid')
+        
+        if not cid:
+            logger.error(f"无法获取 av{aid} 的 cid")
+            return False
+        
+        # 2. 获取 DASH 播放流
+        resp = session.get(
+            'https://api.bilibili.com/x/player/playurl',
+            params={
+                'avid': aid, 'cid': cid,
+                'qn': quality, 'fnval': 16, 'fnver': 0, 'fourk': 1,
+            },
+            timeout=10
+        )
+        play_data = resp.json()
+        if play_data.get('code') != 0:
+            logger.error(f"获取播放流失败 av{aid}: {play_data.get('message')}")
+            return False
+        
+        dash = play_data.get('data', {}).get('dash')
+        if not dash:
+            logger.error(f"av{aid} 无 DASH 流（可能仅支持 FLV）")
+            return False
+        
+        video_streams = dash.get('video', [])
+        audio_streams = dash.get('audio', [])
+        if not video_streams or not audio_streams:
+            logger.error(f"av{aid} DASH 流为空: video={len(video_streams)} audio={len(audio_streams)}")
+            return False
+        
+        # 选最高码率的视频和音频
+        best_video = max(video_streams, key=lambda x: x['bandwidth'])
+        best_audio = max(audio_streams, key=lambda x: x['bandwidth'])
+        
+        logger.info(
+            f"下载 av{aid}: 视频 {best_video.get('width','?')}x{best_video.get('height','?')} "
+            f"{best_video['codecs']} {best_video['bandwidth']//1000}kbps, "
+            f"音频 {best_audio['codecs']} {best_audio['bandwidth']//1000}kbps"
+        )
+        
+        # 3. 用 ffmpeg 下载并合并 DASH 流（-c copy 不重新编码）
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        video_url = best_video['baseUrl']
+        audio_url = best_audio['baseUrl']
+        
+        cmd = [
+            'ffmpeg', '-y',
+            '-headers', 'Referer: https://www.bilibili.com/\r\nUser-Agent: Mozilla/5.0\r\n',
+            '-i', video_url,
+            '-headers', 'Referer: https://www.bilibili.com/\r\nUser-Agent: Mozilla/5.0\r\n',
+            '-i', audio_url,
+            '-c', 'copy',
+            '-movflags', '+faststart',
+            str(output_path)
+        ]
+        
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
+            if result.returncode != 0:
+                logger.error(f"ffmpeg 合并失败: {result.stderr[-500:]}")
+                return False
+            
+            if not output_path.exists():
+                logger.error("ffmpeg 完成但输出文件不存在")
+                return False
+            
+            size_mb = output_path.stat().st_size / 1024 / 1024
+            logger.info(f"✅ 下载完成: {output_path.name} ({size_mb:.1f}MB)")
+            return True
+            
+        except subprocess.TimeoutExpired:
+            logger.error("ffmpeg 下载合并超时 (>30分钟)")
+            return False
+        except Exception as e:
+            logger.error(f"下载异常: {e}")
+            return False
+
+    def fix_violation(
+        self,
+        aid: int,
+        video_path: Optional[Path] = None,
+        mask_text: str = "此处内容因平台合规要求已被遮罩",
+        margin_sec: float = 1.0,
+        previous_ranges: Optional[List[tuple]] = None,
+        dry_run: bool = False,
+        callback: Optional[callable] = None,
+    ) -> Dict[str, Any]:
+        """
+        修复被退回的违规稿件：获取违规信息 → 合并历史mask → 遮罩 → 替换上传。
+        
+        累积式修复策略：
+        - 合并本次新违规 + 之前已 mask 的时间段，全部应用到原始文件
+        - 优先使用本地原始文件（避免 B站转码的质量损失）
+        - 本地文件不存在时自动从 B站下载（降级路径，有质量损失警告）
+        
+        Args:
+            aid: 稿件 AV号
+            video_path: 视频源文件路径。为 None 时自动从 B站下载（降级）
+            mask_text: 遮罩区域显示文字
+            margin_sec: 违规区间前后安全边距（秒）
+            previous_ranges: 之前已 mask 的时间段列表 [(start, end), ...]
+            dry_run: True 时只做遮罩不上传
+            callback: 进度回调 callback(message: str)
+            
+        Returns:
+            {
+                'success': bool,
+                'new_ranges': [(start, end), ...],      # 本次新违规
+                'all_ranges': [(start, end), ...],      # 所有 mask（旧+新合并后）
+                'masked_path': str | None,              # 遮罩文件路径（dry_run 时保留）
+                'source': 'local' | 'bilibili',         # 视频来源
+                'message': str,
+            }
+        """
+        from ..embedder.ffmpeg_wrapper import FFmpegWrapper
+        
+        def _cb(msg):
+            if callback:
+                callback(msg)
+            logger.info(msg)
+        
+        result = {
+            'success': False, 'new_ranges': [], 'all_ranges': [],
+            'masked_path': None, 'source': 'local', 'message': '',
+        }
+        
+        # Step 1: 获取退回信息
+        _cb(f"获取 av{aid} 审核退回信息...")
+        rejected = self.get_rejected_videos()
+        target = [v for v in rejected if v['aid'] == aid]
+        
+        if not target:
+            result['message'] = f"未找到 aid={aid} 的退回稿件"
+            return result
+        
+        t = target[0]
+        _cb(f"  标题: {t['title'][:60]}")
+        
+        # 收集本次新违规时间段
+        new_ranges = []
+        for p in t['problems']:
+            new_ranges.extend(p['time_ranges'])
+            _cb(f"  违规: {p['reason'][:50]}  时间: {p['violation_time']}")
+            if p['is_full_video']:
+                result['message'] = "全片违规，无法通过遮罩修复"
+                return result
+        
+        if not new_ranges:
+            result['message'] = "无具体违规时间段，无法自动修复"
+            return result
+        
+        result['new_ranges'] = new_ranges
+        
+        # Step 2: 合并历史 mask ranges + 本次新 ranges
+        all_ranges = list(previous_ranges or []) + new_ranges
+        _cb(f"  本次新违规: {new_ranges}")
+        if previous_ranges:
+            _cb(f"  历史已 mask: {previous_ranges}")
+            _cb(f"  合并后总计: {len(all_ranges)} 段")
+        
+        # Step 3: 确定视频源
+        import tempfile
+        source_video = None
+        source_type = 'local'
+        tmp_download = None
+        
+        if video_path and Path(video_path).exists():
+            source_video = Path(video_path)
+            _cb(f"  使用本地文件: {source_video} ({source_video.stat().st_size / 1024 / 1024:.0f}MB)")
+        else:
+            # 降级：从 B站下载
+            source_type = 'bilibili'
+            _cb("  ⚠️ 本地文件不可用，从 B站下载（质量会降低）...")
+            tmp_dir = Path(tempfile.mkdtemp(prefix=f"bili_fix_{aid}_"))
+            tmp_download = tmp_dir / f"av{aid}_source.mp4"
+            
+            if not self.download_video(aid, tmp_download):
+                result['message'] = "从 B站下载视频失败"
+                return result
+            
+            source_video = tmp_download
+            _cb(f"  B站下载完成: {source_video.stat().st_size / 1024 / 1024:.0f}MB")
+        
+        result['source'] = source_type
+        
+        # Step 4: ffmpeg 遮罩
+        _cb("开始遮罩处理...")
+        ffmpeg = FFmpegWrapper()
+        masked_path = source_video.parent / f"{source_video.stem}_masked{source_video.suffix}"
+        
+        ok = ffmpeg.mask_violation_segments(
+            video_path=source_video,
+            output_path=masked_path,
+            violation_ranges=all_ranges,
+            mask_text=mask_text,
+            margin_sec=margin_sec,
+        )
+        
+        if not ok:
+            result['message'] = "遮罩处理失败"
+            return result
+        
+        out_size = masked_path.stat().st_size / 1024 / 1024
+        _cb(f"  遮罩完成: {masked_path.name} ({out_size:.0f}MB)")
+        
+        # 合并后的 ranges（用 ffmpeg_wrapper 的 _merge_ranges 标准化）
+        video_info = ffmpeg.get_video_info(source_video) or {}
+        merged = ffmpeg._merge_ranges(all_ranges, margin_sec, 
+                                       video_info.get('duration', 0))
+        result['all_ranges'] = merged
+        result['masked_path'] = str(masked_path)
+        
+        # Step 5: 上传替换（除非 dry_run）
+        if dry_run:
+            _cb(f"  dry-run 模式，跳过上传。遮罩文件: {masked_path}")
+            result['success'] = True
+            result['message'] = 'dry-run 完成'
+            return result
+        
+        _cb("上传替换...")
+        replace_ok = self.replace_video(aid, masked_path)
+        
+        if replace_ok:
+            result['success'] = True
+            result['message'] = '修复完成，已重新提交审核'
+            _cb(f"  ✅ av{aid} 修复完成")
+            # 清理遮罩临时文件
+            masked_path.unlink(missing_ok=True)
+            result['masked_path'] = None
+        else:
+            result['message'] = '上传替换失败，遮罩文件已保留'
+            _cb(f"  ❌ 上传替换失败")
+        
+        # 清理下载的临时文件
+        if tmp_download and tmp_download.exists():
+            tmp_download.unlink(missing_ok=True)
+        
+        return result
+
 
 def season_sync(db, uploader: BilibiliUploader, playlist_id: str) -> Dict[str, Any]:
     """

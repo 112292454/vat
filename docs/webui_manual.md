@@ -346,7 +346,17 @@ vat/web/
 
 **账号状态**：显示当前登录状态、用户名、UID、等级。
 
-**合集管理**：查看已创建的 B站新版合集（SEASON），可复制合集 ID。
+**合集管理**：查看已创建的 B站新版合集（SEASON），支持：
+- **查看**：展开合集内视频列表（标题、av号、链接）
+- **排序**：按标题中的 `#数字` 自动排序合集内视频
+- **复制 ID**：复制合集 ID 到剪贴板
+
+**合集同步**：以 Playlist 为单位，将已上传到B站但未入集的视频批量添加到对应合集：
+- 自动读取 Playlist 的 `upload_config.season_id` 确定目标合集
+- 显示每个 Playlist 的已上传/已同步/待同步数量
+- 点击"同步"按钮在后台执行，实时显示进度
+- 同步完成后自动对合集按 `#数字` 排序
+- 对于没有 `bilibili_target_season_id` 标记的旧视频，同步时自动补充标记
 
 **审核退回管理**：
 - 点击"刷新退回列表"加载被退回的稿件
@@ -467,10 +477,13 @@ vat/web/
 | GET | `/bilibili/rejected` | 获取退回稿件列表 |
 | POST | `/bilibili/fix/{aid}` | 启动退回稿件自动修复 |
 | GET | `/bilibili/fix/{aid}/status` | 查询修复任务状态 |
-| GET | `/bilibili/templates` | 获取上传模板 |
-| POST | `/bilibili/templates` | 保存上传模板 |
-| GET | `/bilibili/settings` | 获取默认上传设置 |
-| POST | `/bilibili/settings` | 保存默认上传设置 |
+| GET | `/bilibili/season/{id}/episodes` | 获取合集内视频列表 |
+| POST | `/bilibili/season/{id}/sort` | 触发合集自动排序（按#数字） |
+| GET | `/bilibili/sync-playlists` | 获取可同步的 Playlist 列表及统计 |
+| POST | `/bilibili/season-sync/{playlist_id}` | 以 Playlist 为单位执行合集同步 |
+| GET | `/bilibili/season-sync/{playlist_id}/status` | 查询合集同步任务状态 |
+| GET | `/bilibili/config` | 获取上传配置 |
+| PUT | `/bilibili/config` | 更新上传配置 |
 
 ---
 

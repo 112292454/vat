@@ -313,7 +313,7 @@ vat status
 | `vat clean -v ID --records` | 清理产物+删除记录 |
 | `vat bilibili login` | B 站登录获取 Cookie |
 | `vat bilibili rejected` | 列出被退回的稿件及违规详情 |
-| `vat bilibili fix --aid AID` | 自动修复被退回稿件（遮罩违规片段+重新上传） |
+| `vat bilibili fix --aid AID` | 累积式修复被退回稿件（合并历史+新违规遮罩，优先本地文件，降级从B站下载） |
 
 ### 输出文件
 

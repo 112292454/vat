@@ -2442,31 +2442,33 @@ def _download_from_bilibili_cli(aid: int, bvid: str, config, logger) -> Optional
 
 @bilibili.command('fix')
 @click.option('--aid', required=True, type=int, help='要修复的稿件 AV号')
-@click.option('--video-path', type=click.Path(exists=True), help='本地视频文件路径（默认自动查找）')
+@click.option('--video-path', type=click.Path(exists=True), help='本地视频文件路径（优先使用，避免B站转码质量损失）')
 @click.option('--margin', default=1.0, type=float, help='违规区间前后扩展的安全边距（秒），默认1.0')
 @click.option('--mask-text', default='此处内容因平台合规要求已被遮罩', help='遮罩区域显示的文字')
 @click.option('--dry-run', is_flag=True, help='仅执行遮罩处理，不上传替换')
-@click.option('--keep-masked', is_flag=True, help='上传后保留遮罩文件（默认删除）')
 @click.option('--yes', '-y', is_flag=True, help='跳过确认')
 @click.pass_context
-def bilibili_fix(ctx, aid, video_path, margin, mask_text, dry_run, keep_masked, yes):
-    """修复被退回的稿件：遮罩违规片段 + 重新上传
+def bilibili_fix(ctx, aid, video_path, margin, mask_text, dry_run, yes):
+    """修复被退回的稿件：累积式遮罩违规片段 + 重新上传
     
-    自动获取审核退回信息，用 ffmpeg 遮罩违规时间段（黑屏+说明文字+静音），
-    然后上传新视频文件替换原稿件并重新提交审核。
+    自动获取审核退回信息，合并历史已 mask 的时间段和本次新违规时间段，
+    对原始视频文件执行遮罩（黑屏+说明文字+静音），然后替换上传。
     
-    流程:
-      1. 从 B站 API 获取退回原因和违规时间段
-      2. 定位本地视频文件（从 DB 或手动指定）
-      3. ffmpeg 遮罩违规片段（GPU 加速）
-      4. 上传新视频并编辑稿件替换（除非 --dry-run）
+    累积式修复策略:
+      - 每次 fix 记录已 mask 的时间段到 DB metadata
+      - 下次 fix 时自动合并旧+新违规区间，全部应用到原始文件
+      - 避免 B站"每次审核报不同位置"导致 mask 不累积的问题
+    
+    视频来源优先级:
+      1. --video-path 手动指定
+      2. 自动查找本地原始文件（从 DB 匹配）
+      3. 从 B站下载（降级路径，有质量损失警告）
     
     示例:
     
       vat bilibili fix --aid 116089795185839
       vat bilibili fix --aid 116089795185839 --dry-run
       vat bilibili fix --aid 116089795185839 --video-path /path/to/video.mp4
-      vat bilibili fix --aid 116089795185839 --margin 2.0
     """
     config = get_config(ctx.obj.get('config_path'))
     logger = get_logger()
@@ -2474,115 +2476,89 @@ def bilibili_fix(ctx, aid, video_path, margin, mask_text, dry_run, keep_masked, 
     
     uploader = _get_bilibili_uploader(ctx)
     
-    # Step 1: 获取审核信息
-    click.echo(f"获取稿件 av{aid} 的审核信息...")
-    rejected = uploader.get_rejected_videos()
-    target = [v for v in rejected if v['aid'] == aid]
-    
-    if not target:
-        click.echo(f"✗ 未找到 aid={aid} 的退回稿件", err=True)
-        click.echo("提示: 使用 `vat bilibili rejected` 查看所有退回稿件")
-        return
-    
-    t = target[0]
-    click.echo(f"  标题: {t['title'][:60]}")
-    
-    # 收集违规时间段
-    all_ranges = []
-    is_full = False
-    for p in t['problems']:
-        all_ranges.extend(p['time_ranges'])
-        if p['is_full_video']:
-            is_full = True
-        click.echo(f"  原因: {p['reason'][:60]}")
-        if p['violation_time']:
-            click.echo(f"  时间: {p['violation_time']}")
-        if p['is_full_video']:
-            click.echo(f"  位置: {p['violation_position']}")
-    
-    if is_full:
-        click.echo(f"\n✗ 全片违规，无法通过遮罩修复", err=True)
-        return
-    
-    if not all_ranges:
-        click.echo(f"\n✗ 无具体违规时间段，无法自动修复", err=True)
-        return
-    
-    click.echo(f"\n  违规区间: {all_ranges}")
-    click.echo(f"  安全边距: ±{margin}s")
-    
-    # Step 2: 定位本地视频文件
+    # 查找本地视频文件（如果未手动指定）
+    local_video = None
     if video_path:
         local_video = Path(video_path)
     else:
         local_video = _find_local_video_cli(aid, config, db, uploader)
-        
-        if not local_video:
-            # fallback: 从 B站下载原视频
-            click.echo(f"\n  ⚠️ 本地文件未找到，尝试从B站下载原视频...")
-            local_video = _download_from_bilibili_cli(aid, t.get('bvid', ''), config, logger)
-        
-        if not local_video:
-            click.echo(f"\n✗ 无法自动定位本地视频文件，且从B站下载失败", err=True)
-            click.echo(f"  请使用 --video-path 手动指定视频文件路径")
-            return
+        if local_video:
+            click.echo(f"  本地文件: {local_video} ({local_video.stat().st_size / 1024 / 1024:.0f}MB)")
+        else:
+            click.echo("  ⚠️ 本地文件未找到，将从 B站下载（质量会降低）")
     
-    # Step 3: ffmpeg 遮罩
-    from ..embedder.ffmpeg_wrapper import FFmpegWrapper
+    # 从 DB metadata 读取历史已 mask 的 violation_ranges
+    previous_ranges = _get_previous_violation_ranges(db, aid)
+    if previous_ranges:
+        click.echo(f"  历史已 mask: {len(previous_ranges)} 段 {previous_ranges}")
     
-    ffmpeg = FFmpegWrapper()
-    info = ffmpeg.get_video_info(local_video)
-    if not info:
-        click.echo(f"✗ 无法获取视频信息: {local_video}", err=True)
-        return
-    
-    click.echo(f"\n  原视频: {info['duration']:.0f}s, "
-               f"{info.get('video', {}).get('width', '?')}x{info.get('video', {}).get('height', '?')}, "
-               f"{local_video.stat().st_size / 1024 / 1024:.0f}MB")
-    
-    masked_video = local_video.parent / f"{local_video.stem}_masked{local_video.suffix}"
-    
-    if not yes and not dry_run:
-        if not click.confirm(f"\n确认遮罩 {len(all_ranges)} 个违规区间并上传替换?"):
-            click.echo("已取消")
-            return
-    elif not yes:
-        if not click.confirm(f"\n确认遮罩 {len(all_ranges)} 个违规区间?"):
+    if not yes:
+        action = "遮罩" if dry_run else "遮罩并上传替换"
+        if not click.confirm(f"\n确认{action}?"):
             click.echo("已取消")
             return
     
-    click.echo(f"\n开始遮罩处理...")
-    ok = ffmpeg.mask_violation_segments(
+    # 调用封装的 fix_violation
+    result = uploader.fix_violation(
+        aid=aid,
         video_path=local_video,
-        output_path=masked_video,
-        violation_ranges=all_ranges,
         mask_text=mask_text,
         margin_sec=margin,
+        previous_ranges=previous_ranges,
+        dry_run=dry_run,
+        callback=click.echo,
     )
     
-    if not ok:
-        click.echo(f"\n✗ 遮罩处理失败", err=True)
-        return
-    
-    out_size = masked_video.stat().st_size / 1024 / 1024
-    click.echo(f"  ✓ 遮罩完成: {masked_video.name} ({out_size:.0f}MB)")
-    
-    # Step 4: 上传替换
-    if dry_run:
-        click.echo(f"\n--dry-run 模式，跳过上传")
-        click.echo(f"  遮罩文件: {masked_video}")
-        return
-    
-    click.echo(f"\n开始上传替换...")
-    replace_ok = uploader.replace_video(aid, masked_video)
-    
-    if replace_ok:
-        click.echo(f"\n✅ 稿件 av{aid} 已修复并重新提交审核")
-        if not keep_masked:
-            masked_video.unlink(missing_ok=True)
-            click.echo(f"  已清理遮罩临时文件")
+    if result['success']:
+        # 保存已 mask 的 ranges 到 DB metadata（供下次累积使用）
+        _save_violation_ranges(db, aid, result['all_ranges'])
+        
+        if dry_run:
+            click.echo(f"\n--dry-run 完成，遮罩文件: {result['masked_path']}")
+        else:
+            click.echo(f"\n✅ 稿件 av{aid} 已修复并重新提交审核")
     else:
-        click.echo(f"\n✗ 上传替换失败，遮罩文件保留在: {masked_video}", err=True)
+        click.echo(f"\n✗ 修复失败: {result['message']}", err=True)
+
+
+def _get_previous_violation_ranges(db, aid: int) -> List[tuple]:
+    """从 DB 中查找该 aid 对应视频的历史已 mask violation_ranges"""
+    import sqlite3, json
+    conn = sqlite3.connect(str(db.db_path))
+    c = conn.cursor()
+    c.execute("SELECT metadata FROM videos WHERE metadata LIKE ?", (f'%{aid}%',))
+    rows = c.fetchall()
+    conn.close()
+    
+    for (meta_str,) in rows:
+        if not meta_str:
+            continue
+        meta = json.loads(meta_str)
+        if meta.get('bilibili_aid') == aid or str(meta.get('bilibili_aid')) == str(aid):
+            ranges = meta.get('bilibili_violation_ranges', [])
+            return [tuple(r) for r in ranges]
+    return []
+
+
+def _save_violation_ranges(db, aid: int, ranges: List[tuple]):
+    """将已 mask 的 violation_ranges 保存到 DB 中对应视频的 metadata"""
+    import sqlite3, json
+    _logger = get_logger()
+    conn = sqlite3.connect(str(db.db_path))
+    c = conn.cursor()
+    c.execute("SELECT id, metadata FROM videos WHERE metadata LIKE ?", (f'%{aid}%',))
+    rows = c.fetchall()
+    
+    for vid, meta_str in rows:
+        if not meta_str:
+            continue
+        meta = json.loads(meta_str)
+        if meta.get('bilibili_aid') == aid or str(meta.get('bilibili_aid')) == str(aid):
+            meta['bilibili_violation_ranges'] = [list(r) for r in ranges]
+            db.update_video(vid, metadata=meta)
+            _logger.info(f"已保存 violation_ranges 到视频 {vid}: {len(ranges)} 段")
+            break
+    conn.close()
 
 
 @upload.command('playlist')

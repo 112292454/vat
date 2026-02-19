@@ -62,10 +62,21 @@
                         <td class="px-4 py-3 text-sm text-gray-900">{{ s.season_id }}</td>
                         <td class="px-4 py-3 text-sm text-gray-900">{{ s.name or '(未命名)' }}</td>
                         <td class="px-4 py-3 text-sm text-gray-500">{{ s.total }}</td>
-                        <td class="px-4 py-3 text-sm">
-                            <button onclick="copySeasonId({{ s.season_id }})" class="text-blue-600 hover:text-blue-800">
+                        <td class="px-4 py-3 text-sm space-x-2">
+                            <button onclick="toggleSeasonEpisodes({{ s.season_id }})" class="text-blue-600 hover:text-blue-800">
+                                查看
+                            </button>
+                            <button onclick="sortSeason({{ s.season_id }})" class="text-green-600 hover:text-green-800">
+                                排序
+                            </button>
+                            <button onclick="copySeasonId({{ s.season_id }})" class="text-gray-500 hover:text-gray-700">
                                 复制ID
                             </button>
+                        </td>
+                    </tr>
+                    <tr id="season-episodes-{{ s.season_id }}" class="hidden">
+                        <td colspan="4" class="px-4 py-3 bg-gray-50">
+                            <div class="text-sm text-gray-500">点击"查看"加载...</div>
                         </td>
                     </tr>
                     {% endfor %}
@@ -74,6 +85,29 @@
         </div>
         {% else %}
         <p class="text-gray-500">暂无合集</p>
+        {% endif %}
+    </div>
+    
+    <!-- 合集同步 -->
+    <div class="bg-white rounded-lg shadow p-6 mb-6">
+        <div class="flex justify-between items-center mb-4">
+            <h2 class="text-lg font-semibold">合集同步</h2>
+            <button onclick="loadSyncPlaylists()" class="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 text-sm"
+                    {% if not login_status.logged_in %}disabled{% endif %}
+                    id="btn-load-sync">
+                刷新列表
+            </button>
+        </div>
+        
+        {% if not login_status.logged_in %}
+        <p class="text-gray-500">请先登录B站账号</p>
+        {% else %}
+        <p class="text-sm text-gray-500 mb-3">
+            将本地 Playlist 中已上传到B站但未入集的视频，批量添加到对应合集并排序。
+        </p>
+        <div id="sync-container">
+            <p class="text-gray-400 text-sm">点击"刷新列表"加载可同步的 Playlist</p>
+        </div>
         {% endif %}
     </div>
     
@@ -396,6 +430,280 @@ document.getElementById('create-season-form').addEventListener('submit', async (
 function copySeasonId(id) {
     navigator.clipboard.writeText(id.toString());
     alert('已复制: ' + id);
+}
+
+// 查看合集视频列表（展开/折叠）
+async function toggleSeasonEpisodes(seasonId) {
+    const row = document.getElementById(`season-episodes-${seasonId}`);
+    if (!row) return;
+    
+    if (!row.classList.contains('hidden')) {
+        row.classList.add('hidden');
+        return;
+    }
+    
+    // 加载
+    const cell = row.querySelector('td');
+    cell.innerHTML = '<div class="text-sm text-gray-500">加载中...</div>';
+    row.classList.remove('hidden');
+    
+    try {
+        const resp = await fetch(`/bilibili/season/${seasonId}/episodes`);
+        const data = await resp.json();
+        
+        if (!data.success) {
+            cell.innerHTML = `<div class="text-sm text-red-500">${escapeHtml(data.error)}</div>`;
+            return;
+        }
+        
+        if (data.episodes.length === 0) {
+            cell.innerHTML = '<div class="text-sm text-gray-400">合集中暂无视频</div>';
+            return;
+        }
+        
+        let html = `<div class="text-xs text-gray-400 mb-2">共 ${data.total} 个视频</div>`;
+        html += '<div class="max-h-64 overflow-y-auto space-y-1">';
+        data.episodes.forEach((ep, idx) => {
+            html += `<div class="flex items-center gap-2 text-sm py-1 px-2 hover:bg-gray-100 rounded">
+                <span class="text-gray-400 w-6 text-right">${idx + 1}.</span>
+                <span class="text-gray-700 truncate flex-1">${escapeHtml(ep.title)}</span>
+                <a href="https://www.bilibili.com/video/av${ep.aid}" target="_blank" 
+                   class="text-xs text-blue-400 hover:text-blue-600 flex-shrink-0">av${ep.aid}</a>
+            </div>`;
+        });
+        html += '</div>';
+        cell.innerHTML = html;
+    } catch (e) {
+        cell.innerHTML = `<div class="text-sm text-red-500">加载失败: ${e}</div>`;
+    }
+}
+
+// 触发合集排序
+async function sortSeason(seasonId) {
+    if (!confirm(`确认对合集 ${seasonId} 执行自动排序？\n（按标题中的 #数字 升序排列）`)) return;
+    
+    try {
+        const resp = await fetch(`/bilibili/season/${seasonId}/sort`, { method: 'POST' });
+        const data = await resp.json();
+        if (data.success) {
+            alert('排序完成');
+        } else {
+            alert('排序失败: ' + data.error);
+        }
+    } catch (e) {
+        alert('排序异常: ' + e);
+    }
+}
+
+// =============================================================================
+// 合集同步
+// =============================================================================
+
+let syncPlaylists = [];
+
+async function loadSyncPlaylists() {
+    const container = document.getElementById('sync-container');
+    const btn = document.getElementById('btn-load-sync');
+    if (!container || !btn) return;
+    
+    btn.disabled = true;
+    btn.textContent = '加载中...';
+    container.innerHTML = '<p class="text-gray-400 text-sm">正在获取...</p>';
+    
+    try {
+        const resp = await fetch('/bilibili/sync-playlists');
+        const data = await resp.json();
+        
+        if (!data.success) {
+            container.innerHTML = `<p class="text-red-500 text-sm">${escapeHtml(data.error)}</p>`;
+            return;
+        }
+        
+        syncPlaylists = data.playlists;
+        renderSyncPlaylists();
+    } catch (e) {
+        container.innerHTML = `<p class="text-red-500 text-sm">加载失败: ${e}</p>`;
+    } finally {
+        btn.disabled = false;
+        btn.textContent = '刷新列表';
+    }
+}
+
+function renderSyncPlaylists() {
+    const container = document.getElementById('sync-container');
+    if (!container) return;
+    
+    if (syncPlaylists.length === 0) {
+        container.innerHTML = '<p class="text-gray-400 text-sm">没有配置了目标合集的 Playlist</p>';
+        return;
+    }
+    
+    let html = '<div class="space-y-3">';
+    
+    for (const pl of syncPlaylists) {
+        const hasPending = pl.pending_count > 0;
+        const statusColor = pl.sync_status === 'running' ? 'blue'
+            : pl.sync_status === 'completed' ? 'green'
+            : pl.sync_status === 'partial' ? 'yellow'
+            : pl.sync_status === 'failed' ? 'red'
+            : 'gray';
+        
+        html += `
+            <div class="border rounded-lg p-4" id="sync-card-${pl.playlist_id}">
+                <div class="flex justify-between items-start">
+                    <div class="flex-1 min-w-0">
+                        <h3 class="text-sm font-medium text-gray-900 truncate">${escapeHtml(pl.title)}</h3>
+                        <div class="text-xs text-gray-500 mt-1 space-x-3">
+                            <span>合集: ${pl.season_id}</span>
+                            <span>已上传: ${pl.total_uploaded}</span>
+                            <span>已同步: ${pl.synced_count}</span>
+                            <span class="${hasPending ? 'text-orange-600 font-medium' : 'text-gray-400'}">
+                                待同步: ${pl.pending_count}
+                            </span>
+                        </div>
+                    </div>
+                    <div class="ml-4 flex-shrink-0" id="sync-action-${pl.playlist_id}">`;
+        
+        if (pl.sync_status === 'running') {
+            html += `
+                        <span class="inline-flex items-center px-3 py-1 rounded-full text-xs bg-blue-100 text-blue-700">
+                            <svg class="animate-spin -ml-1 mr-1.5 h-3 w-3" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>
+                            同步中...
+                        </span>`;
+        } else if (hasPending) {
+            html += `
+                        <button onclick="startSeasonSync('${pl.playlist_id}')" 
+                                class="px-3 py-1.5 bg-blue-500 text-white rounded text-sm hover:bg-blue-600">
+                            同步 ${pl.pending_count} 个
+                        </button>`;
+        } else {
+            html += `<span class="text-xs text-green-600">已全部同步</span>`;
+        }
+        
+        html += `
+                    </div>
+                </div>`;
+        
+        // 显示上次同步结果
+        if (pl.sync_status && pl.sync_status !== 'running' && pl.sync_message) {
+            html += `<div class="text-xs mt-2 text-${statusColor}-600">${escapeHtml(pl.sync_message)}</div>`;
+        }
+        
+        html += '</div>';
+    }
+    
+    html += '</div>';
+    container.innerHTML = html;
+    
+    // 对正在运行的任务启动轮询
+    for (const pl of syncPlaylists) {
+        if (pl.sync_status === 'running') {
+            pollSyncStatus(pl.playlist_id);
+        }
+    }
+}
+
+async function startSeasonSync(playlistId) {
+    const actionDiv = document.getElementById(`sync-action-${playlistId}`);
+    if (!actionDiv) return;
+    
+    actionDiv.innerHTML = `
+        <span class="inline-flex items-center px-3 py-1 rounded-full text-xs bg-blue-100 text-blue-700">
+            <svg class="animate-spin -ml-1 mr-1.5 h-3 w-3" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>
+            启动中...
+        </span>`;
+    
+    try {
+        const resp = await fetch(`/bilibili/season-sync/${encodeURIComponent(playlistId)}`, { method: 'POST' });
+        const data = await resp.json();
+        
+        if (data.success) {
+            actionDiv.innerHTML = `
+                <span class="inline-flex items-center px-3 py-1 rounded-full text-xs bg-blue-100 text-blue-700">
+                    <svg class="animate-spin -ml-1 mr-1.5 h-3 w-3" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>
+                    同步中...
+                </span>`;
+            if (data.patched > 0) {
+                const card = document.getElementById(`sync-card-${playlistId}`);
+                if (card) {
+                    const note = document.createElement('div');
+                    note.className = 'text-xs mt-2 text-gray-500';
+                    note.textContent = `已为 ${data.patched} 个视频补充合集标记`;
+                    card.appendChild(note);
+                }
+            }
+            pollSyncStatus(playlistId);
+        } else {
+            actionDiv.innerHTML = `<span class="text-xs text-red-500">${escapeHtml(data.error)}</span>`;
+        }
+    } catch (e) {
+        actionDiv.innerHTML = `<span class="text-xs text-red-500">启动失败: ${e}</span>`;
+    }
+}
+
+async function pollSyncStatus(playlistId) {
+    try {
+        const resp = await fetch(`/bilibili/season-sync/${encodeURIComponent(playlistId)}/status`);
+        const data = await resp.json();
+        
+        const actionDiv = document.getElementById(`sync-action-${playlistId}`);
+        if (!actionDiv) return;
+        
+        if (data.status === 'running') {
+            // 继续轮询
+            setTimeout(() => pollSyncStatus(playlistId), 3000);
+        } else if (data.status === 'completed') {
+            actionDiv.innerHTML = `<span class="text-xs text-green-600">同步完成</span>`;
+            // 显示结果
+            const card = document.getElementById(`sync-card-${playlistId}`);
+            if (card && data.result) {
+                let existing = card.querySelector('.sync-result');
+                if (!existing) {
+                    existing = document.createElement('div');
+                    existing.className = 'sync-result text-xs mt-2 text-green-600';
+                    card.appendChild(existing);
+                }
+                existing.textContent = `${data.result.success} 个视频已添加到合集`;
+            }
+            // 延迟刷新列表
+            setTimeout(loadSyncPlaylists, 2000);
+        } else if (data.status === 'partial') {
+            actionDiv.innerHTML = `
+                <button onclick="startSeasonSync('${playlistId}')" 
+                        class="px-3 py-1.5 bg-orange-500 text-white rounded text-xs hover:bg-orange-600">
+                    重试
+                </button>`;
+            const card = document.getElementById(`sync-card-${playlistId}`);
+            if (card) {
+                let existing = card.querySelector('.sync-result');
+                if (!existing) {
+                    existing = document.createElement('div');
+                    existing.className = 'sync-result text-xs mt-2 text-yellow-600';
+                    card.appendChild(existing);
+                }
+                existing.textContent = data.message || '部分视频同步失败';
+            }
+        } else if (data.status === 'failed') {
+            actionDiv.innerHTML = `
+                <button onclick="startSeasonSync('${playlistId}')" 
+                        class="px-3 py-1.5 bg-red-500 text-white rounded text-xs hover:bg-red-600">
+                    重试
+                </button>`;
+            const card = document.getElementById(`sync-card-${playlistId}`);
+            if (card) {
+                let existing = card.querySelector('.sync-result');
+                if (!existing) {
+                    existing = document.createElement('div');
+                    existing.className = 'sync-result text-xs mt-2 text-red-600';
+                    card.appendChild(existing);
+                }
+                existing.textContent = data.message || '同步失败';
+            }
+        }
+    } catch (e) {
+        console.error('轮询同步状态失败:', e);
+        setTimeout(() => pollSyncStatus(playlistId), 5000);
+    }
 }
 
 // 插入变量

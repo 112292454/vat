@@ -241,5 +241,250 @@ class TestGetRejectedVideosParsing:
         assert p['time_ranges'] == []
 
 
+class TestFixViolation:
+    """测试 fix_violation 封装逻辑（mock 所有外部依赖）"""
+    
+    @patch.object(BilibiliUploader, 'replace_video', return_value=True)
+    @patch('vat.embedder.ffmpeg_wrapper.FFmpegWrapper')
+    @patch.object(BilibiliUploader, 'get_rejected_videos')
+    @patch.object(BilibiliUploader, '_load_cookie')
+    def test_fix_with_local_file(self, mock_load, mock_rejected, mock_ffmpeg_cls, mock_replace, tmp_path):
+        """有本地文件时：直接 mask + 上传，不下载"""
+        # 准备
+        mock_rejected.return_value = [{
+            'aid': 12345, 'bvid': 'BV1xx', 'title': '测试', 'state': -2,
+            'problems': [{
+                'reason': '违规', 'violation_time': 'P1(00:10:00-00:10:05)',
+                'violation_position': '', 'modify_advise': '',
+                'is_full_video': False, 'time_ranges': [(600, 605)],
+            }],
+        }]
+        
+        mock_ffmpeg = MagicMock()
+        mock_ffmpeg_cls.return_value = mock_ffmpeg
+        mock_ffmpeg.mask_violation_segments.return_value = True
+        mock_ffmpeg._merge_ranges.return_value = [(599, 606)]
+        mock_ffmpeg.get_video_info.return_value = {'duration': 3600}
+        
+        # 创建假的本地视频文件
+        local_video = tmp_path / "video.mp4"
+        local_video.write_bytes(b'\x00' * 1024)
+        # 创建假的 masked 输出
+        masked = tmp_path / "video_masked.mp4"
+        masked.write_bytes(b'\x00' * 1024)
+        
+        uploader = BilibiliUploader.__new__(BilibiliUploader)
+        uploader._cookie_loaded = True
+        uploader.cookie_data = {}
+        
+        result = uploader.fix_violation(
+            aid=12345,
+            video_path=local_video,
+            previous_ranges=[(100, 110)],
+            dry_run=False,
+        )
+        
+        assert result['success'] is True
+        assert result['source'] == 'local'
+        assert result['new_ranges'] == [(600, 605)]
+        # mask_violation_segments 应收到合并的 ranges（旧+新）
+        call_args = mock_ffmpeg.mask_violation_segments.call_args
+        assert (100, 110) in call_args.kwargs['violation_ranges']
+        assert (600, 605) in call_args.kwargs['violation_ranges']
+    
+    @patch.object(BilibiliUploader, 'get_rejected_videos')
+    @patch.object(BilibiliUploader, '_load_cookie')
+    def test_fix_full_video_violation(self, mock_load, mock_rejected):
+        """全片违规应返回失败"""
+        mock_rejected.return_value = [{
+            'aid': 99999, 'bvid': 'BV2yy', 'title': '全片违规', 'state': -2,
+            'problems': [{
+                'reason': '素材不合规', 'violation_time': '',
+                'violation_position': '内容全程', 'modify_advise': '',
+                'is_full_video': True, 'time_ranges': [],
+            }],
+        }]
+        
+        uploader = BilibiliUploader.__new__(BilibiliUploader)
+        uploader._cookie_loaded = True
+        uploader.cookie_data = {}
+        
+        result = uploader.fix_violation(aid=99999)
+        
+        assert result['success'] is False
+        assert '全片违规' in result['message']
+    
+    @patch.object(BilibiliUploader, 'get_rejected_videos')
+    @patch.object(BilibiliUploader, '_load_cookie')
+    def test_fix_no_time_ranges(self, mock_load, mock_rejected):
+        """无具体违规时间段应返回失败"""
+        mock_rejected.return_value = [{
+            'aid': 88888, 'bvid': 'BV3zz', 'title': '无时间段', 'state': -2,
+            'problems': [{
+                'reason': '不合规', 'violation_time': '',
+                'violation_position': '', 'modify_advise': '',
+                'is_full_video': False, 'time_ranges': [],
+            }],
+        }]
+        
+        uploader = BilibiliUploader.__new__(BilibiliUploader)
+        uploader._cookie_loaded = True
+        uploader.cookie_data = {}
+        
+        result = uploader.fix_violation(aid=88888)
+        
+        assert result['success'] is False
+        assert '无具体违规时间段' in result['message']
+    
+    @patch.object(BilibiliUploader, 'get_rejected_videos')
+    @patch.object(BilibiliUploader, '_load_cookie')
+    def test_fix_aid_not_found(self, mock_load, mock_rejected):
+        """找不到指定 aid 的退回稿件"""
+        mock_rejected.return_value = []
+        
+        uploader = BilibiliUploader.__new__(BilibiliUploader)
+        uploader._cookie_loaded = True
+        uploader.cookie_data = {}
+        
+        result = uploader.fix_violation(aid=77777)
+        
+        assert result['success'] is False
+        assert '未找到' in result['message']
+    
+    @patch('vat.embedder.ffmpeg_wrapper.FFmpegWrapper')
+    @patch.object(BilibiliUploader, 'get_rejected_videos')
+    @patch.object(BilibiliUploader, '_load_cookie')
+    def test_dry_run_no_upload(self, mock_load, mock_rejected, mock_ffmpeg_cls, tmp_path):
+        """dry-run 模式：做 mask 但不上传"""
+        mock_rejected.return_value = [{
+            'aid': 12345, 'bvid': 'BV1xx', 'title': '测试', 'state': -2,
+            'problems': [{
+                'reason': '违规', 'violation_time': 'P1(00:10:00-00:10:05)',
+                'violation_position': '', 'modify_advise': '',
+                'is_full_video': False, 'time_ranges': [(600, 605)],
+            }],
+        }]
+        
+        mock_ffmpeg = MagicMock()
+        mock_ffmpeg_cls.return_value = mock_ffmpeg
+        mock_ffmpeg.mask_violation_segments.return_value = True
+        mock_ffmpeg._merge_ranges.return_value = [(599, 606)]
+        mock_ffmpeg.get_video_info.return_value = {'duration': 3600}
+        
+        local_video = tmp_path / "video.mp4"
+        local_video.write_bytes(b'\x00' * 1024)
+        masked = tmp_path / "video_masked.mp4"
+        masked.write_bytes(b'\x00' * 1024)
+        
+        uploader = BilibiliUploader.__new__(BilibiliUploader)
+        uploader._cookie_loaded = True
+        uploader.cookie_data = {}
+        
+        # 不应调用 replace_video
+        with patch.object(uploader, 'replace_video') as mock_replace:
+            result = uploader.fix_violation(aid=12345, video_path=local_video, dry_run=True)
+            mock_replace.assert_not_called()
+        
+        assert result['success'] is True
+        assert result['masked_path'] is not None
+        assert 'dry-run' in result['message']
+    
+    @patch.object(BilibiliUploader, 'download_video', return_value=False)
+    @patch.object(BilibiliUploader, 'get_rejected_videos')
+    @patch.object(BilibiliUploader, '_load_cookie')
+    def test_fix_download_fallback_fails(self, mock_load, mock_rejected, mock_download):
+        """无本地文件且 B站下载失败"""
+        mock_rejected.return_value = [{
+            'aid': 12345, 'bvid': 'BV1xx', 'title': '测试', 'state': -2,
+            'problems': [{
+                'reason': '违规', 'violation_time': 'P1(00:10:00-00:10:05)',
+                'violation_position': '', 'modify_advise': '',
+                'is_full_video': False, 'time_ranges': [(600, 605)],
+            }],
+        }]
+        
+        uploader = BilibiliUploader.__new__(BilibiliUploader)
+        uploader._cookie_loaded = True
+        uploader.cookie_data = {}
+        
+        result = uploader.fix_violation(aid=12345, video_path=None)
+        
+        assert result['success'] is False
+        assert '下载' in result['message']
+
+
+class TestDownloadVideo:
+    """测试 download_video（mock HTTP + subprocess）"""
+    
+    @patch('subprocess.run')
+    @patch.object(BilibiliUploader, 'get_archive_detail')
+    @patch.object(BilibiliUploader, '_get_authenticated_session')
+    @patch.object(BilibiliUploader, '_load_cookie')
+    def test_download_success(self, mock_load, mock_session, mock_detail, mock_run, tmp_path):
+        """成功下载 DASH 视频"""
+        mock_detail.return_value = {
+            'videos': [{'cid': 12345678}]
+        }
+        
+        # mock playurl API 响应
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            'code': 0,
+            'data': {
+                'dash': {
+                    'video': [
+                        {'id': 112, 'codecs': 'avc1', 'bandwidth': 2000000,
+                         'width': 1920, 'height': 1080, 'baseUrl': 'https://example.com/video.m4s'},
+                    ],
+                    'audio': [
+                        {'id': 30280, 'codecs': 'mp4a', 'bandwidth': 90000,
+                         'baseUrl': 'https://example.com/audio.m4s'},
+                    ],
+                },
+            },
+        }
+        session = MagicMock()
+        session.get.return_value = mock_resp
+        mock_session.return_value = session
+        
+        # mock ffmpeg 成功执行
+        output_file = tmp_path / "output.mp4"
+        def fake_run(cmd, **kwargs):
+            output_file.write_bytes(b'\x00' * 1024)
+            return MagicMock(returncode=0)
+        mock_run.side_effect = fake_run
+        
+        uploader = BilibiliUploader.__new__(BilibiliUploader)
+        uploader._cookie_loaded = True
+        uploader.cookie_data = {'SESSDATA': 'test'}
+        
+        result = uploader.download_video(aid=99999, output_path=output_file)
+        
+        assert result is True
+        assert output_file.exists()
+        mock_run.assert_called_once()
+        # 验证 ffmpeg 命令包含 -c copy（不重新编码）
+        cmd = mock_run.call_args[0][0]
+        assert '-c' in cmd and 'copy' in cmd
+    
+    @patch.object(BilibiliUploader, 'get_archive_detail', return_value=None)
+    @patch.object(BilibiliUploader, '_get_authenticated_session')
+    @patch.object(BilibiliUploader, '_load_cookie')
+    def test_download_no_cid(self, mock_load, mock_session, mock_detail):
+        """无法获取 cid 时失败"""
+        session = MagicMock()
+        resp = MagicMock()
+        resp.json.return_value = {'code': -404}
+        session.get.return_value = resp
+        mock_session.return_value = session
+        
+        uploader = BilibiliUploader.__new__(BilibiliUploader)
+        uploader._cookie_loaded = True
+        uploader.cookie_data = {'SESSDATA': 'test'}
+        
+        result = uploader.download_video(aid=99999, output_path=Path('/tmp/test.mp4'))
+        assert result is False
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])

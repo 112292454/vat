@@ -41,7 +41,8 @@ class VideoProcessor:
         progress_callback: Optional[Callable[[str], None]] = None,
         video_index: int = 0,
         total_videos: int = 1,
-        playlist_id: Optional[str] = None
+        playlist_id: Optional[str] = None,
+        upload_dtime: int = 0
     ):
         """
         初始化视频处理器
@@ -57,6 +58,7 @@ class VideoProcessor:
             playlist_id: 发起任务的 Playlist ID（上传时用于确定正确的 playlist 上下文）。
                 视频可能属于多个 playlist，此参数指定"当前操作的上下文 playlist"。
                 为 None 时回退到 video.playlist_id（videos 表的单一字段）。
+            upload_dtime: B站定时发布时间戳（10位Unix时间戳，0=立即发布，需>当前时间+2小时）
         """
         self.video_id = video_id
         self.config = config
@@ -66,6 +68,7 @@ class VideoProcessor:
         self.video_index = video_index
         self.total_videos = total_videos
         self._playlist_id = playlist_id
+        self._upload_dtime = upload_dtime
         
         # 初始化日志
         self.logger = setup_logger("pipeline.executor")
@@ -1831,6 +1834,10 @@ class VideoProcessor:
         self.progress_callback(f"标题: {title[:50]}...")
         self.progress_callback(f"分区: {tid}, 类型: {'自制' if copyright_type == 1 else '转载'}")
         self.progress_callback(f"标签: {', '.join(tags[:5])}{'...' if len(tags) > 5 else ''}")
+        if self._upload_dtime > 0:
+            from datetime import datetime as _dt
+            dtime_str = _dt.fromtimestamp(self._upload_dtime).strftime('%Y-%m-%d %H:%M')
+            self.progress_callback(f"定时发布: {dtime_str}")
         
         # 处理封面
         cover_path = None
@@ -1901,6 +1908,7 @@ class VideoProcessor:
                 copyright=copyright_type,
                 source=source_url,
                 cover_path=cover_path,
+                dtime=self._upload_dtime,
             )
             
             # 清理临时封面文件

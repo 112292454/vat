@@ -128,10 +128,22 @@
                     <div id="upload-schedule-section" class="hidden mt-2 ml-6 p-4 bg-orange-50 border border-orange-200 rounded-lg">
                         <label class="flex items-center mb-3">
                             <input type="checkbox" id="enable-schedule" class="mr-2" onchange="toggleScheduleOptions()">
-                            <span class="text-sm font-medium text-orange-800">定时上传（每次触发上传一个视频）</span>
+                            <span class="text-sm font-medium text-orange-800">定时上传</span>
                         </label>
                         
                         <div id="schedule-options" class="hidden space-y-3">
+                            <!-- 每次上传数量 -->
+                            <div class="flex items-center space-x-2">
+                                <span class="text-sm">每次触发上传</span>
+                                <select id="upload-batch-size" class="border rounded px-2 py-1 text-sm">
+                                    <option value="1" selected>1</option>
+                                    <option value="2">2</option>
+                                    <option value="3">3</option>
+                                    <option value="5">5</option>
+                                    <option value="10">10</option>
+                                </select>
+                                <span class="text-sm">个视频</span>
+                            </div>
                             <!-- 模式选择 -->
                             <div>
                                 <select id="schedule-mode" class="border rounded-lg px-3 py-2 text-sm w-full max-w-xs"
@@ -144,7 +156,7 @@
                             
                             <!-- 模式1: 每天指定时刻 -->
                             <div id="mode-daily" class="space-y-2">
-                                <p class="text-xs text-gray-600">选择每天上传的时间点（可多选，每个时间点上传一个视频）：</p>
+                                <p class="text-xs text-gray-600">选择每天上传的时间点（可多选）：</p>
                                 <div id="time-slots" class="flex flex-wrap gap-2">
                                     <input type="time" class="time-slot border rounded px-2 py-1 text-sm" value="12:00">
                                 </div>
@@ -169,7 +181,7 @@
                                         <option value="24">24</option>
                                         <option value="48">48</option>
                                     </select>
-                                    <span class="text-sm">小时上传一个</span>
+                                    <span class="text-sm">小时触发一次</span>
                                 </div>
                                 <p class="text-xs text-gray-500">生成的 cron: <code id="interval-cron-preview" class="bg-gray-100 px-1 rounded">-</code></p>
                             </div>
@@ -184,6 +196,23 @@
                                     <code>0 */6 * * *</code> = 每6小时
                                 </p>
                                 <p id="cron-validation" class="text-xs hidden"></p>
+                            </div>
+                            
+                            <!-- 上传模式选择 -->
+                            <div class="pt-2 border-t border-orange-200 mt-2">
+                                <p class="text-xs font-medium text-orange-800 mb-1">上传模式</p>
+                                <div class="flex gap-3">
+                                    <label class="flex items-center text-sm cursor-pointer">
+                                        <input type="radio" name="upload_mode" value="cron" checked class="mr-1">
+                                        后台等待上传
+                                        <span class="ml-1 text-xs text-gray-500">(进程定时触发)</span>
+                                    </label>
+                                    <label class="flex items-center text-sm cursor-pointer">
+                                        <input type="radio" name="upload_mode" value="dtime" class="mr-1">
+                                        B站定时发布
+                                        <span class="ml-1 text-xs text-gray-500">(立即上传,B站定时发布,需>2h)</span>
+                                    </label>
+                                </div>
                             </div>
                         </div>
                     </div>
@@ -434,15 +463,17 @@ function getFormData() {
     const force = form.querySelector('input[name="force"]').checked;
     const concurrency = parseInt(form.querySelector('select[name="concurrency"]').value) || 1;
     const uploadCron = getUploadCron();
+    const uploadBatchSize = uploadCron ? parseInt(document.getElementById('upload-batch-size').value) || 1 : 1;
+    const uploadMode = uploadCron ? (form.querySelector('input[name="upload_mode"]:checked')?.value || 'cron') : 'cron';
     const failFast = form.querySelector('input[name="fail_fast"]').checked;
     
-    return { videoIds, steps, gpuDevice, force, concurrency, uploadCron, failFast };
+    return { videoIds, steps, gpuDevice, force, concurrency, uploadCron, uploadBatchSize, uploadMode, failFast };
 }
 
 async function submitTask(event) {
     event.preventDefault();
     
-    const { videoIds, steps, gpuDevice, force, concurrency, uploadCron, failFast } = getFormData();
+    const { videoIds, steps, gpuDevice, force, concurrency, uploadCron, uploadBatchSize, uploadMode, failFast } = getFormData();
     
     if (videoIds.length === 0) {
         showToast('请至少选择一个视频', 'warning');
@@ -472,6 +503,8 @@ async function submitTask(event) {
                 concurrency: concurrency,
                 playlist_id: document.querySelector('input[name="playlist_id"]')?.value || null,
                 upload_cron: uploadCron,
+                upload_batch_size: uploadBatchSize,
+                upload_mode: uploadMode,
                 fail_fast: failFast
             })
         });

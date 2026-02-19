@@ -40,6 +40,8 @@ class ExecuteRequest(BaseModel):
     concurrency: int = 1  # 并发处理的视频数量（默认1=串行）
     playlist_id: Optional[str] = None  # playlist context（用于 custom prompt 覆写）
     upload_cron: Optional[str] = None  # 定时上传 cron 表达式（仅 steps=["upload"] 时可用）
+    upload_batch_size: int = 1  # 每次 cron 触发时上传的视频数量
+    upload_mode: str = 'cron'  # 定时上传模式: cron=后台进程等待, dtime=B站定时发布
     fail_fast: bool = False  # 遇到失败时停止后续处理
     
     # 可选：生成等价 CLI 命令
@@ -197,6 +199,8 @@ async def execute_task(
         concurrency=request.concurrency,
         playlist_id=request.playlist_id,
         upload_cron=request.upload_cron,
+        upload_batch_size=request.upload_batch_size,
+        upload_mode=request.upload_mode,
         fail_fast=request.fail_fast
     )
     
@@ -244,6 +248,10 @@ def _generate_cli_command(request: ExecuteRequest) -> str:
     # 定时上传
     if request.upload_cron:
         parts.append(f'--upload-cron "{request.upload_cron}"')
+        if request.upload_batch_size > 1:
+            parts.append(f"--upload-batch-size {request.upload_batch_size}")
+        if request.upload_mode and request.upload_mode != 'cron':
+            parts.append(f"--upload-mode {request.upload_mode}")
     
     if request.fail_fast:
         parts.append("--fail-fast")

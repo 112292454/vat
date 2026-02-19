@@ -545,9 +545,12 @@ def parse_stages(stages_str: str) -> List[TaskStep]:
 @click.option('--concurrency', '-c', default=1, type=int, help='并发处理的视频数量（默认1，即串行）')
 @click.option('--delay', '-d', default=None, type=float, help='视频间处理延迟（秒），防止 YouTube 限流。默认从配置读取')
 @click.option('--upload-cron', default=None, help='定时上传 cron 表达式（仅当 stages 为 upload 时可用），如 "0 12,18 * * *"')
+@click.option('--upload-batch-size', default=1, type=int, help='每次 cron 触发时上传的视频数量（默认1，仅与 --upload-cron 搭配使用）')
+@click.option('--upload-mode', default='cron', type=click.Choice(['cron', 'dtime']),
+              help='定时上传模式: cron=后台进程等待定时上传, dtime=立即全部上传但通过B站定时发布（需 >2h）')
 @click.option('--fail-fast', is_flag=True, help='遇到视频处理失败时立即停止后续处理（多线程时不中断已运行的任务，但不再启动新任务）')
 @click.pass_context
-def process(ctx, video_id, process_all, playlist, stages, gpu, force, dry_run, concurrency, delay, upload_cron, fail_fast):
+def process(ctx, video_id, process_all, playlist, stages, gpu, force, dry_run, concurrency, delay, upload_cron, upload_batch_size, upload_mode, fail_fast):
     """
     处理视频（支持细粒度阶段控制）
     
@@ -660,7 +663,10 @@ def process(ctx, video_id, process_all, playlist, stages, gpu, force, dry_run, c
             return
         
         # 进入定时上传流程
-        _run_scheduled_uploads(config, db, logger, video_ids, upload_cron, force, dry_run, playlist_id=playlist)
+        if upload_mode == 'dtime':
+            _run_dtime_uploads(config, db, logger, video_ids, upload_cron, force, dry_run, playlist_id=playlist, batch_size=upload_batch_size)
+        else:
+            _run_scheduled_uploads(config, db, logger, video_ids, upload_cron, force, dry_run, playlist_id=playlist, batch_size=upload_batch_size)
         return
     
     # 显示执行计划
@@ -920,11 +926,11 @@ def _auto_season_sync(config, db, logger, playlist_id: str, retry_delay_minutes:
         logger.debug(traceback.format_exc())
 
 
-def _run_scheduled_uploads(config, db, logger, video_ids, cron_expr, force, dry_run, playlist_id=None):
+def _run_scheduled_uploads(config, db, logger, video_ids, cron_expr, force, dry_run, playlist_id=None, batch_size=1):
     """
-    定时上传：按 cron 表达式逐个上传视频
+    定时上传：按 cron 表达式批量上传视频
     
-    每次 cron 触发时间到达后上传队列中的下一个视频。
+    每次 cron 触发时间到达后上传队列中的 batch_size 个视频。
     已完成上传的视频会被跳过（支持断点续传）。
     
     Args:
@@ -936,11 +942,14 @@ def _run_scheduled_uploads(config, db, logger, video_ids, cron_expr, force, dry_
         force: 是否强制重新上传
         dry_run: 仅预览
         playlist_id: 发起任务的 Playlist ID（上传时用于确定正确的 playlist 上下文）
+        batch_size: 每次 cron 触发时上传的视频数量（默认1）
     """
     import time
     from datetime import datetime
     from croniter import croniter
+    import math
     
+    batch_size = max(1, batch_size)
     total = len(video_ids)
     
     # 构建上传队列：跳过已完成上传的视频（除非 force）
@@ -957,41 +966,56 @@ def _run_scheduled_uploads(config, db, logger, video_ids, cron_expr, force, dry_
         logger.info("所有视频已上传完成，无需定时上传")
         return
     
+    # 按 batch_size 分组
+    batches = []
+    for i in range(0, len(queue), batch_size):
+        batches.append(queue[i:i + batch_size])
+    
     logger.info(f"定时上传任务: {len(queue)}/{total} 个视频待上传")
-    logger.info(f"Cron 表达式: {cron_expr}")
+    logger.info(f"Cron 表达式: {cron_expr}, 每次上传 {batch_size} 个, 共 {len(batches)} 批次")
     
     # 预览模式：显示上传计划
     cron = croniter(cron_expr, datetime.now())
     if dry_run:
         logger.info("[DRY-RUN] 上传计划:")
-        for i, vid in enumerate(queue):
+        vid_idx = 0
+        for batch_idx, batch in enumerate(batches):
             next_time = cron.get_next(datetime)
-            video = db.get_video(vid)
-            title = video.title[:40] if video and video.title else vid
-            logger.info(f"  {i+1}. {next_time.strftime('%Y-%m-%d %H:%M')} → {title}")
+            logger.info(f"  批次 {batch_idx + 1} @ {next_time.strftime('%Y-%m-%d %H:%M')} ({len(batch)} 个):")
+            for vid in batch:
+                vid_idx += 1
+                video = db.get_video(vid)
+                title = video.title[:40] if video and video.title else vid
+                logger.info(f"    {vid_idx}. {title}")
         return
     
-    # 逐个上传
+    # 按批次上传
     uploaded = 0
     failed = 0
     cron = croniter(cron_expr, datetime.now())
     
-    for i, vid in enumerate(queue):
+    for batch_idx, batch in enumerate(batches):
         next_time = cron.get_next(datetime)
-        video = db.get_video(vid)
-        title = video.title[:30] if video and video.title else vid
         
         # 等待到触发时间
         now = datetime.now()
         wait_seconds = (next_time - now).total_seconds()
         
         if wait_seconds > 0:
+            batch_titles = []
+            for vid in batch[:3]:
+                video = db.get_video(vid)
+                batch_titles.append(video.title[:20] if video and video.title else vid)
+            preview = ', '.join(batch_titles)
+            if len(batch) > 3:
+                preview += f' 等{len(batch)}个'
+            
             logger.info(
-                f"[UPLOAD-SCHEDULE] 等待上传 ({uploaded+1}/{len(queue)}): "
-                f"{title} @ {next_time.strftime('%Y-%m-%d %H:%M:%S')} "
-                f"(还需等待 {_format_duration(wait_seconds)})"
+                f"[UPLOAD-SCHEDULE] 等待批次 {batch_idx + 1}/{len(batches)} "
+                f"@ {next_time.strftime('%Y-%m-%d %H:%M:%S')} "
+                f"(还需等待 {_format_duration(wait_seconds)}): {preview}"
             )
-            # 分段 sleep，每 60 秒输出一次心跳日志（方便 WebUI 判断进程存活）
+            # 分段 sleep，每 60 秒输出一次心跳日志
             while True:
                 remaining = (next_time - datetime.now()).total_seconds()
                 if remaining <= 0:
@@ -999,37 +1023,192 @@ def _run_scheduled_uploads(config, db, logger, video_ids, cron_expr, force, dry_
                 sleep_chunk = min(remaining, 60.0)
                 time.sleep(sleep_chunk)
         
-        # 执行上传
-        logger.info(f"[UPLOAD-SCHEDULE] 开始上传 ({uploaded+1}/{len(queue)}): {title}")
-        try:
-            processor = VideoProcessor(
-                video_id=vid,
-                config=config,
-                gpu_id=None,
-                force=force,
-                video_index=i,
-                total_videos=len(queue),
-                playlist_id=playlist_id
-            )
-            success = processor.process(steps=['upload'])
-            if success:
-                uploaded += 1
-                logger.info(
-                    f"[UPLOAD-SCHEDULE] 上传成功 ({uploaded}/{len(queue)}): {title}"
+        # 依次上传本批次中的视频
+        logger.info(f"[UPLOAD-SCHEDULE] 开始批次 {batch_idx + 1}/{len(batches)} ({len(batch)} 个视频)")
+        for vid in batch:
+            video = db.get_video(vid)
+            title = video.title[:30] if video and video.title else vid
+            logger.info(f"[UPLOAD-SCHEDULE] 上传 ({uploaded + failed + 1}/{len(queue)}): {title}")
+            try:
+                processor = VideoProcessor(
+                    video_id=vid,
+                    config=config,
+                    gpu_id=None,
+                    force=force,
+                    video_index=uploaded + failed,
+                    total_videos=len(queue),
+                    playlist_id=playlist_id
                 )
-            else:
+                success = processor.process(steps=['upload'])
+                if success:
+                    uploaded += 1
+                    logger.info(f"[UPLOAD-SCHEDULE] 上传成功 ({uploaded}/{len(queue)}): {title}")
+                else:
+                    failed += 1
+                    logger.warning(f"[UPLOAD-SCHEDULE] 上传失败 ({title})，继续下一个")
+            except Exception as e:
                 failed += 1
-                logger.warning(
-                    f"[UPLOAD-SCHEDULE] 上传失败 ({title})，继续下一个"
-                )
-        except Exception as e:
-            failed += 1
-            logger.error(f"[UPLOAD-SCHEDULE] 上传异常 ({title}): {e}")
+                logger.error(f"[UPLOAD-SCHEDULE] 上传异常 ({title}): {e}")
     
     logger.info(
         f"[UPLOAD-SCHEDULE] 定时上传完成: "
         f"成功 {uploaded}, 失败 {failed}, 总计 {len(queue)}"
     )
+
+
+def _run_dtime_uploads(config, db, logger, video_ids, cron_expr, force, dry_run, playlist_id=None, batch_size=1):
+    """
+    B站定时发布模式：计算每个视频的发布时间，一次性全部上传（通过 B站 dtime 参数定时发布）
+    
+    与 cron 模式不同，此模式不需要后台进程等待。所有视频立即上传到 B站，
+    但通过 dtime 参数指定不同的定时发布时间，B站会在指定时间自动发布。
+    
+    约束：
+    - B站 dtime 必须距离当前时间 > 2小时
+    - B站 dtime 上限约 15 天（超过可能被 API 拒绝）
+    
+    Args:
+        config: 配置对象
+        db: 数据库实例
+        logger: 日志器
+        video_ids: 视频ID有序列表
+        cron_expr: cron 表达式（用于计算发布时间）
+        force: 是否强制重新上传
+        dry_run: 仅预览
+        playlist_id: 发起任务的 Playlist ID
+        batch_size: 每次 cron 触发时发布的视频数量
+    """
+    import time as _time
+    from datetime import datetime
+    from croniter import croniter
+    
+    batch_size = max(1, batch_size)
+    total = len(video_ids)
+    
+    # 构建上传队列
+    queue = []
+    for vid in video_ids:
+        if not force and db.is_step_completed(vid, TaskStep.UPLOAD):
+            video = db.get_video(vid)
+            title = video.title[:30] if video and video.title else vid
+            logger.info(f"跳过已上传: {title}")
+            continue
+        queue.append(vid)
+    
+    if not queue:
+        logger.info("所有视频已上传完成，无需定时上传")
+        return
+    
+    # 按 batch_size 分组
+    batches = []
+    for i in range(0, len(queue), batch_size):
+        batches.append(queue[i:i + batch_size])
+    
+    # 计算每批次的发布时间（dtime）
+    now = datetime.now()
+    cron = croniter(cron_expr, now)
+    batch_dtimes = []  # [(batch, dtime_timestamp), ...]
+    
+    DTIME_MIN_OFFSET = 7200 + 60  # 至少 2小时1分钟（留余量）
+    DTIME_MAX_OFFSET = 15 * 86400  # 最多 15 天
+    
+    for batch in batches:
+        next_time = cron.get_next(datetime)
+        dtime_ts = int(next_time.timestamp())
+        batch_dtimes.append((batch, dtime_ts, next_time))
+    
+    # 校验所有 dtime
+    now_ts = int(_time.time())
+    too_early = []
+    too_late = []
+    for batch, dtime_ts, next_time in batch_dtimes:
+        offset = dtime_ts - now_ts
+        if offset < DTIME_MIN_OFFSET:
+            too_early.append(next_time)
+        if offset > DTIME_MAX_OFFSET:
+            too_late.append(next_time)
+    
+    if too_early:
+        logger.error(
+            f"以下发布时间距现在不足 2 小时（B站要求 dtime > 2小时）:\n"
+            + "\n".join(f"  {t.strftime('%Y-%m-%d %H:%M')}" for t in too_early)
+        )
+        logger.error("请调整 cron 表达式，确保首次触发时间距现在至少 2 小时")
+        return
+    
+    if too_late:
+        logger.warning(
+            f"以下发布时间距现在超过 15 天，B站可能拒绝:\n"
+            + "\n".join(f"  {t.strftime('%Y-%m-%d %H:%M')}" for t in too_late)
+        )
+    
+    logger.info(f"[DTIME] B站定时发布模式: {len(queue)}/{total} 个视频待上传")
+    logger.info(f"[DTIME] Cron 表达式: {cron_expr}, 每次 {batch_size} 个, 共 {len(batches)} 批次")
+    logger.info(f"[DTIME] 发布时间范围: "
+                f"{batch_dtimes[0][2].strftime('%Y-%m-%d %H:%M')} ~ "
+                f"{batch_dtimes[-1][2].strftime('%Y-%m-%d %H:%M')}")
+    
+    # 预览模式
+    if dry_run:
+        logger.info("[DRY-RUN] 定时发布计划:")
+        vid_idx = 0
+        for batch, dtime_ts, next_time in batch_dtimes:
+            logger.info(f"  批次 @ {next_time.strftime('%Y-%m-%d %H:%M')} ({len(batch)} 个):")
+            for vid in batch:
+                vid_idx += 1
+                video = db.get_video(vid)
+                title = video.title[:40] if video and video.title else vid
+                logger.info(f"    {vid_idx}. {title}")
+        return
+    
+    # 立即逐个上传，每个视频携带对应的 dtime
+    uploaded = 0
+    failed = 0
+    
+    for batch_idx, (batch, dtime_ts, next_time) in enumerate(batch_dtimes):
+        logger.info(
+            f"[DTIME] 上传批次 {batch_idx + 1}/{len(batches)} "
+            f"(定时发布 @ {next_time.strftime('%Y-%m-%d %H:%M')}, {len(batch)} 个视频)"
+        )
+        for vid in batch:
+            video = db.get_video(vid)
+            title = video.title[:30] if video and video.title else vid
+            logger.info(f"[DTIME] 上传 ({uploaded + failed + 1}/{len(queue)}): {title}")
+            try:
+                processor = VideoProcessor(
+                    video_id=vid,
+                    config=config,
+                    gpu_id=None,
+                    force=force,
+                    video_index=uploaded + failed,
+                    total_videos=len(queue),
+                    playlist_id=playlist_id,
+                    upload_dtime=dtime_ts
+                )
+                success = processor.process(steps=['upload'])
+                if success:
+                    uploaded += 1
+                    logger.info(
+                        f"[DTIME] 上传成功 ({uploaded}/{len(queue)}): {title} "
+                        f"→ 定时 {next_time.strftime('%m-%d %H:%M')}"
+                    )
+                else:
+                    failed += 1
+                    logger.warning(f"[DTIME] 上传失败 ({title})，继续下一个")
+            except Exception as e:
+                failed += 1
+                logger.error(f"[DTIME] 上传异常 ({title}): {e}")
+    
+    logger.info(
+        f"[DTIME] 定时发布上传完成: "
+        f"成功 {uploaded}, 失败 {failed}, 总计 {len(queue)}"
+    )
+    if uploaded > 0:
+        logger.info(
+            f"[DTIME] 视频已全部上传到 B站，将在对应时间自动发布 "
+            f"({batch_dtimes[0][2].strftime('%m-%d %H:%M')} ~ "
+            f"{batch_dtimes[-1][2].strftime('%m-%d %H:%M')})"
+        )
 
 
 def _format_duration(seconds: float) -> str:
@@ -2051,6 +2230,346 @@ def bilibili_status(ctx):
     else:
         click.echo("✗ Cookie 无效或已过期，请重新登录")
         click.echo("  运行: vat bilibili login")
+
+
+@bilibili.command('rejected')
+@click.option('--keyword', '-k', default='', help='搜索关键词')
+@click.pass_context
+def bilibili_rejected(ctx, keyword):
+    """列出被退回的稿件及违规详情
+    
+    显示所有被退回的稿件，包括违规时间段和退回原因。
+    带有具体违规时间段的视频可以通过 `vat bilibili fix` 命令自动修复。
+    
+    示例:
+    
+      vat bilibili rejected
+      vat bilibili rejected -k 漆黒
+    """
+    uploader = _get_bilibili_uploader(ctx)
+    
+    rejected = uploader.get_rejected_videos(keyword=keyword)
+    if not rejected:
+        click.echo("没有被退回的稿件")
+        return
+    
+    click.echo(f"\n被退回的稿件: {len(rejected)} 个\n")
+    
+    fixable_count = 0
+    for v in rejected:
+        all_ranges = []
+        is_full = False
+        for p in v['problems']:
+            all_ranges.extend(p['time_ranges'])
+            if p['is_full_video']:
+                is_full = True
+        
+        if all_ranges and not is_full:
+            status = "🔧 可修复"
+            fixable_count += 1
+        elif is_full:
+            status = "❌ 全片违规"
+        else:
+            status = "⚠️  未知"
+        
+        click.echo(f"  {status} | aid={v['aid']} | {v['title'][:55]}")
+        for p in v['problems']:
+            click.echo(f"    原因: {p['reason'][:60]}")
+            if p['violation_time']:
+                click.echo(f"    时间: {p['violation_time']} → {p['time_ranges']}")
+            if p['is_full_video']:
+                click.echo(f"    位置: {p['violation_position']}（全片违规，无法自动修复）")
+            if p['modify_advise']:
+                click.echo(f"    建议: {p['modify_advise'][:60]}")
+        click.echo()
+    
+    if fixable_count > 0:
+        click.echo(f"其中 {fixable_count} 个可自动修复，使用:")
+        click.echo(f"  vat bilibili fix --aid <AID>")
+        click.echo(f"  vat bilibili fix --aid <AID> --dry-run  # 仅遮罩不上传")
+
+
+def _find_local_video_cli(aid: int, config, db, uploader) -> Optional[Path]:
+    """
+    CLI 侧：根据 aid 查找本地视频文件路径。
+    
+    查找策略（按优先级）：
+    1. 从 B站稿件 source URL 提取 YouTube video ID → DB 查找视频记录 → 本地 final.mp4
+    2. DB 中通过 bilibili_aid 匹配 → 本地 final.mp4
+    3. 通过 B站稿件标题匹配 DB 翻译标题 → 本地 final.mp4
+    4. 直接按 YouTube video ID 查找 output 目录
+    """
+    import re
+    
+    yt_video_id = None
+    bili_title = None
+    
+    # 方法1: source URL → YouTube video ID → DB
+    try:
+        detail = uploader.get_archive_detail(aid)
+        if detail:
+            archive = detail.get('archive', {})
+            bili_title = archive.get('title', '')
+            source = archive.get('source', '')
+            yt_match = re.search(r'youtube\.com/watch\?v=([a-zA-Z0-9_-]+)', source)
+            if yt_match:
+                yt_video_id = yt_match.group(1)
+                click.echo(f"  稿件对应 YouTube 视频: {yt_video_id}")
+                
+                video = db.get_video(yt_video_id)
+                if video:
+                    path = _resolve_video_file_cli(video, config)
+                    if path:
+                        click.echo(f"  通过 source URL 找到本地视频: {path}")
+                        return path
+    except Exception as e:
+        click.echo(f"  通过 source URL 查找失败: {e}", err=True)
+    
+    # 方法2 + 3: 遍历 DB
+    videos = db.list_videos()
+    
+    # 方法2: bilibili_aid 匹配
+    for v in videos:
+        meta = v.metadata or {}
+        if str(meta.get('bilibili_aid', '')) == str(aid):
+            path = _resolve_video_file_cli(v, config)
+            if path:
+                click.echo(f"  通过 bilibili_aid 找到本地视频: {path}")
+                return path
+    
+    # 方法3: 标题匹配
+    if bili_title:
+        clean_title = re.sub(r'\s*\|\s*#\d+\s*$', '', bili_title).strip()
+        for v in videos:
+            meta = v.metadata or {}
+            translated = meta.get('translated', {})
+            t_title = translated.get('title_translated', '') if translated else ''
+            if t_title and clean_title and (clean_title in t_title or t_title in clean_title):
+                path = _resolve_video_file_cli(v, config)
+                if path:
+                    click.echo(f"  通过标题匹配找到本地视频: {v.id} → {path}")
+                    return path
+    
+    # 方法4: output 目录直接查找
+    if yt_video_id:
+        vid_dir = Path(config.storage.output_dir) / yt_video_id
+        for name in ['final.mp4', f'{yt_video_id}.mp4']:
+            candidate = vid_dir / name
+            if candidate.exists():
+                click.echo(f"  通过 output 目录找到视频: {candidate}")
+                return candidate
+    
+    return None
+
+
+def _resolve_video_file_cli(video, config) -> Optional[Path]:
+    """从视频记录解析本地视频文件路径（final.mp4 优先）"""
+    candidates = []
+    if video.output_dir:
+        candidates.append(Path(video.output_dir) / "final.mp4")
+    vid_dir = Path(config.storage.output_dir) / video.id
+    candidates.append(vid_dir / "final.mp4")
+    candidates.append(vid_dir / f"{video.id}.mp4")
+    
+    for c in candidates:
+        if c.exists():
+            return c
+    return None
+
+
+def _download_from_bilibili_cli(aid: int, bvid: str, config, logger) -> Optional[Path]:
+    """
+    CLI 侧：从 B站下载视频作为 fallback。
+    使用 yt-dlp 下载 B站视频到临时目录。
+    """
+    import subprocess
+    import tempfile
+    
+    url = f"https://www.bilibili.com/video/{bvid}" if bvid else f"https://www.bilibili.com/video/av{aid}"
+    
+    click.echo(f"  ⚠️ 本地视频文件未找到，将从 B站下载原视频: {url}")
+    click.echo(f"  （建议在清理本地文件前完成审核修复）")
+    
+    tmp_dir = Path(tempfile.mkdtemp(prefix=f"bilibili_fix_{aid}_"))
+    output_template = str(tmp_dir / f"av{aid}.%(ext)s")
+    
+    cmd = [
+        "yt-dlp",
+        "--no-playlist",
+        "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+        "--merge-output-format", "mp4",
+        "-o", output_template,
+        url,
+    ]
+    
+    try:
+        click.echo(f"  下载中...")
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        
+        if result.returncode != 0:
+            click.echo(f"  ✗ 下载失败: {result.stderr[-300:]}", err=True)
+            return None
+        
+        mp4_files = list(tmp_dir.glob("*.mp4"))
+        if mp4_files:
+            size_mb = mp4_files[0].stat().st_size / 1024 / 1024
+            click.echo(f"  ✓ 下载成功: {mp4_files[0].name} ({size_mb:.1f}MB)")
+            return mp4_files[0]
+        
+        click.echo(f"  ✗ 下载完成但未找到 mp4 文件", err=True)
+        return None
+        
+    except subprocess.TimeoutExpired:
+        click.echo(f"  ✗ 下载超时 (>10分钟)", err=True)
+        return None
+    except Exception as e:
+        click.echo(f"  ✗ 下载异常: {e}", err=True)
+        return None
+
+
+@bilibili.command('fix')
+@click.option('--aid', required=True, type=int, help='要修复的稿件 AV号')
+@click.option('--video-path', type=click.Path(exists=True), help='本地视频文件路径（默认自动查找）')
+@click.option('--margin', default=1.0, type=float, help='违规区间前后扩展的安全边距（秒），默认1.0')
+@click.option('--mask-text', default='此处内容因平台合规要求已被遮罩', help='遮罩区域显示的文字')
+@click.option('--dry-run', is_flag=True, help='仅执行遮罩处理，不上传替换')
+@click.option('--keep-masked', is_flag=True, help='上传后保留遮罩文件（默认删除）')
+@click.option('--yes', '-y', is_flag=True, help='跳过确认')
+@click.pass_context
+def bilibili_fix(ctx, aid, video_path, margin, mask_text, dry_run, keep_masked, yes):
+    """修复被退回的稿件：遮罩违规片段 + 重新上传
+    
+    自动获取审核退回信息，用 ffmpeg 遮罩违规时间段（黑屏+说明文字+静音），
+    然后上传新视频文件替换原稿件并重新提交审核。
+    
+    流程:
+      1. 从 B站 API 获取退回原因和违规时间段
+      2. 定位本地视频文件（从 DB 或手动指定）
+      3. ffmpeg 遮罩违规片段（GPU 加速）
+      4. 上传新视频并编辑稿件替换（除非 --dry-run）
+    
+    示例:
+    
+      vat bilibili fix --aid 116089795185839
+      vat bilibili fix --aid 116089795185839 --dry-run
+      vat bilibili fix --aid 116089795185839 --video-path /path/to/video.mp4
+      vat bilibili fix --aid 116089795185839 --margin 2.0
+    """
+    config = get_config(ctx.obj.get('config_path'))
+    logger = get_logger()
+    db = Database(config.storage.database_path, output_base_dir=config.storage.output_dir)
+    
+    uploader = _get_bilibili_uploader(ctx)
+    
+    # Step 1: 获取审核信息
+    click.echo(f"获取稿件 av{aid} 的审核信息...")
+    rejected = uploader.get_rejected_videos()
+    target = [v for v in rejected if v['aid'] == aid]
+    
+    if not target:
+        click.echo(f"✗ 未找到 aid={aid} 的退回稿件", err=True)
+        click.echo("提示: 使用 `vat bilibili rejected` 查看所有退回稿件")
+        return
+    
+    t = target[0]
+    click.echo(f"  标题: {t['title'][:60]}")
+    
+    # 收集违规时间段
+    all_ranges = []
+    is_full = False
+    for p in t['problems']:
+        all_ranges.extend(p['time_ranges'])
+        if p['is_full_video']:
+            is_full = True
+        click.echo(f"  原因: {p['reason'][:60]}")
+        if p['violation_time']:
+            click.echo(f"  时间: {p['violation_time']}")
+        if p['is_full_video']:
+            click.echo(f"  位置: {p['violation_position']}")
+    
+    if is_full:
+        click.echo(f"\n✗ 全片违规，无法通过遮罩修复", err=True)
+        return
+    
+    if not all_ranges:
+        click.echo(f"\n✗ 无具体违规时间段，无法自动修复", err=True)
+        return
+    
+    click.echo(f"\n  违规区间: {all_ranges}")
+    click.echo(f"  安全边距: ±{margin}s")
+    
+    # Step 2: 定位本地视频文件
+    if video_path:
+        local_video = Path(video_path)
+    else:
+        local_video = _find_local_video_cli(aid, config, db, uploader)
+        
+        if not local_video:
+            # fallback: 从 B站下载原视频
+            click.echo(f"\n  ⚠️ 本地文件未找到，尝试从B站下载原视频...")
+            local_video = _download_from_bilibili_cli(aid, t.get('bvid', ''), config, logger)
+        
+        if not local_video:
+            click.echo(f"\n✗ 无法自动定位本地视频文件，且从B站下载失败", err=True)
+            click.echo(f"  请使用 --video-path 手动指定视频文件路径")
+            return
+    
+    # Step 3: ffmpeg 遮罩
+    from ..embedder.ffmpeg_wrapper import FFmpegWrapper
+    
+    ffmpeg = FFmpegWrapper()
+    info = ffmpeg.get_video_info(local_video)
+    if not info:
+        click.echo(f"✗ 无法获取视频信息: {local_video}", err=True)
+        return
+    
+    click.echo(f"\n  原视频: {info['duration']:.0f}s, "
+               f"{info.get('video', {}).get('width', '?')}x{info.get('video', {}).get('height', '?')}, "
+               f"{local_video.stat().st_size / 1024 / 1024:.0f}MB")
+    
+    masked_video = local_video.parent / f"{local_video.stem}_masked{local_video.suffix}"
+    
+    if not yes and not dry_run:
+        if not click.confirm(f"\n确认遮罩 {len(all_ranges)} 个违规区间并上传替换?"):
+            click.echo("已取消")
+            return
+    elif not yes:
+        if not click.confirm(f"\n确认遮罩 {len(all_ranges)} 个违规区间?"):
+            click.echo("已取消")
+            return
+    
+    click.echo(f"\n开始遮罩处理...")
+    ok = ffmpeg.mask_violation_segments(
+        video_path=local_video,
+        output_path=masked_video,
+        violation_ranges=all_ranges,
+        mask_text=mask_text,
+        margin_sec=margin,
+    )
+    
+    if not ok:
+        click.echo(f"\n✗ 遮罩处理失败", err=True)
+        return
+    
+    out_size = masked_video.stat().st_size / 1024 / 1024
+    click.echo(f"  ✓ 遮罩完成: {masked_video.name} ({out_size:.0f}MB)")
+    
+    # Step 4: 上传替换
+    if dry_run:
+        click.echo(f"\n--dry-run 模式，跳过上传")
+        click.echo(f"  遮罩文件: {masked_video}")
+        return
+    
+    click.echo(f"\n开始上传替换...")
+    replace_ok = uploader.replace_video(aid, masked_video)
+    
+    if replace_ok:
+        click.echo(f"\n✅ 稿件 av{aid} 已修复并重新提交审核")
+        if not keep_masked:
+            masked_video.unlink(missing_ok=True)
+            click.echo(f"  已清理遮罩临时文件")
+    else:
+        click.echo(f"\n✗ 上传替换失败，遮罩文件保留在: {masked_video}", err=True)
 
 
 @upload.command('playlist')

@@ -144,6 +144,8 @@ class JobManager:
         concurrency: int = 1,
         playlist_id: Optional[str] = None,
         upload_cron: Optional[str] = None,
+        upload_batch_size: int = 1,
+        upload_mode: str = 'cron',
         fail_fast: bool = False
     ) -> str:
         """
@@ -179,7 +181,7 @@ class JobManager:
             ))
         
         # 启动子进程
-        self._start_job_process(job_id, video_ids, steps, gpu_device, force, log_file, concurrency, playlist_id, upload_cron, fail_fast)
+        self._start_job_process(job_id, video_ids, steps, gpu_device, force, log_file, concurrency, playlist_id, upload_cron, upload_batch_size, upload_mode, fail_fast)
         
         logger.info(f"任务已提交: {job_id}, 视频数: {len(video_ids)}, 步骤: {steps}")
         return job_id
@@ -195,6 +197,8 @@ class JobManager:
         concurrency: int = 1,
         playlist_id: Optional[str] = None,
         upload_cron: Optional[str] = None,
+        upload_batch_size: int = 1,
+        upload_mode: str = 'cron',
         fail_fast: bool = False
     ):
         """启动子进程执行任务"""
@@ -221,6 +225,12 @@ class JobManager:
         
         if upload_cron:
             cmd.extend(["--upload-cron", upload_cron])
+        
+        if upload_batch_size > 1:
+            cmd.extend(["--upload-batch-size", str(upload_batch_size)])
+        
+        if upload_mode and upload_mode != 'cron':
+            cmd.extend(["--upload-mode", upload_mode])
         
         if fail_fast:
             cmd.append("--fail-fast")

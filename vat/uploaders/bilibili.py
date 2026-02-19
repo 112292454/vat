@@ -1176,9 +1176,9 @@ class BilibiliUploader(BaseUploader):
             if start_sec is not None and end_sec is not None:
                 ranges.append((start_sec, end_sec))
         
-        # 格式2: 【时间-时间】（支持 MM:SS 或 HH:MM:SS）
+        # 格式2: 【时间-时间】（支持 MM:SS 或 HH:MM:SS，允许冒号后有空格如 "17: 21"）
         if not ranges:
-            pattern_bracket = r'【(\d{1,2}:\d{2}(?::\d{2})?)[\s]*[-–—][\s]*(\d{1,2}:\d{2}(?::\d{2})?)】'
+            pattern_bracket = r'【(\d{1,2}:\s*\d{2}(?::\s*\d{2})?)[\s]*[-–—][\s]*(\d{1,2}:\s*\d{2}(?::\s*\d{2})?)】'
             for m in re.finditer(pattern_bracket, text):
                 start_sec = BilibiliUploader._time_to_seconds(m.group(1))
                 end_sec = BilibiliUploader._time_to_seconds(m.group(2))
@@ -1648,11 +1648,12 @@ class BilibiliUploader(BaseUploader):
         out_size = masked_path.stat().st_size / 1024 / 1024
         _cb(f"  遮罩完成: {masked_path.name} ({out_size:.0f}MB)")
         
-        # 合并后的 ranges（用 ffmpeg_wrapper 的 _merge_ranges 标准化）
+        # 保存原始违规范围（不含 margin），供下次累积使用
+        # margin 仅在 mask_violation_segments 内部动态应用，不持久化
         video_info = ffmpeg.get_video_info(source_video) or {}
-        merged = ffmpeg._merge_ranges(all_ranges, margin_sec, 
-                                       video_info.get('duration', 0))
-        result['all_ranges'] = merged
+        raw_merged = ffmpeg._merge_ranges(all_ranges, 0, 
+                                          video_info.get('duration', 0))
+        result['all_ranges'] = raw_merged
         result['masked_path'] = str(masked_path)
         
         # Step 5: 上传替换（除非 dry_run）

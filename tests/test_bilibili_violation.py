@@ -513,5 +513,134 @@ class TestDownloadVideo:
         assert result is False
 
 
+class TestBracketFormatWithSpaces:
+    """回归测试：B站返回的时间格式中冒号后可能有空格（如 "17: 21"）"""
+    
+    def test_space_after_colon_in_start(self):
+        """冒号后有空格：【17: 21-17:23】"""
+        result = BilibiliUploader._parse_violation_time(
+            "根据相关法律法规、政策及《社区公约》，该视频【17: 21-17:23】【内容】不予审核通过"
+        )
+        assert result == [(1041, 1043)]
+    
+    def test_space_after_colon_in_both(self):
+        """两端都有空格：【17: 21-17: 23】"""
+        result = BilibiliUploader._parse_violation_time("视频【17: 21-17: 23】内容违规")
+        assert result == [(1041, 1043)]
+    
+    def test_space_in_hhmmss(self):
+        """HH:MM:SS 格式中有空格：【00:17: 21-00:17:23】"""
+        result = BilibiliUploader._parse_violation_time("视频【00:17: 21-00:17:23】内容违规")
+        assert result == [(1041, 1043)]
+    
+    def test_two_problems_with_space(self):
+        """两个问题各有一个时间段（其中一个带空格）——不应被判为全片违规"""
+        # 模拟图中实际场景：两个 problem_detail
+        text1 = "您的视频【20:18-20:24】【内容】根据相关法律法规"
+        text2 = "该视频【17: 21-17:23】【内容】不予审核通过"
+        
+        r1 = BilibiliUploader._parse_violation_time(text1)
+        r2 = BilibiliUploader._parse_violation_time(text2)
+        
+        assert r1 == [(1218, 1224)]
+        assert r2 == [(1041, 1043)]
+        # 两个都能解析出时间段，不应为空
+        assert len(r1) > 0 and len(r2) > 0
+    
+    def test_no_space_still_works(self):
+        """无空格的正常格式仍然正常匹配"""
+        result = BilibiliUploader._parse_violation_time("视频【20:18-20:24】内容违规")
+        assert result == [(1218, 1224)]
+    
+    def test_bracket_with_content_tag_not_matched(self):
+        """【内容】不应被匹配为时间段"""
+        result = BilibiliUploader._parse_violation_time("【内容】不予审核")
+        assert result == []
+
+
+class TestIsFullVideoDetection:
+    """回归测试：is_full_video 判定逻辑"""
+    
+    def test_reason_with_parseable_time_not_full(self):
+        """reason 中有可解析时间段 → 不是全片违规"""
+        # 模拟 get_rejected_videos 中的逻辑
+        vt = ''  # violation_time 为空
+        vp = ''  # violation_position 为空
+        reason = '该视频【17: 21-17:23】【内容】不予审核通过'
+        
+        time_ranges = BilibiliUploader._parse_violation_time(vt) if vt else []
+        if not time_ranges and reason:
+            time_ranges = BilibiliUploader._parse_violation_time(reason)
+        
+        is_full = vp == '内容全程' or (not vt and not vp and not time_ranges)
+        
+        assert time_ranges == [(1041, 1043)]
+        assert is_full is False
+    
+    def test_truly_full_video(self):
+        """真正的全片违规"""
+        vt = ''
+        vp = '内容全程'
+        reason = '全片内容违规'
+        
+        time_ranges = BilibiliUploader._parse_violation_time(vt) if vt else []
+        if not time_ranges and reason:
+            time_ranges = BilibiliUploader._parse_violation_time(reason)
+        
+        is_full = vp == '内容全程' or (not vt and not vp and not time_ranges)
+        assert is_full is True
+    
+    def test_no_info_at_all(self):
+        """所有字段为空 → 判为全片违规（保守策略）"""
+        vt = ''
+        vp = ''
+        reason = '审核不通过'
+        
+        time_ranges = BilibiliUploader._parse_violation_time(vt) if vt else []
+        if not time_ranges and reason:
+            time_ranges = BilibiliUploader._parse_violation_time(reason)
+        
+        is_full = vp == '内容全程' or (not vt and not vp and not time_ranges)
+        assert time_ranges == []
+        assert is_full is True
+
+
+class TestMarginAccumulation:
+    """回归测试：margin 不应在多次修复间累积"""
+    
+    def test_merge_ranges_margin_zero_for_storage(self):
+        """存储用的 merge 应使用 margin=0（只做去重合并）"""
+        ranges = [(1041, 1043), (1218, 1224)]
+        raw_merged = FFmpegWrapper._merge_ranges(ranges, margin=0, max_duration=2000)
+        assert raw_merged == [(1041, 1043), (1218, 1224)]
+    
+    def test_merge_ranges_with_margin_for_mask(self):
+        """mask 操作使用 margin=2.0（扩展边界）"""
+        ranges = [(1041, 1043), (1218, 1224)]
+        merged = FFmpegWrapper._merge_ranges(ranges, margin=2.0, max_duration=2000)
+        assert merged == [(1039, 1045), (1216, 1226)]
+    
+    def test_no_double_margin_on_second_fix(self):
+        """模拟两次修复：第二次不应在历史 ranges 上再加 margin"""
+        # 第一次修复：raw range (1041, 1043)
+        first_raw = [(1041, 1043)]
+        # 存储 raw（无 margin）
+        saved = FFmpegWrapper._merge_ranges(first_raw, margin=0, max_duration=2000)
+        assert saved == [(1041, 1043)]
+        
+        # 第二次修复：新增 (1218, 1224)
+        previous_from_db = saved  # [(1041, 1043)] — 无 margin
+        new_ranges = [(1218, 1224)]
+        all_ranges = list(previous_from_db) + new_ranges
+        
+        # mask 时应用 margin（正确）
+        mask_merged = FFmpegWrapper._merge_ranges(all_ranges, margin=2.0, max_duration=2000)
+        assert mask_merged == [(1039, 1045), (1216, 1226)]
+        
+        # 存储时不含 margin（正确）
+        save_merged = FFmpegWrapper._merge_ranges(all_ranges, margin=0, max_duration=2000)
+        assert save_merged == [(1041, 1043), (1218, 1224)]
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])

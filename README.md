@@ -138,7 +138,9 @@ VAT 在此基础上的改动：
 - 自动获取封面、生成标签
 - LLM 推荐 B 站分区
 - 支持添加到合集（上传后自动添加到指定的 B站新版合集/SEASON）
-- 定时上传：支持 cron 表达式指定上传时间，每次触发上传一个视频（CLI `--upload-cron` / WebUI 可视化配置）
+- 定时上传：支持 cron 表达式指定上传时间，可配置每次触发上传的视频数量（`--upload-batch-size`），支持两种模式：
+  - **cron 模式**（默认）：后台进程等待 cron 触发后上传
+  - **dtime 模式**：立即全部上传，通过 B站定时发布 API 指定发布时间（需 >2h，无需后台进程）
 
 ### 调度与并发
 
@@ -301,13 +303,17 @@ vat status
 | `vat upload sync -p PLAYLIST_ID` | 合集同步（添加+排序） |
 | `vat upload update-info -p PLAYLIST_ID` | 批量更新B站视频标题/简介 |
 | `vat upload sync-db -s SEASON -p PLAYLIST` | 同步B站合集信息回数据库 |
-| `vat process -v ID -s upload --upload-cron "0 12,18 * * *"` | 定时上传（每天 12/18 点） |
+| `vat process -v ID -s upload --upload-cron "0 12,18 * * *"` | 定时上传（每天 12/18 点，默认每次 1 个） |
+| `vat process -p PL -s upload --upload-cron "0 12 * * *" --upload-batch-size 3` | 定时上传，每次 3 个 |
+| `vat process -p PL -s upload --upload-cron "0 12 * * *" --upload-mode dtime` | B站定时发布模式 |
 | `vat playlist sync URL` | 同步播放列表 |
 | `vat playlist refresh ID` | 刷新视频信息（补全缺失的封面、时长等） |
 | `vat status` | 查看处理状态 |
 | `vat clean -v ID` | 清理中间产物 |
 | `vat clean -v ID --records` | 清理产物+删除记录 |
 | `vat bilibili login` | B 站登录获取 Cookie |
+| `vat bilibili rejected` | 列出被退回的稿件及违规详情 |
+| `vat bilibili fix --aid AID` | 自动修复被退回稿件（遮罩违规片段+重新上传） |
 
 ### 输出文件
 

@@ -1,7 +1,7 @@
 # VAT Web UI 使用手册
 
-> **版本**: v1.2  
-> **更新日期**: 2026-02-14  
+> **版本**: v1.3  
+> **更新日期**: 2026-02-19  
 > **状态**: 已实现
 
 ---
@@ -29,6 +29,7 @@ VAT Web UI 是一个基于 FastAPI 的视频处理管理界面，提供以下核
 - **任务管理**：创建处理任务，实时查看进度和日志，取消/重试任务
 - **Custom Prompts**：管理翻译和优化阶段使用的自定义提示词
 - **文件浏览**：查看、编辑、下载视频处理生成的各类文件
+- **B站管理**：账号状态、合集管理、审核退回自动修复、上传模板配置
 
 ### 1.2 技术栈
 
@@ -341,6 +342,39 @@ vat/web/
 - **翻译 Prompts**：用于 LLM 翻译阶段
 - **优化 Prompts**：用于字幕优化阶段
 
+### 4.9 B站设置页 (`/bilibili`)
+
+**账号状态**：显示当前登录状态、用户名、UID、等级。
+
+**合集管理**：查看已创建的 B站新版合集（SEASON），可复制合集 ID。
+
+**审核退回管理**：
+- 点击"刷新退回列表"加载被退回的稿件
+- 显示退回原因、违规时间段、修改建议
+- **可修复**标签：有具体违规时间段的稿件可自动修复
+- **全片违规**标签：无法自动修复
+- 点击"自动修复"按钮：自动查找本地视频 → 遮罩违规片段 → 上传替换原稿件
+- 视频查找策略（按优先级）：source URL 匹配 → bilibili_aid 匹配 → 翻译标题匹配 → 从 B站下载原视频（fallback）
+
+**上传模板**：配置上传标题/简介的模板，支持 `${变量名}` 占位符替换。
+
+**默认上传设置**：版权类型、默认分区、标签、合集、封面策略。
+
+### 4.10 定时上传
+
+在新建任务页（`/tasks/new`），当阶段仅选择"上传到B站"时，可启用定时上传：
+
+**时间模式**：
+- **每天在指定时刻**：选择一个或多个时间点
+- **每隔 N 小时**：按固定间隔触发
+- **高级 (cron)**：自定义 cron 表达式
+
+**每次上传数量**：可配置每次触发时上传的视频数（1/2/3/5/10）。
+
+**上传模式**：
+- **后台等待上传**（cron 模式）：进程等待到 cron 触发时间后上传，需保持进程运行
+- **B站定时发布**（dtime 模式）：立即全部上传，通过 B站 API 指定各视频的定时发布时间，无需保持进程运行（发布时间需 >2 小时）
+
 ---
 
 ## 五、API 参考
@@ -383,15 +417,21 @@ vat/web/
 ```json
 {
   "video_ids": ["video_id_1", "video_id_2"],
-  "steps": ["download", "whisper", "split", "optimize", "translate", "embed"],
+  "steps": ["download", "whisper", "split", "optimize", "translate", "embed", "upload"],
   "gpu_device": "auto",
   "force": false,
   "concurrency": 1,
-  "generate_cli": false
+  "generate_cli": false,
+  "upload_cron": "",
+  "upload_batch_size": 1,
+  "upload_mode": "cron"
 }
 ```
 
-`concurrency`: 并发处理的视频数量，默认 1 表示串行。设置 > 1 时多个视频将并行处理。
+- `concurrency`: 并发处理的视频数量，默认 1 表示串行。设置 > 1 时多个视频将并行处理
+- `upload_cron`: 定时上传的 cron 表达式（仅 upload 阶段使用）
+- `upload_batch_size`: 每次触发上传的视频数量，默认 1
+- `upload_mode`: 上传模式，`cron`（后台等待触发）或 `dtime`（B站定时发布 API）
 
 ### 5.4 文件管理 API
 
@@ -416,6 +456,21 @@ vat/web/
 | POST | `/api/prompts` | 创建 Prompt |
 | PUT | `/api/prompts/{type}/{name}` | 更新 Prompt |
 | DELETE | `/api/prompts/{type}/{name}` | 删除 Prompt |
+
+### 5.6 B站管理 API
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/bilibili/status` | 获取登录状态 |
+| GET | `/bilibili/seasons` | 获取合集列表 |
+| POST | `/bilibili/seasons` | 创建合集 |
+| GET | `/bilibili/rejected` | 获取退回稿件列表 |
+| POST | `/bilibili/fix/{aid}` | 启动退回稿件自动修复 |
+| GET | `/bilibili/fix/{aid}/status` | 查询修复任务状态 |
+| GET | `/bilibili/templates` | 获取上传模板 |
+| POST | `/bilibili/templates` | 保存上传模板 |
+| GET | `/bilibili/settings` | 获取默认上传设置 |
+| POST | `/bilibili/settings` | 保存默认上传设置 |
 
 ---
 

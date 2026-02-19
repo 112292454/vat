@@ -76,7 +76,7 @@
     <div class="flex items-center space-x-2">
         <span class="text-gray-600 text-sm">状态:</span>
         {# 状态筛选链接需要保留 search/playlist/stage_filters 参数 #}
-        {% set sf_params %}{% for k, v in stage_filters.items() %}&sf_{{ k }}={{ v }}{% endfor %}{% endset %}
+        {% set sf_params %}{% for k, v in stage_filters.items() %}&sf_{{ k }}={{ v }}{% endfor %}{% if hide_processing %}&hide_processing=1{% endif %}{% endset %}
         <a href="/?{% if search_query %}q={{ search_query }}&{% endif %}{% if playlist_filter %}playlist_id={{ playlist_filter }}{% endif %}{{ sf_params }}" 
            class="px-3 py-1 rounded-full text-sm {% if not status_filter %}bg-gray-800 text-white{% else %}bg-gray-200 text-gray-700 hover:bg-gray-300{% endif %}">全部</a>
         <a href="/?status=completed{% if search_query %}&q={{ search_query }}{% endif %}{% if playlist_filter %}&playlist_id={{ playlist_filter }}{% endif %}{{ sf_params }}" 
@@ -91,6 +91,12 @@
            class="px-3 py-1 rounded-full text-sm {% if status_filter == 'unavailable' %}bg-gray-600 text-white{% else %}bg-gray-200 text-gray-700 hover:bg-gray-300{% endif %}">不可用</a>
         <span class="text-gray-400 mx-2">|</span>
         <span class="text-sm text-gray-600">共 {{ total }} 个视频</span>
+        <span class="text-gray-400 mx-2">|</span>
+        <label class="flex items-center cursor-pointer text-sm text-gray-600 hover:text-gray-800" title="隐藏正在被任务处理的视频">
+            <input type="checkbox" id="hide-processing-cb" {% if hide_processing %}checked{% endif %}
+                   onchange="toggleHideProcessing(this.checked)" class="mr-1 rounded">
+            <span>隐藏处理中</span>
+        </label>
     </div>
     <div class="flex items-center space-x-2">
         <button onclick="showAddVideoDialog()" class="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700">
@@ -109,7 +115,7 @@
 <div class="bg-white rounded-lg shadow overflow-hidden">
     <table class="w-full" id="video-table">
         {# 服务端排序：构建基础筛选参数（不含 sort/order/page） #}
-        {% set base_sort_params %}{% if status_filter %}&status={{ status_filter }}{% endif %}{% if search_query %}&q={{ search_query }}{% endif %}{% if playlist_filter %}&playlist_id={{ playlist_filter }}{% endif %}{% for k, v in stage_filters.items() %}&sf_{{ k }}={{ v }}{% endfor %}&per_page={{ per_page }}{% endset %}
+        {% set base_sort_params %}{% if status_filter %}&status={{ status_filter }}{% endif %}{% if search_query %}&q={{ search_query }}{% endif %}{% if playlist_filter %}&playlist_id={{ playlist_filter }}{% endif %}{% for k, v in stage_filters.items() %}&sf_{{ k }}={{ v }}{% endfor %}&per_page={{ per_page }}{% if hide_processing %}&hide_processing=1{% endif %}{% endset %}
         {% macro sort_th(label, col, extra_class='') %}
             {% if sort_by == col %}
                 {% set next_order = 'asc' if sort_order == 'desc' else 'desc' %}
@@ -242,7 +248,7 @@
     {% if total_pages > 1 %}
     <span class="text-gray-300">|</span>
     {# 构建通用筛选参数后缀（status + search + playlist + stage filters + sort） #}
-    {% set filter_params %}{% if status_filter %}&status={{ status_filter }}{% endif %}{% if search_query %}&q={{ search_query }}{% endif %}{% if playlist_filter %}&playlist_id={{ playlist_filter }}{% endif %}{% for k, v in stage_filters.items() %}&sf_{{ k }}={{ v }}{% endfor %}{% if sort_by %}&sort={{ sort_by }}&order={{ sort_order }}{% endif %}{% endset %}
+    {% set filter_params %}{% if status_filter %}&status={{ status_filter }}{% endif %}{% if search_query %}&q={{ search_query }}{% endif %}{% if playlist_filter %}&playlist_id={{ playlist_filter }}{% endif %}{% for k, v in stage_filters.items() %}&sf_{{ k }}={{ v }}{% endfor %}{% if sort_by %}&sort={{ sort_by }}&order={{ sort_order }}{% endif %}{% if hide_processing %}&hide_processing=1{% endif %}{% endset %}
     {% if current_page > 1 %}
     <a href="?page={{ current_page - 1 }}&per_page={{ per_page }}{{ filter_params }}" 
        class="px-3 py-1 bg-white border rounded hover:bg-gray-50">上一页</a>
@@ -290,6 +296,18 @@ function filterByPlaylist(playlistId) {
         params.delete('playlist_id');
     }
     params.delete('page');  // 重置到第一页
+    window.location.href = '/?' + params.toString();
+}
+
+// 隐藏/显示正在处理的视频
+function toggleHideProcessing(checked) {
+    const params = new URLSearchParams(window.location.search);
+    if (checked) {
+        params.set('hide_processing', '1');
+    } else {
+        params.delete('hide_processing');
+    }
+    params.delete('page');
     window.location.href = '/?' + params.toString();
 }
 

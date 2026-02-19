@@ -48,6 +48,7 @@ class WebJob:
     finished_at: Optional[datetime]
     upload_cron: Optional[str] = None
     concurrency: int = 1
+    fail_fast: bool = False
     
     def to_dict(self) -> Dict:
         return {
@@ -67,6 +68,7 @@ class WebJob:
             "finished_at": self.finished_at.isoformat() if self.finished_at else None,
             "upload_cron": self.upload_cron,
             "concurrency": self.concurrency,
+            "fail_fast": self.fail_fast,
         }
 
 
@@ -126,6 +128,7 @@ class JobManager:
             for col_sql in [
                 "ALTER TABLE web_jobs ADD COLUMN upload_cron TEXT",
                 "ALTER TABLE web_jobs ADD COLUMN concurrency INTEGER DEFAULT 1",
+                "ALTER TABLE web_jobs ADD COLUMN fail_fast INTEGER DEFAULT 0",
             ]:
                 try:
                     cursor.execute(col_sql)
@@ -140,7 +143,8 @@ class JobManager:
         force: bool = False,
         concurrency: int = 1,
         playlist_id: Optional[str] = None,
-        upload_cron: Optional[str] = None
+        upload_cron: Optional[str] = None,
+        fail_fast: bool = False
     ) -> str:
         """
         提交任务并立即启动子进程执行
@@ -158,8 +162,8 @@ class JobManager:
             cursor = conn.cursor()
             cursor.execute("""
                 INSERT INTO web_jobs 
-                (job_id, video_ids, steps, gpu_device, force, status, log_file, created_at, upload_cron, concurrency)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (job_id, video_ids, steps, gpu_device, force, status, log_file, created_at, upload_cron, concurrency, fail_fast)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 job_id,
                 json.dumps(video_ids),
@@ -170,11 +174,12 @@ class JobManager:
                 log_file,
                 now,
                 upload_cron,
-                concurrency
+                concurrency,
+                1 if fail_fast else 0
             ))
         
         # 启动子进程
-        self._start_job_process(job_id, video_ids, steps, gpu_device, force, log_file, concurrency, playlist_id, upload_cron)
+        self._start_job_process(job_id, video_ids, steps, gpu_device, force, log_file, concurrency, playlist_id, upload_cron, fail_fast)
         
         logger.info(f"任务已提交: {job_id}, 视频数: {len(video_ids)}, 步骤: {steps}")
         return job_id
@@ -189,7 +194,8 @@ class JobManager:
         log_file: str,
         concurrency: int = 1,
         playlist_id: Optional[str] = None,
-        upload_cron: Optional[str] = None
+        upload_cron: Optional[str] = None,
+        fail_fast: bool = False
     ):
         """启动子进程执行任务"""
         # 构建 CLI 命令
@@ -215,6 +221,9 @@ class JobManager:
         
         if upload_cron:
             cmd.extend(["--upload-cron", upload_cron])
+        
+        if fail_fast:
+            cmd.append("--fail-fast")
         
         # 打开日志文件
         log_fd = open(log_file, "w", buffering=1)  # 行缓冲
@@ -620,6 +629,12 @@ class JobManager:
         except (IndexError, KeyError):
             concurrency = 1
         
+        # fail_fast 列可能不存在（旧数据库），安全读取
+        try:
+            fail_fast = bool(row['fail_fast'])
+        except (IndexError, KeyError):
+            fail_fast = False
+        
         return WebJob(
             job_id=row['job_id'],
             video_ids=json.loads(row['video_ids']),
@@ -636,4 +651,5 @@ class JobManager:
             finished_at=datetime.fromisoformat(row['finished_at']) if row['finished_at'] else None,
             upload_cron=upload_cron,
             concurrency=concurrency,
+            fail_fast=fail_fast,
         )

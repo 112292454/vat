@@ -70,7 +70,8 @@ class PlaylistService:
         auto_add_videos: bool = True,
         fetch_upload_dates: bool = True,  # 默认获取，用于按时间排序
         rate_limit_delay: float = 0.0,
-        progress_callback: Optional[callable] = None
+        progress_callback: Optional[callable] = None,
+        target_playlist_id: Optional[str] = None
     ) -> SyncResult:
         """
         同步 Playlist（增量）
@@ -79,11 +80,16 @@ class PlaylistService:
         增量同步时只对新增视频获取 upload_date。
         
         Args:
-            playlist_url: Playlist URL
+            playlist_url: Playlist URL（用于从 YouTube 获取数据）
             auto_add_videos: 是否自动添加新视频到数据库
             fetch_upload_dates: 是否为每个视频单独获取 upload_date（默认开启，用于按时间排序）
             rate_limit_delay: 获取 upload_date 时的速率限制延迟（秒）
             progress_callback: 进度回调
+            target_playlist_id: 显式指定 DB 中的 playlist ID。
+                当 yt-dlp 返回的 playlist_id 与 DB 中的 ID 不一致时使用
+                （例如 channel /videos 和 /streams tab 返回相同的 channel ID，
+                但在 DB 中用后缀区分：-videos / -streams）。
+                若为 None，则使用 yt-dlp 返回的 ID。
             
         Returns:
             SyncResult 同步结果
@@ -97,12 +103,15 @@ class PlaylistService:
         if not playlist_info:
             raise ValueError(f"无法获取 Playlist 信息: {playlist_url}")
         
-        playlist_id = playlist_info['id']
+        yt_playlist_id = playlist_info['id']
         playlist_title = playlist_info.get('title', 'Unknown Playlist')
         channel = playlist_info.get('uploader', '')
         channel_id = playlist_info.get('uploader_id', '')
         
-        callback(f"Playlist: {playlist_title} (ID: {playlist_id})")
+        # 使用显式指定的 playlist_id，或回退到 yt-dlp 返回的 ID
+        playlist_id = target_playlist_id or yt_playlist_id
+        
+        callback(f"Playlist: {playlist_title} (yt_id={yt_playlist_id}, db_id={playlist_id})")
         
         # 获取或创建 Playlist 记录
         existing_playlist = self.db.get_playlist(playlist_id)
@@ -119,12 +128,29 @@ class PlaylistService:
             )
             self.db.add_playlist(existing_playlist)
         
+        # 读取 sync_live_filter：用于从混合 playlist（如 UU uploads）中按 live_status 过滤
+        # "not_live": 只保留非直播视频（排除 was_live / is_live）
+        # None: 不过滤（默认）
+        pl_metadata = existing_playlist.metadata or {}
+        sync_live_filter = pl_metadata.get('sync_live_filter')
+        
         # 获取已存在的视频 ID
         existing_video_ids = self.db.get_playlist_video_ids(playlist_id)
         callback(f"已有 {len(existing_video_ids)} 个视频")
         
         # 获取 Playlist 中的所有视频
         entries = playlist_info.get('entries', [])
+        
+        # 按 sync_live_filter 过滤 entries
+        if sync_live_filter == 'not_live':
+            # 排除直播录像（was_live / is_live），只保留普通上传视频
+            original_count = len(entries)
+            entries = [
+                e for e in entries
+                if e and e.get('live_status') not in ('was_live', 'is_live')
+            ]
+            callback(f"live_status 过滤: {original_count} → {len(entries)} (排除直播)")
+        
         total_videos = len(entries)
         callback(f"Playlist 共 {total_videos} 个视频")
         

@@ -636,6 +636,8 @@ class YouTubeDownloader(BaseDownloader):
                         'thumbnail': entry.get('thumbnail', ''),
                         # upload_date 在 flat 模式下可能不可用，但尝试获取
                         'upload_date': entry.get('upload_date', ''),
+                        # live_status: "was_live"=直播录像, "is_live"=正在直播, None/"NA"=普通视频
+                        'live_status': entry.get('live_status'),
                     })
                 
                 return {

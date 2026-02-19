@@ -40,6 +40,7 @@ class ExecuteRequest(BaseModel):
     concurrency: int = 1  # 并发处理的视频数量（默认1=串行）
     playlist_id: Optional[str] = None  # playlist context（用于 custom prompt 覆写）
     upload_cron: Optional[str] = None  # 定时上传 cron 表达式（仅 steps=["upload"] 时可用）
+    fail_fast: bool = False  # 遇到失败时停止后续处理
     
     # 可选：生成等价 CLI 命令
     generate_cli: bool = False
@@ -195,7 +196,8 @@ async def execute_task(
         force=request.force,
         concurrency=request.concurrency,
         playlist_id=request.playlist_id,
-        upload_cron=request.upload_cron
+        upload_cron=request.upload_cron,
+        fail_fast=request.fail_fast
     )
     
     # 生成等价 CLI 命令（可选）
@@ -242,6 +244,9 @@ def _generate_cli_command(request: ExecuteRequest) -> str:
     # 定时上传
     if request.upload_cron:
         parts.append(f'--upload-cron "{request.upload_cron}"')
+    
+    if request.fail_fast:
+        parts.append("--fail-fast")
     
     return " ".join(parts)
 
@@ -323,7 +328,8 @@ async def retry_task(
         gpu_device=job.gpu_device,
         force=job.force,
         concurrency=job.concurrency,
-        upload_cron=job.upload_cron
+        upload_cron=job.upload_cron,
+        fail_fast=job.fail_fast
     )
     
     return {

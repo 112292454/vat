@@ -219,10 +219,15 @@
             </div>
             
             <!-- 其他选项 -->
-            <div class="mb-6">
+            <div class="mb-6 space-y-3">
                 <label class="flex items-center">
                     <input type="checkbox" name="force" class="mr-2">
                     <span class="text-sm text-gray-700">强制重新处理 (即使已完成)</span>
+                </label>
+                <label class="flex items-center">
+                    <input type="checkbox" name="fail_fast" class="mr-2">
+                    <span class="text-sm text-gray-700">失败时停止 (fail-fast)</span>
+                    <span class="ml-2 text-xs text-gray-500">遇到视频处理失败时不再处理后续视频</span>
                 </label>
             </div>
             
@@ -429,14 +434,15 @@ function getFormData() {
     const force = form.querySelector('input[name="force"]').checked;
     const concurrency = parseInt(form.querySelector('select[name="concurrency"]').value) || 1;
     const uploadCron = getUploadCron();
+    const failFast = form.querySelector('input[name="fail_fast"]').checked;
     
-    return { videoIds, steps, gpuDevice, force, concurrency, uploadCron };
+    return { videoIds, steps, gpuDevice, force, concurrency, uploadCron, failFast };
 }
 
 async function submitTask(event) {
     event.preventDefault();
     
-    const { videoIds, steps, gpuDevice, force, concurrency, uploadCron } = getFormData();
+    const { videoIds, steps, gpuDevice, force, concurrency, uploadCron, failFast } = getFormData();
     
     if (videoIds.length === 0) {
         showToast('请至少选择一个视频', 'warning');
@@ -465,7 +471,8 @@ async function submitTask(event) {
                 force: force,
                 concurrency: concurrency,
                 playlist_id: document.querySelector('input[name="playlist_id"]')?.value || null,
-                upload_cron: uploadCron
+                upload_cron: uploadCron,
+                fail_fast: failFast
             })
         });
         
@@ -482,7 +489,7 @@ async function submitTask(event) {
 }
 
 function generateCLI() {
-    const { videoIds, steps, gpuDevice, force, concurrency, uploadCron } = getFormData();
+    const { videoIds, steps, gpuDevice, force, concurrency, uploadCron, failFast } = getFormData();
     const playlistId = document.querySelector('input[name="playlist_id"]')?.value || null;
     
     let cmd = 'python -m vat process';
@@ -510,6 +517,10 @@ function generateCLI() {
     
     if (uploadCron) {
         cmd += ` --upload-cron "${uploadCron}"`;
+    }
+    
+    if (failFast) {
+        cmd += ' --fail-fast';
     }
     
     document.getElementById('cli-command').textContent = cmd;

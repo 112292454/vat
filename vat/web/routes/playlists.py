@@ -147,7 +147,8 @@ def _run_sync_in_background(
             playlist_url,
             auto_add_videos=auto_add_videos,
             fetch_upload_dates=fetch_upload_dates,
-            progress_callback=lambda msg: _update_sync_message(playlist_id, msg)
+            progress_callback=lambda msg: _update_sync_message(playlist_id, msg),
+            target_playlist_id=playlist_id
         )
         _sync_status[playlist_id] = {
             "status": "completed",

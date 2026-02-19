@@ -252,6 +252,9 @@ vat process -v VIDEO_ID -s whisper -g cuda:1
 
 # Multi-video parallel
 vat process -v VID1 -v VID2 -v VID3 -s download,whisper -c 3
+
+# Stop on first failure (skip remaining videos)
+vat process -p PLAYLIST_ID -s all --fail-fast
 ```
 
 > **Stage skipping**: if non-consecutive stages are specified (e.g., `whisper,embed` to test Japanese source embedding), the system auto-fills intermediate stages in "passthrough mode" (copying input to output), marked as `SKIPPED`.

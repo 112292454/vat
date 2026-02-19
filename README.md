@@ -269,6 +269,9 @@ vat process -v VIDEO_ID -s whisper -g cuda:1
 
 # 多视频并行
 vat process -v VID1 -v VID2 -v VID3 -s download,whisper -c 3
+
+# 遇到失败立即停止（不处理后续视频）
+vat process -p PLAYLIST_ID -s all --fail-fast
 ```
 
 > **阶段跳跃**：如果指定了不连续的阶段（如 `whisper,embed` 以测试日语原文嵌入效果），系统会自动填充中间阶段并以“直通模式”执行（复制输入到输出），直通阶段标记为 `SKIPPED`。

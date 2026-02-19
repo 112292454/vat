@@ -564,7 +564,7 @@ class BilibiliUploader(BaseUploader):
                 logger.error(f"获取合集视频列表失败: {data2.get('message')}")
                 return None
             
-            episodes = data2.get('data', {}).get('episodes', [])
+            episodes = data2.get('data', {}).get('episodes') or []
             logger.info(f"合集 {season_id} (section={section_id}) 共 {len(episodes)} 个视频")
             
             return {

@@ -134,6 +134,7 @@ async def index(
     sf_upload: Optional[str] = None,
     sort: Optional[str] = None,  # 排序字段（title, duration, progress, upload_date, created_at）
     order: Optional[str] = None,  # 排序方向（asc, desc）
+    hide_processing: Optional[int] = None,  # 1=隐藏正在被 task 处理的视频
 ):
     """首页 - 视频列表（SQL 层面分页+过滤，避免全量加载）"""
     db = get_db()
@@ -157,6 +158,16 @@ async def index(
     sort_by = sort if sort in valid_sorts else None
     sort_order = order if order in ('asc', 'desc') else 'desc'
     
+    # 获取正在处理中的视频 ID（用于隐藏过滤）
+    exclude_ids = None
+    if hide_processing:
+        from vat.web.routes.tasks import get_job_manager
+        try:
+            jm = get_job_manager()
+            exclude_ids = jm.get_running_video_ids() or None
+        except Exception:
+            pass
+    
     # SQL 层面分页+过滤+排序
     result = db.list_videos_paginated(
         page=page,
@@ -167,6 +178,7 @@ async def index(
         stage_filters=stage_filters or None,
         sort_by=sort_by,
         sort_order=sort_order,
+        exclude_video_ids=exclude_ids,
     )
     
     page_videos = result['videos']
@@ -227,6 +239,7 @@ async def index(
         "stage_filters": stage_filters,
         "sort_by": sort_by or "",
         "sort_order": sort_order,
+        "hide_processing": 1 if hide_processing else 0,
     })
 
 
@@ -362,7 +375,8 @@ async def playlist_detail_page(
     request: Request, 
     playlist_id: str,
     page: int = Query(1, ge=1),
-    per_page: int = Query(100, ge=1, le=500)
+    per_page: int = Query(100, ge=1, le=500),
+    hide_processing: Optional[int] = None,  # 1=隐藏正在被 task 处理的视频
 ):
     """Playlist 详情页（分页）"""
     db = get_db()
@@ -374,8 +388,22 @@ async def playlist_detail_page(
     if not pl:
         return HTMLResponse("<h1>Playlist 不存在</h1>", status_code=404)
     
+    # 获取正在处理中的视频 ID（用于隐藏过滤）
+    processing_video_ids = set()
+    if hide_processing:
+        from vat.web.routes.tasks import get_job_manager
+        try:
+            jm = get_job_manager()
+            processing_video_ids = jm.get_running_video_ids() or set()
+        except Exception:
+            pass
+    
     # 获取全量视频列表（轻量：仅模型对象，不含进度）
     all_videos = playlist_service.get_playlist_videos(playlist_id)
+    
+    # 过滤掉正在被 task 处理的视频
+    if processing_video_ids:
+        all_videos = [v for v in all_videos if v.id not in processing_video_ids]
     
     # 进度统计（单次批量 SQL，替代逐视频 N+1 查询）
     progress_map_all = db.batch_get_playlist_progress()
@@ -470,7 +498,8 @@ async def playlist_detail_page(
         "current_page": page,
         "per_page": per_page,
         "total": total,
-        "total_pages": total_pages
+        "total_pages": total_pages,
+        "hide_processing": 1 if hide_processing else 0,
     })
 
 

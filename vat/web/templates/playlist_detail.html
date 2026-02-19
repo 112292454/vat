@@ -169,6 +169,12 @@
         <button onclick="filterPlVideos('failed')" class="filter-tag px-3 py-1 rounded-full text-sm bg-gray-200 text-gray-700" data-filter-value="failed" data-active-class="bg-red-600 text-white">失败</button>
         <button onclick="filterPlVideos('running')" class="filter-tag px-3 py-1 rounded-full text-sm bg-gray-200 text-gray-700" data-filter-value="running" data-active-class="bg-blue-600 text-white">进行中</button>
         <button onclick="filterPlVideos('unavailable')" class="filter-tag px-3 py-1 rounded-full text-sm bg-gray-200 text-gray-700" data-filter-value="unavailable" data-active-class="bg-gray-600 text-white">不可用</button>
+        <span class="text-gray-400 mx-1">|</span>
+        <label class="flex items-center cursor-pointer text-sm text-gray-600 hover:text-gray-800" title="隐藏正在被任务处理的视频">
+            <input type="checkbox" {% if hide_processing %}checked{% endif %}
+                   onchange="toggleHideProcessing(this.checked)" class="mr-1 rounded">
+            <span>隐藏处理中</span>
+        </label>
     </div>
 
     <!-- 视频列表 -->
@@ -286,7 +292,7 @@
                 <span>共 {{ total }} 个视频</span>
                 <span class="text-gray-300">|</span>
                 <span>每页</span>
-                <select onchange="location.href='?per_page='+this.value" class="border rounded px-1 py-0.5 text-sm">
+                <select onchange="location.href='?per_page='+this.value+'{% if hide_processing %}&hide_processing=1{% endif %}'" class="border rounded px-1 py-0.5 text-sm">
                     {% for n in [50, 100, 200, 500] %}
                     <option value="{{ n }}" {% if per_page == n %}selected{% endif %}>{{ n }}</option>
                     {% endfor %}
@@ -296,17 +302,17 @@
             {% if total_pages > 1 %}
             <div class="flex items-center space-x-2">
                 {% if current_page > 1 %}
-                <a href="?page={{ current_page - 1 }}&per_page={{ per_page }}" 
+                <a href="?page={{ current_page - 1 }}&per_page={{ per_page }}{% if hide_processing %}&hide_processing=1{% endif %}" 
                    class="px-3 py-1 bg-gray-200 rounded hover:bg-gray-300 text-sm">上一页</a>
                 {% endif %}
                 <span class="px-3 py-1 text-sm">
                     <input type="number" value="{{ current_page }}" min="1" max="{{ total_pages }}"
                            class="w-16 border rounded px-2 py-1 text-center text-sm"
-                           onchange="location.href='?page='+this.value+'&per_page={{ per_page }}'">
+                           onchange="location.href='?page='+this.value+'&per_page={{ per_page }}{% if hide_processing %}&hide_processing=1{% endif %}'">
                     / {{ total_pages }}
                 </span>
                 {% if current_page < total_pages %}
-                <a href="?page={{ current_page + 1 }}&per_page={{ per_page }}" 
+                <a href="?page={{ current_page + 1 }}&per_page={{ per_page }}{% if hide_processing %}&hide_processing=1{% endif %}" 
                    class="px-3 py-1 bg-gray-200 rounded hover:bg-gray-300 text-sm">下一页</a>
                 {% endif %}
             </div>
@@ -366,6 +372,18 @@
 
 <script>
 const playlistId = '{{ playlist.id }}';
+// 隐藏/显示正在处理的视频
+function toggleHideProcessing(checked) {
+    const params = new URLSearchParams(window.location.search);
+    if (checked) {
+        params.set('hide_processing', '1');
+    } else {
+        params.delete('hide_processing');
+    }
+    params.delete('page');
+    window.location.href = window.location.pathname + '?' + params.toString();
+}
+
 // 视频状态筛选（当前页内）
 function filterPlVideos(status) {
     const table = document.getElementById('pl-video-table');

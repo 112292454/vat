@@ -483,7 +483,8 @@ class Database:
         playlist_id: Optional[str] = None,
         stage_filters: Optional[Dict[str, str]] = None,
         sort_by: Optional[str] = None,
-        sort_order: str = "desc"
+        sort_order: str = "desc",
+        exclude_video_ids: Optional[set] = None
     ) -> Dict[str, Any]:
         """分页列出视频（SQL 层面过滤，避免全量加载）
         
@@ -497,6 +498,7 @@ class Database:
                            支持的状态值: 'pending'（就绪待运行）, 'completed', 'failed'
             sort_by: 排序字段 ('title', 'duration', 'progress', 'upload_date', 'created_at')
             sort_order: 排序方向 ('asc' 或 'desc'，默认 'desc')
+            exclude_video_ids: 要排除的视频 ID 集合（用于隐藏正在被 task 处理的视频）
             
         Returns:
             {'videos': List[Video], 'total': int, 'page': int, 'total_pages': int}
@@ -546,6 +548,12 @@ class Database:
             # 构建 WHERE 条件
             where_clauses = []
             where_params = []
+            
+            # 排除指定视频（用于隐藏正在被 task 处理的视频）
+            if exclude_video_ids:
+                placeholders = ",".join("?" for _ in exclude_video_ids)
+                where_clauses.append(f"v.id NOT IN ({placeholders})")
+                where_params.extend(list(exclude_video_ids))
             
             # 搜索过滤
             if search:

@@ -119,7 +119,22 @@ Reflect 不是多次 LLM 调用，而是单次调用中输出 3 个字段（init
 - **修复**：通过逆向 B站创作中心前端 JS 找到正确格式，重写 `add_to_season`、`remove_from_season`。详见 `docs/bilibili_season_api.md`
 - **排序功能**：`sort_season_episodes` 已修复。关键是 `section` 对象必须包含 `id/type/seasonId/title` 四个字段，且 body 中不能有 `csrf`
 
-### Upload-2: 视频编号（#N）与时间顺序不一致（已修复）
+### Upload-2: Playlist 同步不获取新视频 + 视频/直播混合问题（已修复）
+
+- **现象**：fubuki 频道的 playlist 同步后视频数量不增长（始终 2948），且视频和直播混在同一个 playlist 中
+- **根因**：
+  1. `source_url` 指向 `/@xxx/videos` tab，YouTube 该 tab 只返回 ~172 个热门视频（非全量），导致 sync 无法发现新视频
+  2. 单一 playlist 混合了 2668 个直播和 280 个普通视频，语义不清晰，且 yt-dlp 对 `/videos` 和 `/streams` tab 返回相同的 channel ID，无法区分
+- **修复**：
+  1. **Playlist 拆分**：将原 `UCdn5BQ06XqgXoAxIhbqw5Rg` 拆为 `-videos`（280 个）和 `-streams`（2668 个）
+  2. **Videos playlist**：source_url 改为 UU uploads playlist（全量上传列表），metadata 中 `sync_live_filter: "not_live"` 自动过滤 `live_status=was_live` 的直播条目
+  3. **Streams playlist**：source_url 使用 `/@xxx/streams`（只返回直播）
+  4. **`sync_playlist` 新增 `target_playlist_id` 参数**：显式指定 DB 中的 playlist ID，不再依赖 yt-dlp 返回的（可能不唯一的）playlist ID
+  5. **`get_playlist_info` 新增 `live_status` 字段**：从 yt-dlp flat 模式中提取，用于 sync 时自动区分视频和直播
+  6. B 站合集同步更新：拆分后重算 `upload_order_index`，批量更新 39 个已上传直播的 B 站标题中的 `#N` 编号
+- **状态**：已修复
+
+### Upload-3: 视频编号（#N）与时间顺序不一致（已修复）
 
 - **现象**：上传标题中的 `#N` 编号与视频的实际发布时间顺序不符。例如倒数第 2 新的视频显示 `#3` 而非 `#29`
 - **根因**：4 个 bug 叠加导致

@@ -76,7 +76,22 @@
   4. `backfill` 改为全量重分配
 - **验证**：12 个新增测试 + 8 个 playlist 全量数据验证通过
 
-### Upload-4: 创作中心 API 截断 desc 导致编辑操作覆盖完整简介
+### Upload-4: upload_order_index 跨 playlist 混用导致标题 #N 错误
+
+- **现象**：shorts playlist 中的视频上传标题显示 `#360`，但该 playlist 只有 98 个视频。索引来自另一个 playlist（videos，363 个视频）
+- **根因**：3 个设计缺陷叠加
+  1. `_reassign_upload_order_indices` 和 `backfill` 同时写入 `playlist_videos` 表（per-playlist）和 `video.metadata`（全局单值）。视频属于多个 playlist 时，后 sync 的 playlist 覆盖前者的 metadata 值
+  2. `executor` 上传时从 `playlist_videos` 获取 `upload_order_index` 失败（shorts 的值全为 0）后，fallback 到 `video.metadata` 中的值——此时读到的是 videos playlist 的索引
+  3. `videos.playlist_id` 是单值字段，shorts 视频拆分后仍指向 videos playlist，导致 fallback 链路取错 playlist
+- **修复**：
+  1. `_reassign_upload_order_indices` → `_assign_indices_to_new_videos`：改为增量式分配（只处理 index=0 的新视频，从 max+1 开始），不做全量重排，不写 `video.metadata`
+  2. `backfill_upload_order_index`：保留为手动全量重排工具，但只写 `playlist_videos` 表，返回 `changed_videos` 列表便于同步 B站标题
+  3. `executor` 和 CLI：移除 fallback 到 `video.metadata`，只从 `playlist_videos` 表读取
+  4. 所有 `video.playlist_id` 读取点（executor、CLI、WebUI）改为查询 `playlist_videos` 关联表
+  5. 数据清理：从 streams 移除 2 个重复视频（streams ∩ videos），videos playlist 重排索引 1-279
+- **验证**：15 个 upload_order_index 测试 + 319 个全量测试通过；dry-run 验证 shorts `#17`、videos `#161` 索引正确
+
+### Upload-5: 创作中心 API 截断 desc 导致编辑操作覆盖完整简介
 
 - **现象**：通过 `edit_video_info` 修改标题/标签，或 `replace_video` 替换视频后，B站上的视频简介被截断为 250 字符
 - **根因**：创作中心 API (`/x/client/archive/view`) 返回的 `desc` 字段**固定截断到 250 字符**，但编辑接口 (`/x/vu/web/edit`) 会用 payload 中的 `desc` 覆盖完整简介。公共 API (`/x/web-interface/view`) 对已发布视频返回完整 desc（1000+ 字符）

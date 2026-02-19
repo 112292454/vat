@@ -459,90 +459,7 @@ async function loadRejectedVideos() {
         }
         
         rejectedVideos = data.videos;
-        
-        if (rejectedVideos.length === 0) {
-            container.innerHTML = '<p class="text-green-600">没有被退回的稿件</p>';
-            return;
-        }
-        
-        let html = `<p class="text-sm text-gray-500 mb-3">共 ${rejectedVideos.length} 个退回稿件</p>`;
-        html += '<div class="space-y-4">';
-        
-        for (const v of rejectedVideos) {
-            const statusBadge = v.fixable
-                ? '<span class="px-2 py-0.5 rounded text-xs font-medium bg-yellow-100 text-yellow-800">可修复</span>'
-                : v.is_full_video
-                    ? '<span class="px-2 py-0.5 rounded text-xs font-medium bg-red-100 text-red-800">全片违规</span>'
-                    : '<span class="px-2 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-600">未知</span>';
-            
-            // 违规详情
-            let problemsHtml = '';
-            for (const p of v.problems) {
-                problemsHtml += `<div class="text-sm text-gray-600 mt-1">`;
-                problemsHtml += `<span class="text-red-600 font-medium">原因:</span> ${escapeHtml(p.reason)}`;
-                if (p.violation_time) {
-                    problemsHtml += `<br><span class="text-gray-500">时间:</span> ${escapeHtml(p.violation_time)}`;
-                    if (p.time_ranges.length > 0) {
-                        const rangesStr = p.time_ranges.map(r => `${formatSec(r[0])}-${formatSec(r[1])}`).join(', ');
-                        problemsHtml += ` <span class="text-gray-400">(${rangesStr})</span>`;
-                    }
-                }
-                if (p.is_full_video) {
-                    problemsHtml += `<br><span class="text-red-500">位置: ${escapeHtml(p.violation_position)}（全片违规，无法自动修复）</span>`;
-                }
-                if (p.modify_advise) {
-                    problemsHtml += `<br><span class="text-gray-500">建议:</span> ${escapeHtml(p.modify_advise)}`;
-                }
-                problemsHtml += '</div>';
-            }
-            
-            // 修复按钮/状态
-            let actionHtml = '';
-            if (v.fixable) {
-                const fixStatus = v.fix_status;
-                if (fixStatus === 'masking' || fixStatus === 'uploading') {
-                    actionHtml = `<div id="fix-status-${v.aid}" class="mt-2">
-                        <span class="inline-flex items-center px-3 py-1 rounded-full text-sm bg-blue-100 text-blue-700">
-                            <svg class="animate-spin -ml-1 mr-2 h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>
-                            处理中...
-                        </span>
-                    </div>`;
-                    // 开始轮询状态
-                    setTimeout(() => pollFixStatus(v.aid), 2000);
-                } else if (fixStatus === 'completed') {
-                    actionHtml = `<div id="fix-status-${v.aid}" class="mt-2">
-                        <span class="text-green-600 text-sm">✓ 已修复</span>
-                    </div>`;
-                } else {
-                    actionHtml = `<div id="fix-status-${v.aid}" class="mt-2">
-                        <button onclick="startFix(${v.aid})" class="px-3 py-1 bg-green-500 text-white rounded text-sm hover:bg-green-600">
-                            自动修复
-                        </button>
-                    </div>`;
-                }
-            }
-            
-            html += `
-                <div class="border rounded-lg p-4" id="rejected-card-${v.aid}">
-                    <div class="flex justify-between items-start">
-                        <div class="flex-1 min-w-0">
-                            <div class="flex items-center gap-2 mb-1">
-                                ${statusBadge}
-                                <span class="text-xs text-gray-400">av${v.aid}</span>
-                            </div>
-                            <h3 class="text-sm font-medium text-gray-900 truncate">${escapeHtml(v.title)}</h3>
-                            ${problemsHtml}
-                        </div>
-                        <div class="ml-4 flex-shrink-0">
-                            ${actionHtml}
-                        </div>
-                    </div>
-                </div>
-            `;
-        }
-        
-        html += '</div>';
-        container.innerHTML = html;
+        renderRejected();
         
     } catch (e) {
         container.innerHTML = `<p class="text-red-500">加载失败: ${e}</p>`;
@@ -550,6 +467,107 @@ async function loadRejectedVideos() {
         btn.disabled = false;
         btn.textContent = '刷新退回列表';
     }
+}
+
+function renderRejected() {
+    const container = document.getElementById('rejected-container');
+    if (rejectedVideos.length === 0) {
+        container.innerHTML = '<p class="text-green-600">没有被退回的稿件</p>';
+        return;
+    }
+    
+    // 默认只显示可修复的，全片违规隐藏
+    const showAll = document.getElementById('show-all-rejected')?.checked;
+    const filtered = showAll ? rejectedVideos : rejectedVideos.filter(v => v.fixable);
+    const hiddenCount = rejectedVideos.length - filtered.length;
+    
+    let html = `<p class="text-sm text-gray-500 mb-3">共 ${rejectedVideos.length} 个退回稿件</p>`;
+    
+    if (hiddenCount > 0) {
+        html += `<div class="text-sm text-gray-400 mb-3">
+            <label class="cursor-pointer select-none">
+                <input type="checkbox" id="show-all-rejected" onchange="renderRejected()" ${showAll ? 'checked' : ''}>
+                显示 ${hiddenCount} 个全片违规（无法自动修复）
+            </label>
+        </div>`;
+    }
+    
+    html += '<div class="space-y-4">';
+    
+    for (const v of filtered) {
+        const statusBadge = v.fixable
+            ? '<span class="px-2 py-0.5 rounded text-xs font-medium bg-yellow-100 text-yellow-800">可修复</span>'
+            : v.is_full_video
+                ? '<span class="px-2 py-0.5 rounded text-xs font-medium bg-red-100 text-red-800">全片违规</span>'
+                : '<span class="px-2 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-600">未知</span>';
+        
+        // 违规详情
+        let problemsHtml = '';
+        for (const p of v.problems) {
+            problemsHtml += `<div class="text-sm text-gray-600 mt-1">`;
+            problemsHtml += `<span class="text-red-600 font-medium">原因:</span> ${escapeHtml(p.reason)}`;
+            if (p.violation_time) {
+                problemsHtml += `<br><span class="text-gray-500">时间:</span> ${escapeHtml(p.violation_time)}`;
+                if (p.time_ranges.length > 0) {
+                    const rangesStr = p.time_ranges.map(r => `${formatSec(r[0])}-${formatSec(r[1])}`).join(', ');
+                    problemsHtml += ` <span class="text-gray-400">(${rangesStr})</span>`;
+                }
+            }
+            if (p.is_full_video) {
+                problemsHtml += `<br><span class="text-red-500">位置: ${escapeHtml(p.violation_position)}（全片违规，无法自动修复）</span>`;
+            }
+            if (p.modify_advise) {
+                problemsHtml += `<br><span class="text-gray-500">建议:</span> ${escapeHtml(p.modify_advise)}`;
+            }
+            problemsHtml += '</div>';
+        }
+        
+        // 修复按钮/状态
+        let actionHtml = '';
+        if (v.fixable) {
+            const fixStatus = v.fix_status;
+            if (fixStatus === 'masking' || fixStatus === 'uploading') {
+                actionHtml = `<div id="fix-status-${v.aid}" class="mt-2">
+                    <span class="inline-flex items-center px-3 py-1 rounded-full text-sm bg-blue-100 text-blue-700">
+                        <svg class="animate-spin -ml-1 mr-2 h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>
+                        处理中...
+                    </span>
+                </div>`;
+                setTimeout(() => pollFixStatus(v.aid), 2000);
+            } else if (fixStatus === 'completed') {
+                actionHtml = `<div id="fix-status-${v.aid}" class="mt-2">
+                    <span class="text-green-600 text-sm">✓ 已修复</span>
+                </div>`;
+            } else {
+                actionHtml = `<div id="fix-status-${v.aid}" class="mt-2">
+                    <button onclick="startFix(${v.aid})" class="px-3 py-1 bg-green-500 text-white rounded text-sm hover:bg-green-600">
+                        自动修复
+                    </button>
+                </div>`;
+            }
+        }
+        
+        html += `
+            <div class="border rounded-lg p-4" id="rejected-card-${v.aid}">
+                <div class="flex justify-between items-start">
+                    <div class="flex-1 min-w-0">
+                        <div class="flex items-center gap-2 mb-1">
+                            ${statusBadge}
+                            <span class="text-xs text-gray-400">av${v.aid}</span>
+                        </div>
+                        <h3 class="text-sm font-medium text-gray-900 truncate">${escapeHtml(v.title)}</h3>
+                        ${problemsHtml}
+                    </div>
+                    <div class="ml-4 flex-shrink-0">
+                        ${actionHtml}
+                    </div>
+                </div>
+            </div>
+        `;
+    }
+    
+    html += '</div>';
+    container.innerHTML = html;
 }
 
 async function startFix(aid) {

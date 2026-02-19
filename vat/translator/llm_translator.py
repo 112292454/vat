@@ -409,7 +409,8 @@ class LLMTranslator(BaseTranslator):
             
             matcher = difflib.SequenceMatcher(None, orig_normalized, opt_normalized)
             similarity = matcher.ratio()
-            similarity_threshold = 0.3 if count_words(original_text) <= 10 else 0.5
+            l=count_words(original_text)
+            similarity_threshold = 0 if l<=3 else 0.3 if l <= 10 else 0.4
 
             if similarity < similarity_threshold:
                 excessive_changes.append(

@@ -667,6 +667,10 @@ def process(ctx, video_id, process_all, playlist, stages, gpu, force, dry_run, c
             _run_dtime_uploads(config, db, logger, video_ids, upload_cron, force, dry_run, playlist_id=playlist, batch_size=upload_batch_size)
         else:
             _run_scheduled_uploads(config, db, logger, video_ids, upload_cron, force, dry_run, playlist_id=playlist, batch_size=upload_batch_size)
+        
+        # 定时上传完成后，自动执行 season sync（与普通上传路径一致）
+        if playlist and not dry_run:
+            _auto_season_sync(config, db, logger, playlist)
         return
     
     # 显示执行计划
@@ -1558,22 +1562,31 @@ def upload_video(ctx, video_id, upload_playlist_id, platform, season, dry_run):
         }
     
     # 获取播放列表信息
-    # 优先使用显式传入的 playlist_id（发起任务的 playlist），
-    # 回退到 video.playlist_id（videos 表单一字段，视频属于多个 playlist 时可能不准确）
-    effective_playlist_id = upload_playlist_id or video.playlist_id
+    # 优先使用显式传入的 playlist_id，回退到 playlist_videos 关联表查询
+    effective_playlist_id = upload_playlist_id
+    if not effective_playlist_id:
+        video_playlists = db.get_video_playlists(video_id)
+        if len(video_playlists) == 1:
+            effective_playlist_id = video_playlists[0]
+        elif len(video_playlists) > 1:
+            click.echo(
+                f"✗ 视频 {video_id} 属于多个 playlist ({video_playlists})，"
+                "请通过 --playlist 指定目标 playlist", err=True
+            )
+            return
     playlist_info = None
     if effective_playlist_id:
         playlist_service = PlaylistService(db)
         pl = playlist_service.get_playlist(effective_playlist_id)
         if pl:
             pl_upload_config = (pl.metadata or {}).get('upload_config', {})
-            # upload_order_index: 从 playlist_videos 关联表读取（per-playlist），
-            # 与 executor._run_upload 逻辑保持一致
+            # upload_order_index: 只从 playlist_videos 关联表读取（per-playlist）
             pv_info = db.get_playlist_video_info(effective_playlist_id, video_id)
             upload_order_index = pv_info.get('upload_order_index', 0) if pv_info else 0
-            if not upload_order_index:
-                # 回退到 video 级别数据
-                upload_order_index = (video.metadata or {}).get('upload_order_index', 0) or video.playlist_index or 0
+            assert upload_order_index, (
+                f"视频 {video_id} 在 playlist {effective_playlist_id} 中缺少 upload_order_index，"
+                "请先执行 playlist sync 以分配时间顺序索引"
+            )
             playlist_info = {
                 'name': pl.title,
                 'id': pl.id,

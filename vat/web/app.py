@@ -324,7 +324,7 @@ async def video_detail(request: Request, video_id: str, from_playlist: Optional[
         "task_timeline": task_timeline,
         "metadata": video.metadata,
         "files": files_list,
-        "playlist_id": from_playlist or video.playlist_id,
+        "playlist_id": from_playlist or (db.get_video_playlists(video_id) or [None])[0],
         "from_playlist": bool(from_playlist),
         "active_job_id": active_job_id,
     })

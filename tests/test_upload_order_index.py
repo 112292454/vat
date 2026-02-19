@@ -1,10 +1,10 @@
 """upload_order_index 单元测试
 
 验证：
-1. 全量重分配按 upload_date 正确排序（1=最旧, N=最新）
+1. _assign_indices_to_new_videos: 增量式分配（只处理 index=0 的新视频，从 max+1 开始）
 2. sync 时 update_video_playlist_info 不丢失 upload_order_index
-3. 新视频加入后重分配正确插入
-4. backfill 全量覆盖错误索引
+3. backfill_upload_order_index: 全量重排（手动修复工具）
+4. 索引只存在 playlist_videos 表中，不写 video.metadata
 """
 
 import os
@@ -46,108 +46,130 @@ def _add_video_to_playlist(db, video_id, playlist_id, playlist_index, upload_dat
     return v
 
 
+def _get_order_index(db, playlist_id, video_id):
+    """从 playlist_videos 关联表读取 upload_order_index"""
+    pv = db.get_playlist_video_info(playlist_id, video_id)
+    return pv['upload_order_index'] if pv else 0
+
+
 def _get_service(db):
     """构造 PlaylistService（只注入 db，不需要 downloader）"""
     from vat.services.playlist_service import PlaylistService
     return PlaylistService(db=db, downloader=None)
 
 
-class TestReassignUploadOrderIndices:
-    """_reassign_upload_order_indices 全量重分配"""
+class TestAssignIndicesToNewVideos:
+    """_assign_indices_to_new_videos 增量式分配"""
 
-    def test_basic_chronological_order(self, db):
-        """按 upload_date 正确分配 1=最旧, N=最新"""
+    def test_all_new_videos_get_indices(self, db):
+        """所有新视频（index=0）按 upload_date 分配，1=最旧"""
         _add_playlist(db)
-        # 故意乱序添加
-        _add_video_to_playlist(db, "v_new", "PL_TEST", 1, "20250301")   # 最新，YouTube idx=1
-        _add_video_to_playlist(db, "v_mid", "PL_TEST", 2, "20240601")   # 中间
-        _add_video_to_playlist(db, "v_old", "PL_TEST", 3, "20230101")   # 最旧，YouTube idx=3
+        _add_video_to_playlist(db, "v_new", "PL_TEST", 1, "20250301")
+        _add_video_to_playlist(db, "v_mid", "PL_TEST", 2, "20240601")
+        _add_video_to_playlist(db, "v_old", "PL_TEST", 3, "20230101")
 
         service = _get_service(db)
-        messages = []
-        service._reassign_upload_order_indices("PL_TEST", messages.append)
+        service._assign_indices_to_new_videos("PL_TEST", lambda x: None)
 
-        # 验证：最旧=1, 中间=2, 最新=3
-        v_old = db.get_video("v_old")
-        v_mid = db.get_video("v_mid")
-        v_new = db.get_video("v_new")
-        assert v_old.metadata['upload_order_index'] == 1
-        assert v_mid.metadata['upload_order_index'] == 2
-        assert v_new.metadata['upload_order_index'] == 3
+        assert _get_order_index(db, "PL_TEST", "v_old") == 1
+        assert _get_order_index(db, "PL_TEST", "v_mid") == 2
+        assert _get_order_index(db, "PL_TEST", "v_new") == 3
 
-    def test_overwrites_wrong_indices(self, db):
-        """覆盖已有的错误索引"""
+    def test_only_new_videos_assigned(self, db):
+        """已有索引的视频不变，只给 index=0 的新视频分配"""
         _add_playlist(db)
-        _add_video_to_playlist(db, "v1", "PL_TEST", 2, "20230101")
-        _add_video_to_playlist(db, "v2", "PL_TEST", 1, "20250101")
+        _add_video_to_playlist(db, "v_old", "PL_TEST", 2, "20230101")
+        _add_video_to_playlist(db, "v_exist", "PL_TEST", 1, "20240601")
 
-        # 手动设置错误的 upload_order_index
-        meta1 = db.get_video("v1").metadata
-        meta1['upload_order_index'] = 99  # 错误值
-        db.update_video("v1", metadata=meta1)
+        # 手动给 v_old 和 v_exist 设置已有索引
+        db.update_playlist_video_order_index("PL_TEST", "v_old", 1)
+        db.update_playlist_video_order_index("PL_TEST", "v_exist", 2)
+
+        # 添加一个新视频（index=0）
+        _add_video_to_playlist(db, "v_new", "PL_TEST", 3, "20250101")
 
         service = _get_service(db)
-        service._reassign_upload_order_indices("PL_TEST", lambda x: None)
+        service._assign_indices_to_new_videos("PL_TEST", lambda x: None)
 
-        assert db.get_video("v1").metadata['upload_order_index'] == 1  # 最旧→1
-        assert db.get_video("v2").metadata['upload_order_index'] == 2  # 最新→2
+        # 已有的不变
+        assert _get_order_index(db, "PL_TEST", "v_old") == 1
+        assert _get_order_index(db, "PL_TEST", "v_exist") == 2
+        # 新的从 max+1=3 开始
+        assert _get_order_index(db, "PL_TEST", "v_new") == 3
+
+    def test_does_not_touch_existing_indices(self, db):
+        """即使已有索引"看起来不对"（有缝隙），也不重排"""
+        _add_playlist(db)
+        _add_video_to_playlist(db, "v1", "PL_TEST", 1, "20230101")
+        _add_video_to_playlist(db, "v2", "PL_TEST", 2, "20240101")
+
+        # 故意设置有缝隙的索引：1, 5（跳了 2,3,4）
+        db.update_playlist_video_order_index("PL_TEST", "v1", 1)
+        db.update_playlist_video_order_index("PL_TEST", "v2", 5)
+
+        service = _get_service(db)
+        service._assign_indices_to_new_videos("PL_TEST", lambda x: None)
+
+        # 索引不变（没有新视频要分配）
+        assert _get_order_index(db, "PL_TEST", "v1") == 1
+        assert _get_order_index(db, "PL_TEST", "v2") == 5
+
+    def test_multiple_new_videos_sorted_by_date(self, db):
+        """多个新视频按 upload_date 排序，从 max+1 开始"""
+        _add_playlist(db)
+        _add_video_to_playlist(db, "v_exist", "PL_TEST", 1, "20220101")
+        db.update_playlist_video_order_index("PL_TEST", "v_exist", 10)
+
+        # 3 个新视频，乱序添加
+        _add_video_to_playlist(db, "v_c", "PL_TEST", 2, "20250101")
+        _add_video_to_playlist(db, "v_a", "PL_TEST", 3, "20230101")
+        _add_video_to_playlist(db, "v_b", "PL_TEST", 4, "20240601")
+
+        service = _get_service(db)
+        service._assign_indices_to_new_videos("PL_TEST", lambda x: None)
+
+        assert _get_order_index(db, "PL_TEST", "v_exist") == 10  # 不变
+        assert _get_order_index(db, "PL_TEST", "v_a") == 11  # 最旧的新视频
+        assert _get_order_index(db, "PL_TEST", "v_b") == 12
+        assert _get_order_index(db, "PL_TEST", "v_c") == 13  # 最新的新视频
 
     def test_idempotent(self, db):
-        """重复调用不改变正确的索引"""
+        """重复调用不改变已分配的索引"""
         _add_playlist(db)
         _add_video_to_playlist(db, "v1", "PL_TEST", 2, "20230101")
         _add_video_to_playlist(db, "v2", "PL_TEST", 1, "20250101")
 
         service = _get_service(db)
-        service._reassign_upload_order_indices("PL_TEST", lambda x: None)
+        service._assign_indices_to_new_videos("PL_TEST", lambda x: None)
 
-        # 第二次调用不应有更新
-        messages = []
-        service._reassign_upload_order_indices("PL_TEST", messages.append)
-        # 如果没有更新，不会产生回调
-        assert not any("更新" in m for m in messages)
+        idx1_first = _get_order_index(db, "PL_TEST", "v1")
+        idx2_first = _get_order_index(db, "PL_TEST", "v2")
 
-    def test_new_video_interleaved(self, db):
-        """新视频（时间上在已有视频之间）正确插入"""
-        _add_playlist(db)
-        _add_video_to_playlist(db, "v_old", "PL_TEST", 3, "20230101")
-        _add_video_to_playlist(db, "v_new", "PL_TEST", 1, "20250101")
+        # 第二次调用不应改变
+        service._assign_indices_to_new_videos("PL_TEST", lambda x: None)
 
-        service = _get_service(db)
-        service._reassign_upload_order_indices("PL_TEST", lambda x: None)
-        assert db.get_video("v_old").metadata['upload_order_index'] == 1
-        assert db.get_video("v_new").metadata['upload_order_index'] == 2
-
-        # 添加一个时间上在中间的视频
-        _add_video_to_playlist(db, "v_mid", "PL_TEST", 2, "20240601")
-        service._reassign_upload_order_indices("PL_TEST", lambda x: None)
-
-        assert db.get_video("v_old").metadata['upload_order_index'] == 1
-        assert db.get_video("v_mid").metadata['upload_order_index'] == 2  # 正确插入
-        assert db.get_video("v_new").metadata['upload_order_index'] == 3
-
-    def test_same_date_stable_order(self, db):
-        """相同 upload_date 的视频排序稳定"""
-        _add_playlist(db)
-        _add_video_to_playlist(db, "v_a", "PL_TEST", 3, "20240101")
-        _add_video_to_playlist(db, "v_b", "PL_TEST", 2, "20240101")
-        _add_video_to_playlist(db, "v_c", "PL_TEST", 1, "20250101")
-
-        service = _get_service(db)
-        service._reassign_upload_order_indices("PL_TEST", lambda x: None)
-
-        # 相同日期的两个视频应该有连续索引（具体顺序不重要，但不能跳号）
-        idx_a = db.get_video("v_a").metadata['upload_order_index']
-        idx_b = db.get_video("v_b").metadata['upload_order_index']
-        idx_c = db.get_video("v_c").metadata['upload_order_index']
-        assert {idx_a, idx_b} == {1, 2}  # 两个同日期的占据 1 和 2
-        assert idx_c == 3  # 最新的是 3
+        assert _get_order_index(db, "PL_TEST", "v1") == idx1_first
+        assert _get_order_index(db, "PL_TEST", "v2") == idx2_first
 
     def test_empty_playlist(self, db):
         """空 playlist 不报错"""
         _add_playlist(db)
         service = _get_service(db)
-        service._reassign_upload_order_indices("PL_TEST", lambda x: None)  # 不应报错
+        service._assign_indices_to_new_videos("PL_TEST", lambda x: None)
+
+    def test_does_not_write_to_video_metadata(self, db):
+        """索引只写 playlist_videos 表，不写 video.metadata"""
+        _add_playlist(db)
+        _add_video_to_playlist(db, "v1", "PL_TEST", 1, "20230101")
+
+        service = _get_service(db)
+        service._assign_indices_to_new_videos("PL_TEST", lambda x: None)
+
+        # playlist_videos 表有索引
+        assert _get_order_index(db, "PL_TEST", "v1") == 1
+        # video.metadata 不应有 upload_order_index
+        meta = db.get_video("v1").metadata
+        assert 'upload_order_index' not in meta
 
 
 class TestUpdateVideoPlaylistInfoPreservesIndex:
@@ -158,16 +180,12 @@ class TestUpdateVideoPlaylistInfoPreservesIndex:
         _add_playlist(db)
         _add_video_to_playlist(db, "v1", "PL_TEST", 5, "20230101")
 
-        # 设置 upload_order_index
         db.update_playlist_video_order_index("PL_TEST", "v1", 42)
-
-        # 模拟 sync 更新 playlist_index（YouTube 每次 sync 都变）
         db.update_video_playlist_info("v1", "PL_TEST", 99)
 
-        # upload_order_index 应该保留
         pv_info = db.get_playlist_video_info("PL_TEST", "v1")
         assert pv_info['upload_order_index'] == 42
-        assert pv_info['playlist_index'] == 99  # playlist_index 已更新
+        assert pv_info['playlist_index'] == 99
 
     def test_multiple_syncs_preserve_order_index(self, db):
         """多次 sync 都不丢失 upload_order_index"""
@@ -175,7 +193,6 @@ class TestUpdateVideoPlaylistInfoPreservesIndex:
         _add_video_to_playlist(db, "v1", "PL_TEST", 3, "20230101")
         db.update_playlist_video_order_index("PL_TEST", "v1", 1)
 
-        # 模拟 3 次 sync，playlist_index 每次都不同
         for new_pl_idx in [2, 5, 1]:
             db.update_video_playlist_info("v1", "PL_TEST", new_pl_idx)
             pv_info = db.get_playlist_video_info("PL_TEST", "v1")
@@ -184,7 +201,7 @@ class TestUpdateVideoPlaylistInfoPreservesIndex:
 
 
 class TestBackfillUploadOrderIndex:
-    """backfill_upload_order_index 全量重分配"""
+    """backfill_upload_order_index 全量重排（手动修复工具）"""
 
     def test_backfill_overwrites_wrong_indices(self, db):
         """backfill 覆盖错误索引"""
@@ -193,30 +210,54 @@ class TestBackfillUploadOrderIndex:
         _add_video_to_playlist(db, "v2", "PL_TEST", 1, "20250101")
 
         # 设置错误的索引
-        meta = db.get_video("v1").metadata
-        meta['upload_order_index'] = 100
-        db.update_video("v1", metadata=meta)
+        db.update_playlist_video_order_index("PL_TEST", "v1", 99)
 
         service = _get_service(db)
         result = service.backfill_upload_order_index("PL_TEST")
 
         assert result['updated'] >= 1
-        assert db.get_video("v1").metadata['upload_order_index'] == 1
-        assert db.get_video("v2").metadata['upload_order_index'] == 2
+        assert _get_order_index(db, "PL_TEST", "v1") == 1
+        assert _get_order_index(db, "PL_TEST", "v2") == 2
 
     def test_backfill_fills_missing(self, db):
         """backfill 填充缺失的索引"""
         _add_playlist(db)
         _add_video_to_playlist(db, "v1", "PL_TEST", 2, "20230101")
         _add_video_to_playlist(db, "v2", "PL_TEST", 1, "20250101")
-        # 不设置 upload_order_index，模拟旧数据
 
         service = _get_service(db)
         result = service.backfill_upload_order_index("PL_TEST")
 
         assert result['updated'] == 2
-        assert db.get_video("v1").metadata['upload_order_index'] == 1
-        assert db.get_video("v2").metadata['upload_order_index'] == 2
+        assert _get_order_index(db, "PL_TEST", "v1") == 1
+        assert _get_order_index(db, "PL_TEST", "v2") == 2
+
+    def test_backfill_returns_changed_videos(self, db):
+        """backfill 返回变更列表"""
+        _add_playlist(db)
+        _add_video_to_playlist(db, "v1", "PL_TEST", 2, "20230101")
+        _add_video_to_playlist(db, "v2", "PL_TEST", 1, "20250101")
+        db.update_playlist_video_order_index("PL_TEST", "v1", 99)
+
+        service = _get_service(db)
+        result = service.backfill_upload_order_index("PL_TEST")
+
+        assert 'changed_videos' in result
+        # v1: 99->1, v2: 0->2
+        changed_ids = {vid for vid, _, _ in result['changed_videos']}
+        assert 'v1' in changed_ids
+
+    def test_backfill_does_not_write_to_video_metadata(self, db):
+        """backfill 只写 playlist_videos 表，不写 video.metadata"""
+        _add_playlist(db)
+        _add_video_to_playlist(db, "v1", "PL_TEST", 1, "20230101")
+
+        service = _get_service(db)
+        service.backfill_upload_order_index("PL_TEST")
+
+        assert _get_order_index(db, "PL_TEST", "v1") == 1
+        meta = db.get_video("v1").metadata
+        assert 'upload_order_index' not in meta
 
 
 class TestPlaylistIndexVsUploadOrderIndex:
@@ -225,52 +266,35 @@ class TestPlaylistIndexVsUploadOrderIndex:
     def test_youtube_index_is_reverse_of_upload_order(self, db):
         """YouTube playlist_index 1=最新，upload_order_index 1=最旧"""
         _add_playlist(db)
-        # YouTube: index=1 是最新，index=3 是最旧
         _add_video_to_playlist(db, "newest", "PL_TEST", 1, "20250301")
         _add_video_to_playlist(db, "middle", "PL_TEST", 2, "20240601")
         _add_video_to_playlist(db, "oldest", "PL_TEST", 3, "20230101")
 
         service = _get_service(db)
-        service._reassign_upload_order_indices("PL_TEST", lambda x: None)
+        service._assign_indices_to_new_videos("PL_TEST", lambda x: None)
 
-        # upload_order_index 应该与 playlist_index 相反
-        oldest = db.get_video("oldest")
-        newest = db.get_video("newest")
-        assert oldest.metadata['upload_order_index'] == 1   # 最旧=1
-        assert newest.metadata['upload_order_index'] == 3   # 最新=3
-        # 而 YouTube 的 playlist_index 是相反的
+        assert _get_order_index(db, "PL_TEST", "oldest") == 1
+        assert _get_order_index(db, "PL_TEST", "newest") == 3
+
         pv_oldest = db.get_playlist_video_info("PL_TEST", "oldest")
         pv_newest = db.get_playlist_video_info("PL_TEST", "newest")
-        assert pv_oldest['playlist_index'] == 3  # YouTube: 最旧=最大
-        assert pv_newest['playlist_index'] == 1  # YouTube: 最新=1
+        assert pv_oldest['playlist_index'] == 3
+        assert pv_newest['playlist_index'] == 1
 
     def test_large_playlist_all_indexed(self, db):
         """大 playlist（50 个视频）所有视频都获得正确的连续索引"""
         _add_playlist(db)
         for i in range(50):
-            date = f"2024{(i // 28 + 1):02d}{(i % 28 + 1):02d}"  # 2024-01-01 ~ 2024-02-22
+            date = f"2024{(i // 28 + 1):02d}{(i % 28 + 1):02d}"
             _add_video_to_playlist(db, f"v_{i:03d}", "PL_TEST", 50 - i, date)
 
         service = _get_service(db)
-        service._reassign_upload_order_indices("PL_TEST", lambda x: None)
+        service._assign_indices_to_new_videos("PL_TEST", lambda x: None)
 
-        # 验证：所有视频都有索引，且索引是 1~50 的连续整数
         indices = []
         for i in range(50):
-            meta = db.get_video(f"v_{i:03d}").metadata
-            assert 'upload_order_index' in meta, f"v_{i:03d} 缺少 upload_order_index"
-            indices.append(meta['upload_order_index'])
+            idx = _get_order_index(db, "PL_TEST", f"v_{i:03d}")
+            assert idx > 0, f"v_{i:03d} 缺少 upload_order_index"
+            indices.append(idx)
 
         assert sorted(indices) == list(range(1, 51)), "索引不是 1~50 的连续整数"
-
-        # 验证按日期排序正确
-        videos_sorted = sorted(
-            [(db.get_video(f"v_{i:03d}").metadata.get('upload_date', ''),
-              db.get_video(f"v_{i:03d}").metadata['upload_order_index'])
-             for i in range(50)],
-            key=lambda x: x[0]
-        )
-        prev_idx = 0
-        for date, idx in videos_sorted:
-            assert idx > prev_idx, f"索引未按日期递增: date={date}, idx={idx}, prev={prev_idx}"
-            prev_idx = idx

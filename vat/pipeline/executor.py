@@ -56,8 +56,7 @@ class VideoProcessor:
             video_index: 当前视频在批次中的索引（0-based）
             total_videos: 批次总视频数
             playlist_id: 发起任务的 Playlist ID（上传时用于确定正确的 playlist 上下文）。
-                视频可能属于多个 playlist，此参数指定"当前操作的上下文 playlist"。
-                为 None 时回退到 video.playlist_id（videos 表的单一字段）。
+                为 None 时从 playlist_videos 关联表查询（视频应只属于一个 playlist）。
             upload_dtime: B站定时发布时间戳（10位Unix时间戳，0=立即发布，需>当前时间+2小时）
         """
         self.video_id = video_id
@@ -1766,8 +1765,17 @@ class VideoProcessor:
         
         # 获取播放列表信息
         # 优先使用显式传入的 playlist_id（发起任务的 playlist），
-        # 回退到 video.playlist_id（videos 表的单一字段，视频属于多个 playlist 时可能不准确）。
-        effective_playlist_id = self._playlist_id or self.video.playlist_id
+        # 回退到 playlist_videos 关联表查询（不再使用 videos.playlist_id 单值字段）。
+        effective_playlist_id = self._playlist_id
+        if not effective_playlist_id:
+            video_playlists = self.db.get_video_playlists(self.video.id)
+            if len(video_playlists) == 1:
+                effective_playlist_id = video_playlists[0]
+            elif len(video_playlists) > 1:
+                raise UploadError(
+                    f"视频 {self.video.id} 属于多个 playlist ({video_playlists})，"
+                    "请通过 -p 参数指定目标 playlist"
+                )
         playlist_info = None
         if effective_playlist_id:
             playlist = self.db.get_playlist(effective_playlist_id)
@@ -1776,14 +1784,11 @@ class VideoProcessor:
                 pl_upload_config = pl_metadata.get('upload_config', {})
                 
                 # upload_order_index: 1=最旧, N=最新（sync 时按 upload_date 排序分配）
-                # 从 playlist_videos 关联表读取（per-playlist），而非 video.metadata（全局单值）。
-                # 视频属于多个 playlist 时，metadata 中的值可能对应错误的 playlist。
+                # 只从 playlist_videos 关联表读取（per-playlist）。
+                # 禁止 fallback 到 video.metadata：该字段是全局单值，
+                # 视频属于多个 playlist 时会被最后 sync 的 playlist 覆盖，导致索引混用。
                 pv_info = self.db.get_playlist_video_info(effective_playlist_id, self.video.id)
                 upload_order_index = pv_info.get('upload_order_index', 0) if pv_info else 0
-                if not upload_order_index:
-                    # 回退到 metadata（兼容尚未迁移到关联表的数据）
-                    video_metadata = self.video.metadata or {}
-                    upload_order_index = video_metadata.get('upload_order_index', 0)
                 assert upload_order_index, (
                     f"视频 {self.video.id} 在 playlist {effective_playlist_id} 中缺少 upload_order_index，"
                     "请先执行 playlist sync 以分配时间顺序索引"

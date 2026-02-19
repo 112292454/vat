@@ -535,6 +535,8 @@ class PlaylistService:
                     'upload_date': video_info.get('upload_date', ''),
                     'thumbnail': video_info.get('thumbnail', ''),
                     'tags': tags,
+                    'width': video_info.get('width', 0),
+                    'height': video_info.get('height', 0),
                 }
                 
                 self.db.update_video(video_id, title=title, metadata=metadata)
@@ -870,6 +872,8 @@ class PlaylistService:
                         'upload_date': video_info.get('upload_date', ''),
                         'thumbnail': video_info.get('thumbnail', ''),
                         'tags': video_info.get('tags', []),
+                        'width': video_info.get('width', 0),
+                        'height': video_info.get('height', 0),
                     }
                     # 保留 translated，除非 force_retranslate
                     if force_retranslate:
@@ -918,6 +922,8 @@ class PlaylistService:
                             'upload_date': video_info.get('upload_date', ''),
                             'thumbnail': video_info.get('thumbnail', ''),
                             'tags': video_info.get('tags', []),
+                            'width': video_info.get('width', 0),
+                            'height': video_info.get('height', 0),
                         }
                         changed = True
                     

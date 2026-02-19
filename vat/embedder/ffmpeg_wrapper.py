@@ -807,3 +807,256 @@ class FFmpegWrapper:
         except subprocess.CalledProcessError as e:
             print(f"缩略图提取失败: {e.stderr}")
             return False
+
+    @staticmethod
+    def _find_cjk_font() -> Optional[str]:
+        """查找系统中可用的 CJK（中日韩）字体文件路径
+        
+        Returns:
+            字体文件绝对路径，未找到返回 None
+        """
+        # 优先级：Noto Sans CJK SC > WenQuanYi > 任何 CJK 字体
+        preferred = [
+            'Noto Sans CJK SC',
+            'Noto Sans CJK',
+            'WenQuanYi Micro Hei',
+            'WenQuanYi Zen Hei',
+            'Source Han Sans SC',
+            'Source Han Sans CN',
+        ]
+        try:
+            for font_name in preferred:
+                result = subprocess.run(
+                    ['fc-match', font_name, '--format=%{file}'],
+                    capture_output=True, text=True, timeout=5
+                )
+                path = result.stdout.strip()
+                if path and Path(path).exists():
+                    # 验证确实是 CJK 字体（非 fallback 到拉丁字体）
+                    if 'CJK' in path or 'WenQuanYi' in path or 'SourceHan' in path or 'Noto' in path:
+                        return path
+            
+            # 兜底：直接搜索常见路径
+            for candidate in [
+                '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc',
+                '/usr/share/fonts/truetype/wqy/wqy-microhei.ttc',
+                '/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc',
+            ]:
+                if Path(candidate).exists():
+                    return candidate
+        except Exception as e:
+            logger.warning(f"查找 CJK 字体失败: {e}")
+        
+        return None
+
+    def mask_violation_segments(
+        self,
+        video_path: Path,
+        output_path: Path,
+        violation_ranges: List[tuple],
+        mask_text: str = "此处内容因平台合规要求已被遮罩",
+        gpu_device: str = "auto",
+        margin_sec: float = 1.0,
+    ) -> bool:
+        """
+        遮罩视频中的违规时间段：用黑屏+说明文字替换违规片段，音频静音。
+        
+        使用 GPU 加速编码（NVENC），通过 ffmpeg drawtext + colorkey 滤镜实现。
+        不裁剪视频（保持总时长不变），仅将违规区间替换为黑底+白字说明。
+        
+        Args:
+            video_path: 输入视频路径
+            output_path: 输出视频路径
+            violation_ranges: 违规时间段列表 [(start_sec, end_sec), ...]
+            mask_text: 遮罩区域显示的说明文字
+            gpu_device: GPU 设备 ("auto" / "cuda:N")
+            margin_sec: 每段前后额外扩展的安全边距（秒）
+            
+        Returns:
+            是否成功
+        """
+        if not video_path.exists():
+            logger.error(f"输入视频不存在: {video_path}")
+            return False
+        
+        if not violation_ranges:
+            logger.warning("无违规时间段，无需处理")
+            return False
+        
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        # 获取视频信息
+        video_info = self.get_video_info(video_path)
+        if not video_info:
+            logger.error("无法获取视频信息")
+            return False
+        
+        duration = video_info.get('duration', 0)
+        width = video_info.get('video', {}).get('width', 1920) if video_info.get('video') else 1920
+        height = video_info.get('video', {}).get('height', 1080) if video_info.get('video') else 1080
+        
+        # 合并重叠的违规区间并添加安全边距
+        merged = self._merge_ranges(violation_ranges, margin_sec, duration)
+        
+        logger.info(f"遮罩 {len(merged)} 个违规片段（含 {margin_sec}s 安全边距）:")
+        for start, end in merged:
+            logger.info(f"  {_format_time(start)} - {_format_time(end)} ({end - start:.1f}s)")
+        
+        # 构建 ffmpeg 复合滤镜
+        # 策略：对每个违规区间，用 drawbox 覆盖整个画面（黑色），再叠加说明文字
+        # 同时用 volume 滤镜将对应区间的音频静音
+        
+        # 视频滤镜：黑屏 + 文字
+        vf_parts = []
+        af_parts = []
+        
+        # 查找 CJK 字体（只查一次）
+        escaped_text = mask_text.replace("'", "\\'").replace(":", "\\:")
+        fontsize = max(24, height // 30)
+        cjk_font = self._find_cjk_font()
+        if cjk_font:
+            escaped_font = cjk_font.replace(":", "\\:").replace("'", "\\'")
+            font_param = f":fontfile='{escaped_font}'"
+            logger.info(f"使用 CJK 字体: {cjk_font}")
+        else:
+            logger.warning("未找到 CJK 字体，中文文字可能无法正常显示")
+            font_param = ""
+        
+        for start, end in merged:
+            # drawbox 覆盖整个画面为黑色
+            vf_parts.append(
+                f"drawbox=x=0:y=0:w={width}:h={height}:color=black:t=fill"
+                f":enable='between(t,{start},{end})'"
+            )
+            vf_parts.append(
+                f"drawtext=text='{escaped_text}'"
+                f"{font_param}"
+                f":fontsize={fontsize}:fontcolor=white"
+                f":x=(w-text_w)/2:y=(h-text_h)/2"
+                f":enable='between(t,{start},{end})'"
+            )
+            # 音频静音
+            af_parts.append(
+                f"volume=enable='between(t,{start},{end})':volume=0"
+            )
+        
+        vf = ",".join(vf_parts)
+        af = ",".join(af_parts) if af_parts else "anull"
+        
+        # GPU 编码选择
+        _nvenc_manager.init()
+        
+        if gpu_device == "auto":
+            gpu_id = _nvenc_manager.select_gpu()
+        else:
+            try:
+                gpu_id = int(gpu_device.split(":")[1])
+            except (IndexError, ValueError):
+                gpu_id = 0
+        
+        if not _nvenc_manager.acquire(gpu_id, timeout=300):
+            logger.error(f"NVENC 会话获取超时: GPU {gpu_id}")
+            return False
+        
+        # 获取原视频码率，控制输出质量
+        original_bitrate = video_info.get('bit_rate', 0)
+        if original_bitrate > 0:
+            codec_params = [
+                '-rc', 'vbr',
+                '-cq', '23',
+                '-b:v', str(int(original_bitrate * 1.1)),
+                '-maxrate', str(int(original_bitrate * 1.5)),
+            ]
+        else:
+            codec_params = ['-rc', 'constqp', '-qp', '23']
+        
+        cmd = [
+            'ffmpeg',
+            '-hwaccel', 'cuda',
+            '-hwaccel_device', str(gpu_id),
+            '-i', str(video_path),
+            '-vf', vf,
+            '-af', af,
+            '-c:v', 'hevc_nvenc',
+            '-gpu', str(gpu_id),
+            *codec_params,
+            '-preset', 'p4',
+            '-c:a', 'aac',
+            '-movflags', '+faststart',
+            '-y',
+            str(output_path)
+        ]
+        
+        try:
+            logger.info(f"开始遮罩处理 (GPU {gpu_id})...")
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=3600,  # 1小时超时
+            )
+            
+            if result.returncode != 0:
+                logger.error(f"ffmpeg 遮罩处理失败: {result.stderr[-500:]}")
+                return False
+            
+            if not output_path.exists():
+                logger.error("遮罩处理完成但未生成文件")
+                return False
+            
+            # 检查输出文件大小合理性
+            in_size = video_path.stat().st_size
+            out_size = output_path.stat().st_size
+            ratio = out_size / in_size if in_size > 0 else 0
+            logger.info(
+                f"遮罩处理完成: {output_path.name} "
+                f"({out_size / 1024 / 1024:.1f}MB, 相对原文件 {ratio:.1%})"
+            )
+            return True
+            
+        except subprocess.TimeoutExpired:
+            logger.error("ffmpeg 遮罩处理超时 (>1小时)")
+            return False
+        except Exception as e:
+            logger.error(f"遮罩处理异常: {e}")
+            return False
+        finally:
+            _nvenc_manager.release(gpu_id)
+    
+    @staticmethod
+    def _merge_ranges(
+        ranges: List[tuple], margin: float, max_duration: float
+    ) -> List[tuple]:
+        """
+        合并重叠/相邻的时间区间，并添加安全边距。
+        
+        Args:
+            ranges: [(start, end), ...]
+            margin: 前后扩展的安全边距（秒）
+            max_duration: 视频总时长（用于 clamp）
+            
+        Returns:
+            合并后的区间列表，按起始时间排序
+        """
+        if not ranges:
+            return []
+        
+        # 添加安全边距并 clamp
+        expanded = []
+        for start, end in ranges:
+            s = max(0, start - margin)
+            e = min(max_duration, end + margin)
+            expanded.append((s, e))
+        
+        # 按起始时间排序
+        expanded.sort(key=lambda x: x[0])
+        
+        # 合并重叠区间
+        merged = [expanded[0]]
+        for s, e in expanded[1:]:
+            if s <= merged[-1][1]:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], e))
+            else:
+                merged.append((s, e))
+        
+        return merged

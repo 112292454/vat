@@ -77,6 +77,26 @@
         {% endif %}
     </div>
     
+    <!-- 审核退回管理 -->
+    <div class="bg-white rounded-lg shadow p-6 mb-6">
+        <div class="flex justify-between items-center mb-4">
+            <h2 class="text-lg font-semibold">审核退回管理</h2>
+            <button onclick="loadRejectedVideos()" class="px-4 py-2 bg-orange-500 text-white rounded hover:bg-orange-600 text-sm"
+                    {% if not login_status.logged_in %}disabled{% endif %}
+                    id="btn-load-rejected">
+                刷新退回列表
+            </button>
+        </div>
+        
+        {% if not login_status.logged_in %}
+        <p class="text-gray-500">请先登录B站账号</p>
+        {% else %}
+        <div id="rejected-container">
+            <p class="text-gray-500">点击"刷新退回列表"加载被退回的稿件</p>
+        </div>
+        {% endif %}
+    </div>
+    
     <!-- 上传模板设置 -->
     <div class="bg-white rounded-lg shadow p-6 mb-6">
         <h2 class="text-lg font-semibold mb-4">上传模板</h2>
@@ -414,6 +434,252 @@ async function saveTemplates() {
     } catch (e) {
         alert('保存失败: ' + e);
     }
+}
+
+// =============================================================================
+// 审核退回管理
+// =============================================================================
+
+let rejectedVideos = [];
+
+async function loadRejectedVideos() {
+    const container = document.getElementById('rejected-container');
+    const btn = document.getElementById('btn-load-rejected');
+    btn.disabled = true;
+    btn.textContent = '加载中...';
+    container.innerHTML = '<p class="text-gray-500">正在获取退回稿件...</p>';
+    
+    try {
+        const resp = await fetch('/bilibili/rejected');
+        const data = await resp.json();
+        
+        if (!data.success) {
+            container.innerHTML = `<p class="text-red-500">获取失败: ${data.error}</p>`;
+            return;
+        }
+        
+        rejectedVideos = data.videos;
+        
+        if (rejectedVideos.length === 0) {
+            container.innerHTML = '<p class="text-green-600">没有被退回的稿件</p>';
+            return;
+        }
+        
+        let html = `<p class="text-sm text-gray-500 mb-3">共 ${rejectedVideos.length} 个退回稿件</p>`;
+        html += '<div class="space-y-4">';
+        
+        for (const v of rejectedVideos) {
+            const statusBadge = v.fixable
+                ? '<span class="px-2 py-0.5 rounded text-xs font-medium bg-yellow-100 text-yellow-800">可修复</span>'
+                : v.is_full_video
+                    ? '<span class="px-2 py-0.5 rounded text-xs font-medium bg-red-100 text-red-800">全片违规</span>'
+                    : '<span class="px-2 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-600">未知</span>';
+            
+            // 违规详情
+            let problemsHtml = '';
+            for (const p of v.problems) {
+                problemsHtml += `<div class="text-sm text-gray-600 mt-1">`;
+                problemsHtml += `<span class="text-red-600 font-medium">原因:</span> ${escapeHtml(p.reason)}`;
+                if (p.violation_time) {
+                    problemsHtml += `<br><span class="text-gray-500">时间:</span> ${escapeHtml(p.violation_time)}`;
+                    if (p.time_ranges.length > 0) {
+                        const rangesStr = p.time_ranges.map(r => `${formatSec(r[0])}-${formatSec(r[1])}`).join(', ');
+                        problemsHtml += ` <span class="text-gray-400">(${rangesStr})</span>`;
+                    }
+                }
+                if (p.is_full_video) {
+                    problemsHtml += `<br><span class="text-red-500">位置: ${escapeHtml(p.violation_position)}（全片违规，无法自动修复）</span>`;
+                }
+                if (p.modify_advise) {
+                    problemsHtml += `<br><span class="text-gray-500">建议:</span> ${escapeHtml(p.modify_advise)}`;
+                }
+                problemsHtml += '</div>';
+            }
+            
+            // 修复按钮/状态
+            let actionHtml = '';
+            if (v.fixable) {
+                const fixStatus = v.fix_status;
+                if (fixStatus === 'masking' || fixStatus === 'uploading') {
+                    actionHtml = `<div id="fix-status-${v.aid}" class="mt-2">
+                        <span class="inline-flex items-center px-3 py-1 rounded-full text-sm bg-blue-100 text-blue-700">
+                            <svg class="animate-spin -ml-1 mr-2 h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>
+                            处理中...
+                        </span>
+                    </div>`;
+                    // 开始轮询状态
+                    setTimeout(() => pollFixStatus(v.aid), 2000);
+                } else if (fixStatus === 'completed') {
+                    actionHtml = `<div id="fix-status-${v.aid}" class="mt-2">
+                        <span class="text-green-600 text-sm">✓ 已修复</span>
+                    </div>`;
+                } else {
+                    actionHtml = `<div id="fix-status-${v.aid}" class="mt-2">
+                        <button onclick="startFix(${v.aid})" class="px-3 py-1 bg-green-500 text-white rounded text-sm hover:bg-green-600">
+                            自动修复
+                        </button>
+                    </div>`;
+                }
+            }
+            
+            html += `
+                <div class="border rounded-lg p-4" id="rejected-card-${v.aid}">
+                    <div class="flex justify-between items-start">
+                        <div class="flex-1 min-w-0">
+                            <div class="flex items-center gap-2 mb-1">
+                                ${statusBadge}
+                                <span class="text-xs text-gray-400">av${v.aid}</span>
+                            </div>
+                            <h3 class="text-sm font-medium text-gray-900 truncate">${escapeHtml(v.title)}</h3>
+                            ${problemsHtml}
+                        </div>
+                        <div class="ml-4 flex-shrink-0">
+                            ${actionHtml}
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+        
+        html += '</div>';
+        container.innerHTML = html;
+        
+    } catch (e) {
+        container.innerHTML = `<p class="text-red-500">加载失败: ${e}</p>`;
+    } finally {
+        btn.disabled = false;
+        btn.textContent = '刷新退回列表';
+    }
+}
+
+async function startFix(aid) {
+    const video = rejectedVideos.find(v => v.aid === aid);
+    if (!video) return;
+    
+    if (!confirm(`确认修复 av${aid}?\n\n标题: ${video.title}\n违规区间: ${video.all_ranges.map(r => formatSec(r[0])+'-'+formatSec(r[1])).join(', ')}\n\n将遮罩违规片段并重新上传`)) {
+        return;
+    }
+    
+    const statusDiv = document.getElementById(`fix-status-${aid}`);
+    statusDiv.innerHTML = `<span class="text-gray-500 text-sm">正在启动...</span>`;
+    
+    try {
+        const resp = await fetch(`/bilibili/fix/${aid}`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                violation_ranges: video.all_ranges,
+                margin: 1.0,
+                mask_text: '此处内容因合规要求已被遮罩',
+                bvid: video.bvid || '',
+            })
+        });
+        const data = await resp.json();
+        
+        if (data.success) {
+            statusDiv.innerHTML = `
+                <span class="inline-flex items-center px-3 py-1 rounded-full text-sm bg-blue-100 text-blue-700">
+                    <svg class="animate-spin -ml-1 mr-2 h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>
+                    正在处理...
+                </span>
+                <p class="text-xs text-gray-400 mt-1">视频: ${data.video_path}</p>
+            `;
+            pollFixStatus(aid);
+        } else if (data.need_path) {
+            // 需要手动指定路径
+            const path = prompt('未找到本地视频文件，请输入视频文件的绝对路径:');
+            if (path) {
+                // 重试并传入路径
+                const resp2 = await fetch(`/bilibili/fix/${aid}`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        violation_ranges: video.all_ranges,
+                        margin: 1.0,
+                        mask_text: '此处内容因合规要求已被遮罩',
+                        bvid: video.bvid || '',
+                        video_path: path,
+                    })
+                });
+                const data2 = await resp2.json();
+                if (data2.success) {
+                    statusDiv.innerHTML = `
+                        <span class="inline-flex items-center px-3 py-1 rounded-full text-sm bg-blue-100 text-blue-700">
+                            <svg class="animate-spin -ml-1 mr-2 h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>
+                            正在处理...
+                        </span>`;
+                    pollFixStatus(aid);
+                } else {
+                    statusDiv.innerHTML = `<span class="text-red-500 text-sm">${data2.error}</span>`;
+                }
+            } else {
+                statusDiv.innerHTML = `<button onclick="startFix(${aid})" class="px-3 py-1 bg-green-500 text-white rounded text-sm hover:bg-green-600">自动修复</button>`;
+            }
+        } else {
+            statusDiv.innerHTML = `<span class="text-red-500 text-sm">${data.error}</span>`;
+        }
+    } catch (e) {
+        statusDiv.innerHTML = `<span class="text-red-500 text-sm">启动失败: ${e}</span>`;
+    }
+}
+
+async function pollFixStatus(aid) {
+    const statusDiv = document.getElementById(`fix-status-${aid}`);
+    if (!statusDiv) return;
+    
+    try {
+        const resp = await fetch(`/bilibili/fix/${aid}/status`);
+        const data = await resp.json();
+        
+        const statusMap = {
+            'pending': { text: '等待中...', color: 'gray', spin: true },
+            'masking': { text: '正在遮罩处理...', color: 'blue', spin: true },
+            'uploading': { text: '正在上传替换...', color: 'blue', spin: true },
+            'completed': { text: '✓ 修复完成', color: 'green', spin: false },
+            'failed': { text: '✗ ' + (data.message || '失败'), color: 'red', spin: false },
+        };
+        
+        const info = statusMap[data.status] || { text: data.message || data.status, color: 'gray', spin: false };
+        
+        const spinnerSvg = info.spin
+            ? `<svg class="animate-spin -ml-1 mr-2 h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>`
+            : '';
+        
+        statusDiv.innerHTML = `
+            <span class="inline-flex items-center px-3 py-1 rounded-full text-sm bg-${info.color}-100 text-${info.color}-700">
+                ${spinnerSvg}${escapeHtml(info.text)}
+            </span>
+            ${data.message && data.status !== 'completed' && data.status !== 'none' ? `<p class="text-xs text-gray-400 mt-1">${escapeHtml(data.message)}</p>` : ''}
+        `;
+        
+        // 继续轮询（如果还在进行中）
+        if (['pending', 'masking', 'uploading'].includes(data.status)) {
+            setTimeout(() => pollFixStatus(aid), 3000);
+        } else if (data.status === 'failed') {
+            // 失败后显示重试按钮
+            statusDiv.innerHTML += `
+                <button onclick="startFix(${aid})" class="ml-2 px-2 py-0.5 text-xs border border-gray-300 rounded hover:bg-gray-50">
+                    重试
+                </button>
+            `;
+        }
+    } catch (e) {
+        console.error('轮询修复状态失败:', e);
+        setTimeout(() => pollFixStatus(aid), 5000);
+    }
+}
+
+function formatSec(sec) {
+    const m = Math.floor(sec / 60);
+    const s = Math.floor(sec % 60);
+    return `${m}:${s.toString().padStart(2, '0')}`;
+}
+
+function escapeHtml(text) {
+    if (!text) return '';
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
 }
 
 // 保存默认设置

@@ -5,6 +5,7 @@ B站上传器实现
 """
 import json
 import re
+import time
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 from dataclasses import dataclass
@@ -992,22 +993,28 @@ class BilibiliUploader(BaseUploader):
             logger.error(f"视频 av{aid} 的 videos 为空，无法编辑")
             return False
         
-        # 3. 获取当前标签（需要公共 API，创作中心不直接返回 tag 字符串）
+        # 3. 获取当前标签和完整简介（需要公共 API）
+        #    创作中心 API 会截断 desc 到 250 字符，必须从公共 API 获取完整 desc
         current_tags = ''
-        if not tags:
-            detail = self.get_video_detail(aid)
-            if detail:
+        full_desc = arc.get('desc', '')  # 创作中心返回的截断 desc，作为 fallback
+        detail = self.get_video_detail(aid)
+        if detail:
+            if not tags:
                 current_tags = detail.get('tag', '')
                 if isinstance(current_tags, list):
                     current_tags = ','.join(
                         t.get('tag_name', '') if isinstance(t, dict) else str(t) for t in current_tags
                     )
+            # 公共 API 的 desc 通常比创作中心的更完整
+            pub_desc = detail.get('desc', '')
+            if len(pub_desc) > len(full_desc):
+                full_desc = pub_desc
         
         payload = {
             'aid': aid,
             'copyright': arc.get('copyright', 1),
             'title': (title or arc.get('title', ''))[:80],
-            'desc': (desc if desc is not None else arc.get('desc', ''))[:2000],
+            'desc': (desc if desc is not None else full_desc)[:2000],
             'tag': ','.join(tags[:12]) if tags else current_tags,
             'tid': tid or arc.get('tid', 21),
             'source': arc.get('source', ''),
@@ -1048,6 +1055,296 @@ class BilibiliUploader(BaseUploader):
                 return False
         except Exception as e:
             logger.error(f"编辑视频异常 av{aid}: {e}")
+            return False
+
+    def get_rejected_videos(self, keyword: str = '') -> List[Dict[str, Any]]:
+        """
+        获取被退回的稿件列表及其审核详情（违规时间段等）
+        
+        通过创作中心 /x/web/archives?status=not_pubed 获取退回稿件，
+        解析 problem_detail 中的违规时间段。
+        
+        Args:
+            keyword: 可选的搜索关键词
+            
+        Returns:
+            列表，每项包含:
+            {
+                'aid': int,
+                'bvid': str,
+                'title': str,
+                'state': int,
+                'reject_reason': str,
+                'problems': [
+                    {
+                        'reason': str,          # 退回原因
+                        'violation_time': str,   # 原始时间字符串，如 "P1(00:20:18-00:20:24)"
+                        'violation_position': str, # "内容" / "口播" / "内容全程"
+                        'time_ranges': [(start_sec, end_sec), ...],  # 解析后的秒数
+                        'is_full_video': bool,   # 是否全片违规
+                        'modify_advise': str,
+                    }
+                ],
+            }
+        """
+        session = self._get_authenticated_session()
+        
+        try:
+            resp = session.get(
+                'https://member.bilibili.com/x/web/archives',
+                params={
+                    'status': 'not_pubed',
+                    'pn': 1,
+                    'ps': 50,
+                    'keyword': keyword,
+                    'interactive': 1,
+                },
+                timeout=10
+            )
+            data = resp.json()
+            
+            if data.get('code') != 0:
+                logger.error(f"获取退回稿件失败: {data.get('message')}")
+                return []
+            
+            results = []
+            for item in data.get('data', {}).get('arc_audits', []):
+                archive = item.get('Archive', {})
+                problem_detail = item.get('problem_detail') or []
+                
+                problems = []
+                for pd in problem_detail:
+                    vt = pd.get('violation_time', '')
+                    vp = pd.get('violation_position', '')
+                    is_full = vp == '内容全程' or (not vt and not vp)
+                    
+                    time_ranges = self._parse_violation_time(vt) if vt else []
+                    
+                    problems.append({
+                        'reason': pd.get('reject_reason', ''),
+                        'violation_time': vt,
+                        'violation_position': vp,
+                        'time_ranges': time_ranges,
+                        'is_full_video': is_full,
+                        'modify_advise': pd.get('modify_advise', ''),
+                    })
+                
+                results.append({
+                    'aid': archive.get('aid'),
+                    'bvid': archive.get('bvid', ''),
+                    'title': archive.get('title', ''),
+                    'state': archive.get('state', 0),
+                    'reject_reason': archive.get('reject_reason', ''),
+                    'problems': problems,
+                })
+            
+            return results
+            
+        except Exception as e:
+            logger.error(f"获取退回稿件异常: {e}")
+            return []
+    
+    @staticmethod
+    def _parse_violation_time(violation_time: str) -> List[tuple]:
+        """
+        解析违规时间字符串为 (start_seconds, end_seconds) 列表
+        
+        支持的格式：
+        - "P1(00:20:18-00:20:24)"  — 单段
+        - "P1(00:20:18-00:20:24)、P1(00:23:33-00:23:35)"  — 多段（中文顿号分隔）
+        - "P1(00:20:18-00:20:24), P1(00:23:33-00:23:35)"  — 多段（逗号分隔）
+        
+        Returns:
+            [(start_sec, end_sec), ...]
+        """
+        ranges = []
+        # 匹配所有 P数字(HH:MM:SS-HH:MM:SS) 模式
+        pattern = r'P\d+\((\d{2}:\d{2}:\d{2})-(\d{2}:\d{2}:\d{2})\)'
+        for m in re.finditer(pattern, violation_time):
+            start_str, end_str = m.group(1), m.group(2)
+            start_sec = BilibiliUploader._time_to_seconds(start_str)
+            end_sec = BilibiliUploader._time_to_seconds(end_str)
+            if start_sec is not None and end_sec is not None:
+                ranges.append((start_sec, end_sec))
+        
+        if not ranges and violation_time.strip():
+            logger.warning(f"无法解析违规时间: {violation_time}")
+        
+        return ranges
+    
+    @staticmethod
+    def _time_to_seconds(time_str: str) -> Optional[float]:
+        """将 HH:MM:SS 转换为秒数"""
+        parts = time_str.split(':')
+        if len(parts) == 3:
+            try:
+                return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
+            except ValueError:
+                return None
+        return None
+
+    def get_archive_detail(self, aid: int) -> Optional[Dict[str, Any]]:
+        """
+        获取稿件详情（创作中心接口），含 filename 等上传信息。
+        用于获取被退回稿件的完整信息以便重新编辑上传。
+        
+        Args:
+            aid: 稿件AV号
+            
+        Returns:
+            {'archive': {...}, 'videos': [{...}]} 或 None
+        """
+        session = self._get_authenticated_session()
+        try:
+            resp = session.get(
+                f'https://member.bilibili.com/x/client/archive/view?aid={aid}',
+                timeout=10
+            )
+            data = resp.json()
+            if data.get('code') != 0:
+                logger.error(f"获取稿件详情失败 av{aid}: {data.get('message')}")
+                return None
+            return data.get('data')
+        except Exception as e:
+            logger.error(f"获取稿件详情异常 av{aid}: {e}")
+            return None
+
+    def _get_full_desc(self, aid: int, session=None) -> Optional[str]:
+        """从公共 API 获取完整的视频简介（创作中心 API 会截断 desc 到 250 字符）
+        
+        Args:
+            aid: 稿件AV号
+            session: 已认证的 requests session，未提供则自动获取
+            
+        Returns:
+            完整 desc 字符串，获取失败返回 None
+        """
+        if session is None:
+            session = self._get_authenticated_session()
+        try:
+            resp = session.get(
+                f'https://api.bilibili.com/x/web-interface/view?aid={aid}',
+                timeout=10
+            )
+            data = resp.json()
+            if data.get('code') == 0:
+                return data.get('data', {}).get('desc', '')
+        except Exception as e:
+            logger.warning(f"从公共 API 获取 desc 失败 av{aid}: {e}")
+        return None
+
+    def replace_video(self, aid: int, new_video_path: Path) -> bool:
+        """
+        替换被退回稿件的视频文件并重新提交审核。
+        
+        流程：
+        1. 上传新的视频文件到 B站（获取新 filename）
+        2. 用新 filename 编辑稿件，替换原视频
+        
+        Args:
+            aid: 稿件 AV号
+            new_video_path: 新视频文件路径
+            
+        Returns:
+            是否成功
+        """
+        session = self._get_authenticated_session()
+        bili_jct = self.cookie_data.get('bili_jct', '')
+        assert bili_jct, "bili_jct 为空"
+        
+        # 1. 获取稿件当前信息
+        detail = self.get_archive_detail(aid)
+        if not detail:
+            return False
+        
+        archive = detail['archive']
+        old_videos = detail['videos']
+        
+        if not old_videos:
+            logger.error(f"稿件 av{aid} 无视频信息")
+            return False
+        
+        # 创作中心 API 会截断 desc 到 250 字符，需要从公共 API 获取完整 desc
+        creator_desc = archive.get('desc', '')
+        full_desc = self._get_full_desc(aid, session)
+        if full_desc and len(full_desc) > len(creator_desc):
+            archive['desc'] = full_desc
+            logger.info(f"  使用公共 API 获取完整 desc ({len(full_desc)} 字符，创作中心仅 {len(creator_desc)})")
+        
+        logger.info(f"替换视频 av{aid}: {archive.get('title', '')[:50]}")
+        logger.info(f"  新视频文件: {new_video_path}")
+        
+        # 2. 上传新视频文件（只上传文件，不创建稿件）
+        try:
+            from biliup.plugins.bili_webup import BiliBili, Data
+            
+            self._load_cookie()
+            video_part = Data()
+            video_part.title = old_videos[0].get('title', '')
+            video_part.desc = old_videos[0].get('desc', '')
+            
+            with BiliBili(video_part) as bili:
+                bili.login_by_cookies(self._raw_cookie_data)
+                
+                # 上传视频文件
+                new_video_path = Path(new_video_path)
+                uploaded = bili.upload_file(str(new_video_path), lines=self.line, tasks=self.threads)
+                logger.info(f"  upload_file 返回值: {uploaded}")
+                
+                if not uploaded:
+                    logger.error(f"视频文件上传失败: 返回值为空")
+                    return False
+                
+                # biliup upload_file 返回 dict，filename 字段名可能是 'bili_filename' 或 'filename'
+                new_filename = uploaded.get('bili_filename') or uploaded.get('filename')
+                if not new_filename:
+                    logger.error(f"视频文件上传后无 filename 字段: {uploaded}")
+                    return False
+                
+                logger.info(f"  新视频上传成功: filename={new_filename}")
+                
+        except Exception as e:
+            logger.error(f"上传新视频文件异常: {e}")
+            return False
+        
+        # 3. 编辑稿件，替换视频 filename
+        try:
+            edit_payload = {
+                'aid': aid,
+                'copyright': archive.get('copyright', 2),
+                'title': archive.get('title', ''),
+                'tag': archive.get('tag', ''),
+                'tid': archive.get('tid', 21),
+                'desc': archive.get('desc', ''),
+                'source': archive.get('source', ''),
+                'cover': archive.get('cover', ''),
+                'videos': [{
+                    'filename': new_filename,
+                    'title': old_videos[0].get('title', ''),
+                    'desc': old_videos[0].get('desc', ''),
+                }],
+            }
+            
+            resp = session.post(
+                f'https://member.bilibili.com/x/vu/web/edit?csrf={bili_jct}',
+                json=edit_payload,
+                headers={
+                    'Referer': 'https://member.bilibili.com/',
+                    'Origin': 'https://member.bilibili.com',
+                },
+                timeout=15
+            )
+            result = resp.json()
+            
+            if result.get('code') == 0:
+                logger.info(f"  ✅ 稿件 av{aid} 视频已替换，已重新提交审核")
+                return True
+            else:
+                logger.error(f"  编辑稿件失败: code={result.get('code')}, msg={result.get('message')}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"编辑稿件异常: {e}")
             return False
 
     def bvid_to_aid(self, bvid: str) -> Optional[int]:
@@ -1135,7 +1432,7 @@ def season_sync(db, uploader: BilibiliUploader, playlist_id: str) -> Dict[str, A
     
     logger.info(f"Playlist {playlist_id}: 找到 {len(pending)} 个待同步视频")
     
-    for video, aid, season_id in pending:
+    for i, (video, aid, season_id) in enumerate(pending):
         result['season_ids'].add(season_id)
         try:
             if uploader.add_to_season(aid, season_id):
@@ -1153,6 +1450,9 @@ def season_sync(db, uploader: BilibiliUploader, playlist_id: str) -> Dict[str, A
             result['failed'] += 1
             result['failed_videos'].append(video.id)
             logger.error(f"✗ {video.title or video.id} -> 合集 {season_id} 异常: {e}")
+        # B站合集编辑 API 有频率限制（code=20111），请求间需间隔避免触发
+        if i < len(pending) - 1:
+            time.sleep(3)
     
     # 对涉及的每个合集执行排序
     for season_id in result['season_ids']:

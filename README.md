@@ -313,8 +313,8 @@ vat status
 | `vat clean -v ID --records` | 清理产物+删除记录 |
 | `vat bilibili login` | B 站登录获取 Cookie |
 | `vat bilibili rejected` | 列出被退回的稿件及违规详情 |
-| `vat bilibili fix --aid AID` | 累积式修复被退回稿件（合并历史+新违规遮罩，优先本地文件，降级从B站下载） |
-| `vat tools fix-violation --aid AID` | 同上（支持 JobManager 子进程调度） |
+| `vat bilibili fix --aid AID` | 单次修复被退回稿件（累积式遮罩，优先本地文件，降级从B站下载） |
+| `vat tools fix-violation --aid AID` | 自动循环修复：mask→上传→等待审核→check→重试（默认10轮，等待=上传耗时×2，下限15分钟），通过后自动添加到合集 |
 | `vat tools sync-playlist --playlist ID` | 同步 YouTube Playlist（增量更新） |
 | `vat tools refresh-playlist --playlist ID` | 刷新 Playlist 视频信息 |
 | `vat tools retranslate-playlist --playlist ID` | 重新翻译 Playlist 视频标题/简介 |

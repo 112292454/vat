@@ -733,7 +733,11 @@ class JobManager:
                 logger.warning(f"全局清理: 修复 {len(orphaned)} 条孤儿 running task 记录")
     
     def get_running_job_for_video(self, video_id: str) -> Optional[WebJob]:
-        """查找正在处理指定视频的 running job（假设同一视频同时只有一个 running job）"""
+        """查找正在处理指定视频且该视频尚未完成的 running job
+        
+        只有视频在 job 中尚未完成所有请求步骤时才算 active。
+        已成功完成所有步骤的视频不再关联到 running job。
+        """
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
@@ -744,20 +748,92 @@ class JobManager:
             for row in cursor.fetchall():
                 job = self._row_to_job(row)
                 if video_id in job.video_ids:
-                    return job
+                    if not self._is_video_completed_in_job(cursor, video_id, job.steps):
+                        return job
         return None
     
     def get_running_video_ids(self) -> set:
-        """获取所有正在 running job 中的 video_id 集合"""
+        """获取所有 running job 中尚未完成处理的 video_id 集合
+        
+        已在 job 中成功完成所有请求步骤的视频不再被阻塞，
+        允许它们被提交到新任务中。
+        """
         result = set()
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
-                SELECT video_ids FROM web_jobs WHERE status = 'running'
+                SELECT video_ids, steps FROM web_jobs WHERE status = 'running'
             """)
             for row in cursor.fetchall():
-                result.update(json.loads(row['video_ids']))
+                video_ids = json.loads(row['video_ids'])
+                steps = json.loads(row['steps'])
+                if not video_ids or not steps:
+                    continue
+                completed_vids = self._get_completed_video_ids(
+                    cursor, video_ids, steps
+                )
+                for vid in video_ids:
+                    if vid not in completed_vids:
+                        result.add(vid)
         return result
+    
+    @staticmethod
+    def _is_video_completed_in_job(cursor, video_id: str, steps: List[str]) -> bool:
+        """判断视频是否已在 job 中完成所有请求步骤
+        
+        Args:
+            cursor: 已打开的 DB cursor（web_jobs 和 tasks 在同一库）
+            video_id: 视频 ID
+            steps: job 请求的步骤列表（如 ['download', 'whisper', ...]）
+        
+        Returns:
+            True 表示该视频的所有请求步骤最新记录均为 completed
+        """
+        if not steps:
+            return True
+        placeholders = ','.join('?' * len(steps))
+        cursor.execute(f"""
+            SELECT COUNT(*) as completed_count FROM (
+                SELECT step, status,
+                       ROW_NUMBER() OVER (PARTITION BY step ORDER BY id DESC) as rn
+                FROM tasks
+                WHERE video_id = ? AND step IN ({placeholders})
+            ) WHERE rn = 1 AND status = 'completed'
+        """, [video_id] + list(steps))
+        row = cursor.fetchone()
+        return row['completed_count'] >= len(steps)
+    
+    @staticmethod
+    def _get_completed_video_ids(cursor, video_ids: List[str], steps: List[str]) -> set:
+        """批量查询：哪些视频已完成 job 的所有请求步骤
+        
+        Args:
+            cursor: 已打开的 DB cursor
+            video_ids: 待检查的视频 ID 列表
+            steps: job 请求的步骤列表
+        
+        Returns:
+            已完成所有步骤的 video_id 集合
+        """
+        if not video_ids or not steps:
+            return set()
+        
+        num_steps = len(steps)
+        vid_ph = ','.join('?' * len(video_ids))
+        step_ph = ','.join('?' * num_steps)
+        
+        cursor.execute(f"""
+            SELECT video_id, COUNT(*) as completed_count FROM (
+                SELECT video_id, step, status,
+                       ROW_NUMBER() OVER (PARTITION BY video_id, step ORDER BY id DESC) as rn
+                FROM tasks
+                WHERE video_id IN ({vid_ph}) AND step IN ({step_ph})
+            ) WHERE rn = 1 AND status = 'completed'
+            GROUP BY video_id
+            HAVING completed_count >= ?
+        """, list(video_ids) + list(steps) + [num_steps])
+        
+        return {row['video_id'] for row in cursor.fetchall()}
     
     def get_log_content(self, job_id: str, tail_lines: int = 100) -> List[str]:
         """获取任务日志（最后 N 行）"""

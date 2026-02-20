@@ -143,3 +143,134 @@ class TestProgressLogParsing:
         jm, tmpdir = self._make_jm()
         assert jm._parse_progress_from_log(None) == 0.0
         import shutil; shutil.rmtree(tmpdir)
+
+
+class TestVideoDeduplication:
+    """测试 running job 中的视频去重逻辑：已完成所有步骤的视频不再阻塞"""
+
+    @pytest.fixture
+    def env(self):
+        """创建包含 web_jobs + tasks 表的测试环境"""
+        import sqlite3, shutil
+        tmpdir = tempfile.mkdtemp()
+        db_path = os.path.join(tmpdir, "test.db")
+        log_dir = os.path.join(tmpdir, "logs")
+        jm = JobManager(db_path, log_dir)
+        # 在同一 DB 中创建 tasks 表（生产环境由 Database 类创建）
+        conn = sqlite3.connect(db_path)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS tasks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                video_id TEXT NOT NULL,
+                step TEXT NOT NULL,
+                status TEXT NOT NULL,
+                gpu_id INTEGER,
+                started_at TIMESTAMP,
+                completed_at TIMESTAMP,
+                error_message TEXT
+            )
+        """)
+        conn.commit()
+        conn.close()
+        yield jm, db_path
+        shutil.rmtree(tmpdir)
+
+    def _insert_running_job(self, jm, job_id, video_ids, steps):
+        """插入一个 running 状态的 job"""
+        import json
+        from datetime import datetime
+        with jm._get_connection() as conn:
+            conn.execute("""
+                INSERT INTO web_jobs (job_id, video_ids, steps, status, created_at)
+                VALUES (?, ?, ?, 'running', ?)
+            """, (job_id, json.dumps(video_ids), json.dumps(steps),
+                  datetime.now().isoformat()))
+
+    def _insert_task(self, db_path, video_id, step, status):
+        """插入一条 task 记录"""
+        import sqlite3
+        conn = sqlite3.connect(db_path)
+        conn.execute("""
+            INSERT INTO tasks (video_id, step, status) VALUES (?, ?, ?)
+        """, (video_id, step, status))
+        conn.commit()
+        conn.close()
+
+    def test_all_videos_pending_all_blocked(self, env):
+        """所有视频都未处理 → 全部阻塞"""
+        jm, db_path = env
+        self._insert_running_job(jm, "job1", ["v1", "v2", "v3"], ["download", "whisper"])
+        result = jm.get_running_video_ids()
+        assert result == {"v1", "v2", "v3"}
+
+    def test_completed_video_unblocked(self, env):
+        """v1 完成所有步骤 → v1 不阻塞，v2/v3 仍阻塞"""
+        jm, db_path = env
+        self._insert_running_job(jm, "job1", ["v1", "v2", "v3"], ["download", "whisper"])
+        self._insert_task(db_path, "v1", "download", "completed")
+        self._insert_task(db_path, "v1", "whisper", "completed")
+        result = jm.get_running_video_ids()
+        assert "v1" not in result
+        assert result == {"v2", "v3"}
+
+    def test_partially_completed_still_blocked(self, env):
+        """v1 只完成 download 未完成 whisper → 仍阻塞"""
+        jm, db_path = env
+        self._insert_running_job(jm, "job1", ["v1", "v2"], ["download", "whisper"])
+        self._insert_task(db_path, "v1", "download", "completed")
+        result = jm.get_running_video_ids()
+        assert "v1" in result
+
+    def test_failed_video_still_blocked(self, env):
+        """v1 有失败步骤（可能被重试）→ 仍阻塞"""
+        jm, db_path = env
+        self._insert_running_job(jm, "job1", ["v1", "v2"], ["download", "whisper"])
+        self._insert_task(db_path, "v1", "download", "completed")
+        self._insert_task(db_path, "v1", "whisper", "failed")
+        result = jm.get_running_video_ids()
+        assert "v1" in result
+
+    def test_latest_task_wins(self, env):
+        """v1 先失败后成功（重试成功）→ 解除阻塞"""
+        jm, db_path = env
+        self._insert_running_job(jm, "job1", ["v1"], ["download", "whisper"])
+        # 第一次：失败
+        self._insert_task(db_path, "v1", "download", "completed")
+        self._insert_task(db_path, "v1", "whisper", "failed")
+        # 重试：成功（id 更大 → 最新记录）
+        self._insert_task(db_path, "v1", "whisper", "completed")
+        result = jm.get_running_video_ids()
+        assert "v1" not in result
+
+    def test_get_running_job_for_completed_video(self, env):
+        """已完成视频查询 active job 应返回 None"""
+        jm, db_path = env
+        self._insert_running_job(jm, "job1", ["v1", "v2"], ["download"])
+        self._insert_task(db_path, "v1", "download", "completed")
+        assert jm.get_running_job_for_video("v1") is None
+        # v2 未完成，仍能找到 job
+        job = jm.get_running_job_for_video("v2")
+        assert job is not None
+        assert job.job_id == "job1"
+
+    def test_multiple_running_jobs(self, env):
+        """多个 running job，各自独立判断"""
+        jm, db_path = env
+        self._insert_running_job(jm, "job1", ["v1", "v2"], ["download"])
+        self._insert_running_job(jm, "job2", ["v3", "v4"], ["download", "whisper"])
+        # v1 在 job1 中完成
+        self._insert_task(db_path, "v1", "download", "completed")
+        # v3 在 job2 中只完成 download（还差 whisper）
+        self._insert_task(db_path, "v3", "download", "completed")
+        result = jm.get_running_video_ids()
+        assert "v1" not in result  # 完成了 job1 的所有步骤
+        assert "v2" in result      # 未完成
+        assert "v3" in result      # 只完成部分步骤
+        assert "v4" in result      # 未完成
+
+    def test_tools_job_no_video_ids(self, env):
+        """tools 类型 job（video_ids 为空）不贡献阻塞"""
+        jm, db_path = env
+        self._insert_running_job(jm, "job1", [], ["fix-violation"])
+        result = jm.get_running_video_ids()
+        assert result == set()

@@ -513,42 +513,45 @@ class TestDownloadVideo:
         assert result is False
 
 
-class TestBracketFormatWithSpaces:
-    """回归测试：B站返回的时间格式中冒号后可能有空格（如 "17: 21"）"""
+class TestBracketFormatFullWidthColon:
+    """回归测试：B站返回的时间格式中可能使用全角冒号 ：（U+FF1A）"""
     
-    def test_space_after_colon_in_start(self):
-        """冒号后有空格：【17: 21-17:23】"""
+    def test_fullwidth_colon_in_start(self):
+        """全角冒号：【17：21-17:23】（实际 B站 返回格式）"""
         result = BilibiliUploader._parse_violation_time(
-            "根据相关法律法规、政策及《社区公约》，该视频【17: 21-17:23】【内容】不予审核通过"
+            "根据相关法律法规、政策及《社区公约》，该视频【17：21-17:23】【内容】不予审核通过"
         )
         assert result == [(1041, 1043)]
     
-    def test_space_after_colon_in_both(self):
-        """两端都有空格：【17: 21-17: 23】"""
-        result = BilibiliUploader._parse_violation_time("视频【17: 21-17: 23】内容违规")
+    def test_fullwidth_colon_in_both(self):
+        """两端都是全角冒号：【17：21-17：23】"""
+        result = BilibiliUploader._parse_violation_time("视频【17：21-17：23】内容违规")
         assert result == [(1041, 1043)]
     
-    def test_space_in_hhmmss(self):
-        """HH:MM:SS 格式中有空格：【00:17: 21-00:17:23】"""
-        result = BilibiliUploader._parse_violation_time("视频【00:17: 21-00:17:23】内容违规")
+    def test_fullwidth_colon_in_hhmmss(self):
+        """HH:MM:SS 格式中有全角冒号：【00：17：21-00:17:23】"""
+        result = BilibiliUploader._parse_violation_time("视频【00：17：21-00:17:23】内容违规")
         assert result == [(1041, 1043)]
     
-    def test_two_problems_with_space(self):
-        """两个问题各有一个时间段（其中一个带空格）——不应被判为全片违规"""
-        # 模拟图中实际场景：两个 problem_detail
+    def test_space_after_colon(self):
+        """冒号后有空格也兼容：【17: 21-17:23】"""
+        result = BilibiliUploader._parse_violation_time("视频【17: 21-17:23】内容违规")
+        assert result == [(1041, 1043)]
+    
+    def test_two_problems_with_fullwidth_colon(self):
+        """两个问题各有一个时间段（其中一个带全角冒号）——不应被判为全片违规"""
         text1 = "您的视频【20:18-20:24】【内容】根据相关法律法规"
-        text2 = "该视频【17: 21-17:23】【内容】不予审核通过"
+        text2 = "该视频【17：21-17:23】【内容】不予审核通过"
         
         r1 = BilibiliUploader._parse_violation_time(text1)
         r2 = BilibiliUploader._parse_violation_time(text2)
         
         assert r1 == [(1218, 1224)]
         assert r2 == [(1041, 1043)]
-        # 两个都能解析出时间段，不应为空
         assert len(r1) > 0 and len(r2) > 0
     
-    def test_no_space_still_works(self):
-        """无空格的正常格式仍然正常匹配"""
+    def test_no_fullwidth_still_works(self):
+        """纯半角冒号的正常格式仍然正常匹配"""
         result = BilibiliUploader._parse_violation_time("视频【20:18-20:24】内容违规")
         assert result == [(1218, 1224)]
     
@@ -562,11 +565,11 @@ class TestIsFullVideoDetection:
     """回归测试：is_full_video 判定逻辑"""
     
     def test_reason_with_parseable_time_not_full(self):
-        """reason 中有可解析时间段 → 不是全片违规"""
+        """reason 中有可解析时间段（含全角冒号）→ 不是全片违规"""
         # 模拟 get_rejected_videos 中的逻辑
         vt = ''  # violation_time 为空
         vp = ''  # violation_position 为空
-        reason = '该视频【17: 21-17:23】【内容】不予审核通过'
+        reason = '该视频【17：21-17:23】【内容】不予审核通过'
         
         time_ranges = BilibiliUploader._parse_violation_time(vt) if vt else []
         if not time_ranges and reason:

@@ -1176,9 +1176,9 @@ class BilibiliUploader(BaseUploader):
             if start_sec is not None and end_sec is not None:
                 ranges.append((start_sec, end_sec))
         
-        # 格式2: 【时间-时间】（支持 MM:SS 或 HH:MM:SS，允许冒号后有空格如 "17: 21"）
+        # 格式2: 【时间-时间】（支持 MM:SS 或 HH:MM:SS，兼容全角冒号 ： 和冒号后空格）
         if not ranges:
-            pattern_bracket = r'【(\d{1,2}:\s*\d{2}(?::\s*\d{2})?)[\s]*[-–—][\s]*(\d{1,2}:\s*\d{2}(?::\s*\d{2})?)】'
+            pattern_bracket = r'【(\d{1,2}[:：]\s*\d{2}(?:[:：]\s*\d{2})?)[\s]*[-–—][\s]*(\d{1,2}[:：]\s*\d{2}(?:[:：]\s*\d{2})?)】'
             for m in re.finditer(pattern_bracket, text):
                 start_sec = BilibiliUploader._time_to_seconds(m.group(1))
                 end_sec = BilibiliUploader._time_to_seconds(m.group(2))
@@ -1192,8 +1192,10 @@ class BilibiliUploader(BaseUploader):
     
     @staticmethod
     def _time_to_seconds(time_str: str) -> Optional[float]:
-        """将 HH:MM:SS 或 MM:SS 转换为秒数"""
-        parts = time_str.split(':')
+        """将 HH:MM:SS 或 MM:SS 转换为秒数（兼容全角冒号 ：）"""
+        # 统一全角冒号为半角，再去除多余空格
+        normalized = time_str.replace('\uff1a', ':').replace(' ', '')
+        parts = normalized.split(':')
         if len(parts) == 3:
             try:
                 return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])

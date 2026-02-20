@@ -62,7 +62,18 @@
                     </td>
                     <td class="px-6 py-4 text-sm" data-sort-value="{{ task.video_ids|length }}">{{ task.video_ids|length }}</td>
                     <td class="px-6 py-4 text-sm text-gray-600" title="{{ task.steps|join(', ') }}">
-                        {{ task.steps|length }} 个阶段
+                        {% if task.steps|length == 1 %}
+                            {% set _sl = {
+                                'download': '下载', 'whisper': '语音识别', 'split': '句子分割',
+                                'optimize': '字幕优化', 'translate': '翻译', 'embed': '嵌入字幕',
+                                'upload': '上传B站', 'fix-violation': '修复违规',
+                                'sync-playlist': '同步Playlist', 'refresh-playlist': '刷新Playlist',
+                                'retranslate-playlist': '重翻Playlist', 'season-sync': '合集同步'
+                            } %}
+                            {{ _sl.get(task.steps[0], task.steps[0]) }}
+                        {% else %}
+                            {{ task.steps|length }} 个阶段
+                        {% endif %}
                     </td>
                     <td class="px-6 py-4 text-sm text-gray-600">
                         {% if task.concurrency and task.concurrency > 1 %}

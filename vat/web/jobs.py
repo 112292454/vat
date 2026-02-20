@@ -348,6 +348,8 @@ class JobManager:
                 'margin': '--margin',
                 'mask_text': '--mask-text',
                 'dry_run': '--dry-run',
+                'max_rounds': '--max-rounds',
+                'wait_seconds': '--wait-seconds',
             },
             'sync-playlist': {
                 'playlist_id': '--playlist',

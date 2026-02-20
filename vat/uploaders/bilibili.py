@@ -1666,7 +1666,10 @@ class BilibiliUploader(BaseUploader):
             return result
         
         _cb("上传替换...")
+        import time as _time
+        _upload_start = _time.monotonic()
         replace_ok = self.replace_video(aid, masked_path)
+        result['upload_duration'] = _time.monotonic() - _upload_start
         
         if replace_ok:
             result['success'] = True

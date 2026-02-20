@@ -100,8 +100,17 @@ def tools():
 @click.option('--margin', default=1.0, type=float, help='违规区间安全边距（秒）')
 @click.option('--mask-text', default='此处内容因平台合规要求已被遮罩', help='遮罩文字')
 @click.option('--dry-run', is_flag=True, help='仅遮罩不上传')
-def tools_fix_violation(aid, video_path, margin, mask_text, dry_run):
-    """修复被退回的B站稿件（累积式遮罩+上传替换）"""
+@click.option('--max-rounds', default=10, type=int, help='最大修复轮次（默认10，设为1则不自动循环）')
+@click.option('--wait-seconds', default=0, type=int,
+              help='每轮修复后等待审核的秒数（默认0=上传耗时*2，下限900秒）')
+def tools_fix_violation(aid, video_path, margin, mask_text, dry_run, max_rounds, wait_seconds):
+    """修复被退回的B站稿件（累积式遮罩+上传替换，默认自动循环直到通过）
+    
+    自动循环流程：mask→上传→等待审核→check是否通过→如不通过则再次修复。
+    等待时间默认为上传耗时的2倍（下限15分钟）。
+    修复成功后自动尝试添加到B站合集（如有配置）。
+    """
+    import time as _time
     from ..config import load_config
     from ..database import Database
 
@@ -112,7 +121,7 @@ def tools_fix_violation(aid, video_path, margin, mask_text, dry_run):
     try:
         uploader = _get_bilibili_uploader(config)
 
-        # 查找本地视频
+        # 查找本地视频（只做一次，所有轮次复用）
         local_video = None
         if video_path:
             local_video = Path(video_path)
@@ -126,37 +135,129 @@ def tools_fix_violation(aid, video_path, margin, mask_text, dry_run):
             else:
                 _emit("⚠️ 本地文件未找到，将从B站下载（质量会降低）")
 
-        # 读取历史 violation_ranges
         from .commands import _get_previous_violation_ranges, _save_violation_ranges
-        previous_ranges = _get_previous_violation_ranges(db, aid)
-        if previous_ranges:
-            _emit(f"历史已 mask: {len(previous_ranges)} 段")
 
-        _progress(10)
+        # 读取累积的 violation_ranges
+        all_previous_ranges = _get_previous_violation_ranges(db, aid)
+        if all_previous_ranges:
+            _emit(f"历史已 mask: {len(all_previous_ranges)} 段")
 
-        result = uploader.fix_violation(
-            aid=aid,
-            video_path=local_video,
-            mask_text=mask_text,
-            margin_sec=margin,
-            previous_ranges=previous_ranges,
-            dry_run=dry_run,
-            callback=_emit,
-        )
+        for round_num in range(max_rounds):
+            _emit(f"\n{'='*40}")
+            _emit(f"第 {round_num + 1}/{max_rounds} 轮修复")
+            _emit(f"{'='*40}")
 
-        if result['success']:
-            _save_violation_ranges(db, aid, result['all_ranges'])
-            _progress(100)
+            result = uploader.fix_violation(
+                aid=aid,
+                video_path=local_video,
+                mask_text=mask_text,
+                margin_sec=margin,
+                previous_ranges=all_previous_ranges,
+                dry_run=dry_run,
+                callback=_emit,
+            )
+
+            if not result['success']:
+                _failed(result['message'])
+                return
+
+            # 更新累积 ranges 并持久化
+            all_previous_ranges = result['all_ranges']
+            _save_violation_ranges(db, aid, all_previous_ranges)
+
+            # dry-run 模式不循环
             if dry_run:
+                _progress(100)
                 _success(f"dry-run 完成，遮罩文件: {result.get('masked_path', '')}")
+                return
+
+            # 最后一轮不再等待
+            if round_num >= max_rounds - 1:
+                _emit(f"已达最大轮次 ({max_rounds})，最后一轮修复已提交")
+                break
+
+            # 计算等待时间：用户指定 > 上传耗时*2 > 下限900秒(15分钟)
+            upload_dur = result.get('upload_duration', 0)
+            if wait_seconds > 0:
+                actual_wait = wait_seconds
             else:
-                _success(f"av{aid} 已修复并重新提交审核")
-        else:
-            _failed(result['message'])
+                actual_wait = max(int(upload_dur * 2), 900)
+            _emit(f"上传耗时 {upload_dur:.0f}s，等待审核 {actual_wait}s ({actual_wait // 60} 分钟)...")
+
+            # 等待，每10分钟输出一次日志
+            waited = 0
+            log_interval = 600  # 10分钟
+            while waited < actual_wait:
+                chunk = min(log_interval, actual_wait - waited)
+                _time.sleep(chunk)
+                waited += chunk
+                remaining = actual_wait - waited
+                if remaining > 0:
+                    _emit(f"  等待审核中... 剩余 {remaining // 60} 分钟")
+
+            # 检查是否仍被退回
+            _emit("检查审核状态...")
+            rejected = uploader.get_rejected_videos()
+            still_rejected = any(v['aid'] == aid for v in rejected)
+
+            if not still_rejected:
+                _emit(f"av{aid} 已不在退回列表中（已通过审核或仍在审核中）")
+                # 尝试添加到合集
+                _try_add_to_season(db, uploader, aid)
+                _progress(100)
+                _success(f"av{aid} 修复流程完成")
+                return
+
+            _emit(f"av{aid} 仍被退回，准备下一轮修复...")
+            # 下一轮 fix_violation 会重新 get_rejected_videos 获取最新违规信息
+
+        # 所有轮次结束（最后一轮已提交但未等待检查）
+        # 尝试添加到合集（视频可能在审核中，add_to_season 内部会处理已存在的情况）
+        _try_add_to_season(db, uploader, aid)
+        _progress(100)
+        _success(f"av{aid} 已完成 {max_rounds} 轮修复提交")
 
     except Exception as e:
         logger.error(f"fix-violation 异常: {e}", exc_info=True)
         _failed(str(e))
+
+
+def _try_add_to_season(db, uploader, aid: int):
+    """修复成功后尝试将视频添加到B站合集（如果 DB 中配置了 target_season_id）"""
+    import json, sqlite3
+    logger = get_logger()
+    try:
+        conn = sqlite3.connect(str(db.db_path))
+        c = conn.cursor()
+        c.execute("SELECT id, metadata FROM videos WHERE metadata LIKE ?", (f'%{aid}%',))
+        rows = c.fetchall()
+        conn.close()
+
+        for (video_id, meta_str) in rows:
+            if not meta_str:
+                continue
+            meta = json.loads(meta_str)
+            if str(meta.get('bilibili_aid')) != str(aid):
+                continue
+            season_id = meta.get('bilibili_target_season_id')
+            if not season_id:
+                _emit(f"av{aid} 未配置目标合集，跳过 add-to-season")
+                return
+            if meta.get('bilibili_season_added'):
+                _emit(f"av{aid} 已在合集 {season_id} 中，跳过")
+                return
+            _emit(f"尝试将 av{aid} 添加到合集 {season_id}...")
+            ok = uploader.add_to_season(aid, int(season_id))
+            if ok:
+                meta['bilibili_season_added'] = True
+                db.update_video(video_id, metadata=meta)
+                _emit(f"  已添加到合集 {season_id}")
+            else:
+                _emit(f"  添加到合集失败（不影响修复结果）")
+            return
+        _emit(f"DB 中未找到 av{aid} 对应的视频记录，跳过 add-to-season")
+    except Exception as e:
+        logger.warning(f"add-to-season 异常（不影响修复结果）: {e}")
 
 
 def _find_local_video_for_aid(aid, config, db, uploader):

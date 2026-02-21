@@ -1810,6 +1810,152 @@ def season_sync(db, uploader: BilibiliUploader, playlist_id: str) -> Dict[str, A
     return result
 
 
+def resync_video_info(
+    db: Any,
+    uploader: BilibiliUploader,
+    config: Any,
+    aid: int,
+    callback: Optional[callable] = None,
+) -> Dict[str, Any]:
+    """
+    从 DB 和模板重新渲染视频元信息（title/desc/tags/tid）并同步到 B站。
+    
+    用于修正历史不一致（如 upload_order_index 变更后标题编号不对、
+    翻译更新后需要同步、fix-violation 后恢复正确元信息等）。
+    
+    流程：
+    1. 通过 aid 在 DB 中查找对应视频
+    2. 获取 playlist 信息和 upload_order_index
+    3. 用模板渲染 title/desc
+    4. 从翻译结果获取 tags/tid
+    5. 调用 edit_video_info 更新到 B站
+    
+    Args:
+        db: Database 实例
+        uploader: BilibiliUploader 实例
+        config: 配置对象
+        aid: B站稿件 AV号
+        callback: 日志回调（可选）
+        
+    Returns:
+        {'success': bool, 'title': str, 'message': str}
+    """
+    import json
+    import sqlite3
+    from .template import render_upload_metadata
+    
+    _cb = callback or (lambda msg: None)
+    result = {'success': False, 'title': '', 'message': ''}
+    
+    # 1. 通过 aid 在 DB 中查找视频
+    conn = sqlite3.connect(str(db.db_path))
+    c = conn.cursor()
+    c.execute("SELECT id, metadata FROM videos WHERE metadata LIKE ?", (f'%{aid}%',))
+    rows = c.fetchall()
+    conn.close()
+    
+    video_id = None
+    for (vid, meta_str) in rows:
+        if not meta_str:
+            continue
+        meta = json.loads(meta_str)
+        if str(meta.get('bilibili_aid')) == str(aid):
+            video_id = vid
+            break
+    
+    if not video_id:
+        result['message'] = f'DB 中未找到 av{aid} 对应的视频记录'
+        _cb(result['message'])
+        return result
+    
+    video = db.get_video(video_id)
+    if not video:
+        result['message'] = f'无法加载视频 {video_id}'
+        _cb(result['message'])
+        return result
+    
+    meta = video.metadata or {}
+    translated = meta.get('translated', {})
+    if not translated:
+        result['message'] = f'视频 {video_id} 缺少翻译数据，无法渲染模板'
+        _cb(result['message'])
+        return result
+    
+    # 2. 获取 playlist 信息
+    video_playlists = db.get_video_playlists(video_id)
+    playlist_info = None
+    if video_playlists:
+        # 取第一个 playlist（单 playlist 场景）
+        pl_id = video_playlists[0]
+        playlist = db.get_playlist(pl_id)
+        if playlist:
+            pl_upload_config = (playlist.metadata or {}).get('upload_config', {})
+            pv_info = db.get_playlist_video_info(pl_id, video_id)
+            upload_order_index = pv_info.get('upload_order_index', 0) if pv_info else 0
+            if not upload_order_index:
+                # fallback: video.metadata（不推荐，但总比 0 好）
+                upload_order_index = meta.get('upload_order_index', 0) or 0
+            
+            playlist_info = {
+                'name': playlist.title,
+                'id': pl_id,
+                'index': upload_order_index,
+                'uploader_name': pl_upload_config.get('uploader_name', ''),
+            }
+    
+    # 3. 渲染模板
+    bilibili_config = config.uploader.bilibili
+    templates = {}
+    if bilibili_config.templates:
+        templates = {
+            'title': bilibili_config.templates.title,
+            'description': bilibili_config.templates.description,
+            'custom_vars': bilibili_config.templates.custom_vars,
+        }
+    
+    rendered = render_upload_metadata(video, templates, playlist_info)
+    new_title = rendered['title'][:80]
+    new_desc = rendered['description'][:2000]
+    
+    # 4. tags 和 tid
+    # 合并翻译生成的标签和配置默认标签，去重
+    all_tags = []
+    for t in (translated.get('tags_translated', []) or []):
+        if t and t not in all_tags:
+            all_tags.append(t)
+    for t in (translated.get('tags_generated', []) or []):
+        if t and t not in all_tags:
+            all_tags.append(t)
+    for t in (bilibili_config.default_tags or []):
+        if t and t not in all_tags:
+            all_tags.append(t)
+    new_tags = all_tags[:12] if all_tags else None
+    new_tid = translated.get('recommended_tid') or bilibili_config.default_tid
+    
+    _cb(f"渲染结果: title={new_title[:50]}...")
+    _cb(f"  desc={len(new_desc)}字, tags={new_tags}, tid={new_tid}")
+    
+    # 5. 调用 edit_video_info 更新
+    ok = uploader.edit_video_info(
+        aid=aid,
+        title=new_title,
+        desc=new_desc,
+        tags=new_tags,
+        tid=new_tid,
+    )
+    
+    if ok:
+        result['success'] = True
+        result['title'] = new_title
+        result['message'] = f'av{aid} 元信息已同步'
+        _cb(f"  ✅ {result['message']}")
+    else:
+        result['message'] = f'av{aid} edit_video_info 调用失败'
+        _cb(f"  ❌ {result['message']}")
+    
+    return result
+
+
 def create_bilibili_uploader(config: Any) -> BilibiliUploader:
     """
     从配置创建B站上传器

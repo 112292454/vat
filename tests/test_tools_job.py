@@ -3,12 +3,14 @@
 - JobManager 泛化（task_type, task_params）
 - _build_tools_command 命令构建
 - _determine_tools_job_result 日志标记解析
+- resync_video_info 元信息渲染与同步
 """
 import json
 import tempfile
 import os
 from pathlib import Path
 from unittest import TestCase
+from unittest.mock import MagicMock, patch
 
 from vat.web.jobs import JobManager, WebJob, JobStatus, TOOLS_TASK_TYPES
 
@@ -314,7 +316,7 @@ class TestFixViolationLoop(TestCase):
             'vat.database.Database': MagicMock(),
             'vat.cli.tools._get_bilibili_uploader': MagicMock(return_value=mock_uploader),
             'vat.cli.tools._find_local_video_for_aid': MagicMock(return_value=None),
-            'vat.cli.tools._try_add_to_season': MagicMock(),
+            'vat.cli.tools._post_fix_actions': MagicMock(),
             'vat.cli.commands._get_previous_violation_ranges': MagicMock(return_value=[]),
             'vat.cli.commands._save_violation_ranges': MagicMock(),
             'time.sleep': MagicMock(),
@@ -359,7 +361,7 @@ class TestFixViolationLoop(TestCase):
         self.assertIn('[SUCCESS]', result.output)
         self.assertIn('修复流程完成', result.output)
         # 应调用 add-to-season
-        mocks['vat.cli.tools._try_add_to_season'].assert_called_once()
+        mocks['vat.cli.tools._post_fix_actions'].assert_called_once()
 
     def test_two_rounds_then_passes(self):
         """第1轮被退回，第2轮通过"""
@@ -461,3 +463,159 @@ class TestFixViolationLoop(TestCase):
         calls = mock_uploader.fix_violation.call_args_list
         self.assertEqual(calls[1].kwargs.get('previous_ranges') or calls[1][1].get('previous_ranges'),
                          [(100, 110)])
+
+
+class TestResyncVideoInfo(TestCase):
+    """测试 resync_video_info 从 DB 模板渲染并同步元信息到 B站"""
+
+    def _make_mock_db(self, video_id='test123', aid=12345,
+                      translated=None, playlist_id='PL_test'):
+        """构建 mock DB，模拟 resync_video_info 中的数据库操作"""
+        if translated is None:
+            translated = {
+                'title_translated': '测试翻译标题',
+                'description_translated': '测试翻译简介',
+                'description_summary': '摘要',
+                'tags_translated': ['标签1', '标签2'],
+                'tags_generated': ['生成标签'],
+                'recommended_tid': 17,
+            }
+        
+        metadata = {
+            'bilibili_aid': aid,
+            'translated': translated,
+            'upload_order_index': 5,
+            'uploader': 'TestChannel',
+        }
+        
+        # mock video 对象
+        mock_video = MagicMock()
+        mock_video.id = video_id
+        mock_video.title = 'Original Title'
+        mock_video.source_url = f'https://www.youtube.com/watch?v={video_id}'
+        mock_video.metadata = metadata
+        
+        # mock playlist 对象
+        mock_playlist = MagicMock()
+        mock_playlist.title = 'Test Playlist'
+        mock_playlist.id = playlist_id
+        mock_playlist.metadata = {'upload_config': {'uploader_name': 'TestUploader'}}
+        
+        # mock db
+        mock_db = MagicMock()
+        mock_db.db_path = ':memory:'
+        mock_db.get_video.return_value = mock_video
+        mock_db.get_video_playlists.return_value = [playlist_id]
+        mock_db.get_playlist.return_value = mock_playlist
+        mock_db.get_playlist_video_info.return_value = {'upload_order_index': 5}
+        
+        return mock_db, mock_video
+
+    def _make_mock_config(self):
+        """构建 mock config"""
+        mock_config = MagicMock()
+        mock_config.uploader.bilibili.templates.title = '${translated_title}'
+        mock_config.uploader.bilibili.templates.description = '${translated_desc}'
+        mock_config.uploader.bilibili.templates.custom_vars = {}
+        mock_config.uploader.bilibili.default_tags = ['VTuber']
+        mock_config.uploader.bilibili.default_tid = 21
+        return mock_config
+
+    @patch('sqlite3.connect')
+    def test_success(self, mock_connect):
+        """正常场景：渲染并同步成功"""
+        from vat.uploaders.bilibili import resync_video_info
+        
+        mock_db, mock_video = self._make_mock_db()
+        mock_config = self._make_mock_config()
+        mock_uploader = MagicMock()
+        mock_uploader.edit_video_info.return_value = True
+        
+        # mock sqlite3.connect 查询返回匹配的 video
+        mock_cursor = MagicMock()
+        mock_cursor.fetchall.return_value = [
+            ('test123', json.dumps({'bilibili_aid': 12345, 'translated': {}}))
+        ]
+        mock_conn = MagicMock()
+        mock_conn.cursor.return_value = mock_cursor
+        mock_connect.return_value = mock_conn
+        
+        result = resync_video_info(mock_db, mock_uploader, mock_config, 12345)
+        
+        self.assertTrue(result['success'])
+        self.assertIn('已同步', result['message'])
+        mock_uploader.edit_video_info.assert_called_once()
+        call_kwargs = mock_uploader.edit_video_info.call_args
+        self.assertEqual(call_kwargs.kwargs['aid'], 12345)
+        # tags 应包含翻译标签 + 默认标签
+        self.assertIn('VTuber', call_kwargs.kwargs['tags'])
+        self.assertIn('标签1', call_kwargs.kwargs['tags'])
+
+    @patch('sqlite3.connect')
+    def test_video_not_found(self, mock_connect):
+        """DB 中找不到对应视频"""
+        from vat.uploaders.bilibili import resync_video_info
+        
+        mock_db = MagicMock()
+        mock_db.db_path = ':memory:'
+        mock_config = self._make_mock_config()
+        mock_uploader = MagicMock()
+        
+        mock_cursor = MagicMock()
+        mock_cursor.fetchall.return_value = []
+        mock_conn = MagicMock()
+        mock_conn.cursor.return_value = mock_cursor
+        mock_connect.return_value = mock_conn
+        
+        result = resync_video_info(mock_db, mock_uploader, mock_config, 99999)
+        
+        self.assertFalse(result['success'])
+        self.assertIn('未找到', result['message'])
+        mock_uploader.edit_video_info.assert_not_called()
+
+    @patch('sqlite3.connect')
+    def test_no_translated_data(self, mock_connect):
+        """视频缺少翻译数据"""
+        from vat.uploaders.bilibili import resync_video_info
+        
+        mock_db, _ = self._make_mock_db(translated={})
+        # 覆盖 metadata 中 translated 为空
+        mock_db.get_video.return_value.metadata = {'bilibili_aid': 12345, 'translated': {}}
+        mock_config = self._make_mock_config()
+        mock_uploader = MagicMock()
+        
+        mock_cursor = MagicMock()
+        mock_cursor.fetchall.return_value = [
+            ('test123', json.dumps({'bilibili_aid': 12345}))
+        ]
+        mock_conn = MagicMock()
+        mock_conn.cursor.return_value = mock_cursor
+        mock_connect.return_value = mock_conn
+        
+        result = resync_video_info(mock_db, mock_uploader, mock_config, 12345)
+        
+        self.assertFalse(result['success'])
+        self.assertIn('缺少翻译数据', result['message'])
+
+    @patch('sqlite3.connect')
+    def test_edit_fails(self, mock_connect):
+        """edit_video_info 返回 False"""
+        from vat.uploaders.bilibili import resync_video_info
+        
+        mock_db, _ = self._make_mock_db()
+        mock_config = self._make_mock_config()
+        mock_uploader = MagicMock()
+        mock_uploader.edit_video_info.return_value = False
+        
+        mock_cursor = MagicMock()
+        mock_cursor.fetchall.return_value = [
+            ('test123', json.dumps({'bilibili_aid': 12345, 'translated': {}}))
+        ]
+        mock_conn = MagicMock()
+        mock_conn.cursor.return_value = mock_cursor
+        mock_connect.return_value = mock_conn
+        
+        result = resync_video_info(mock_db, mock_uploader, mock_config, 12345)
+        
+        self.assertFalse(result['success'])
+        self.assertIn('调用失败', result['message'])

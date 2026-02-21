@@ -466,7 +466,10 @@ async function toggleSeasonEpisodes(seasonId) {
         data.episodes.forEach((ep, idx) => {
             html += `<div class="flex items-center gap-2 text-sm py-1 px-2 hover:bg-gray-100 rounded">
                 <span class="text-gray-400 w-6 text-right">${idx + 1}.</span>
-                <span class="text-gray-700 truncate flex-1">${escapeHtml(ep.title)}</span>
+                <span class="text-gray-700 truncate flex-1" id="ep-title-${ep.aid}">${escapeHtml(ep.title)}</span>
+                <button onclick="resyncVideoInfo(${ep.aid})" 
+                        class="text-xs text-orange-500 hover:text-orange-700 flex-shrink-0"
+                        id="resync-btn-${ep.aid}" title="从DB模板重新渲染并同步元信息到B站">同步信息</button>
                 <a href="https://www.bilibili.com/video/av${ep.aid}" target="_blank" 
                    class="text-xs text-blue-400 hover:text-blue-600 flex-shrink-0">av${ep.aid}</a>
             </div>`;
@@ -475,6 +478,31 @@ async function toggleSeasonEpisodes(seasonId) {
         cell.innerHTML = html;
     } catch (e) {
         cell.innerHTML = `<div class="text-sm text-red-500">加载失败: ${e}</div>`;
+    }
+}
+
+// 从DB模板重新渲染并同步视频元信息到B站
+async function resyncVideoInfo(aid) {
+    const btn = document.getElementById(`resync-btn-${aid}`);
+    const titleEl = document.getElementById(`ep-title-${aid}`);
+    if (btn) btn.disabled = true;
+    const origText = btn ? btn.textContent : '';
+    if (btn) btn.textContent = '同步中...';
+    
+    try {
+        const resp = await fetch(`/bilibili/resync-info/${aid}`, { method: 'POST' });
+        const data = await resp.json();
+        if (data.success) {
+            if (btn) { btn.textContent = '✓'; btn.classList.replace('text-orange-500', 'text-green-500'); }
+            if (titleEl && data.title) titleEl.textContent = data.title;
+            setTimeout(() => { if (btn) { btn.textContent = origText; btn.disabled = false; btn.classList.replace('text-green-500', 'text-orange-500'); } }, 3000);
+        } else {
+            alert('同步失败: ' + data.error);
+            if (btn) { btn.textContent = origText; btn.disabled = false; }
+        }
+    } catch (e) {
+        alert('同步异常: ' + e);
+        if (btn) { btn.textContent = origText; btn.disabled = false; }
     }
 }
 

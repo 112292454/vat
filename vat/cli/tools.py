@@ -202,8 +202,7 @@ def tools_fix_violation(aid, video_path, margin, mask_text, dry_run, max_rounds,
 
             if not still_rejected:
                 _emit(f"av{aid} 已不在退回列表中（已通过审核或仍在审核中）")
-                # 尝试添加到合集
-                _try_add_to_season(db, uploader, aid)
+                _post_fix_actions(db, uploader, config, aid)
                 _progress(100)
                 _success(f"av{aid} 修复流程完成")
                 return
@@ -212,8 +211,7 @@ def tools_fix_violation(aid, video_path, margin, mask_text, dry_run, max_rounds,
             # 下一轮 fix_violation 会重新 get_rejected_videos 获取最新违规信息
 
         # 所有轮次结束（最后一轮已提交但未等待检查）
-        # 尝试添加到合集（视频可能在审核中，add_to_season 内部会处理已存在的情况）
-        _try_add_to_season(db, uploader, aid)
+        _post_fix_actions(db, uploader, config, aid)
         _progress(100)
         _success(f"av{aid} 已完成 {max_rounds} 轮修复提交")
 
@@ -222,10 +220,26 @@ def tools_fix_violation(aid, video_path, margin, mask_text, dry_run, max_rounds,
         _failed(str(e))
 
 
-def _try_add_to_season(db, uploader, aid: int):
-    """修复成功后尝试将视频添加到B站合集（如果 DB 中配置了 target_season_id）"""
+def _post_fix_actions(db, uploader, config, aid: int):
+    """修复成功后的收尾操作：从DB模板重新渲染元信息 + 添加到合集
+    
+    1. resync_video_info: 从 DB 和模板重新渲染 title/desc/tags/tid 并更新到 B站
+    2. add_to_season: 如果配置了目标合集且尚未添加，则添加到合集
+    """
     import json, sqlite3
+    from ..uploaders.bilibili import resync_video_info
     logger = get_logger()
+    
+    # Step 1: 重新渲染元信息并同步到 B站
+    try:
+        _emit(f"从 DB 模板重新渲染元信息...")
+        sync_result = resync_video_info(db, uploader, config, aid, callback=_emit)
+        if not sync_result['success']:
+            _emit(f"  ⚠️ 元信息同步失败: {sync_result['message']}（不影响修复结果）")
+    except Exception as e:
+        logger.warning(f"resync_video_info 异常（不影响修复结果）: {e}")
+    
+    # Step 2: 添加到合集
     try:
         conn = sqlite3.connect(str(db.db_path))
         c = conn.cursor()

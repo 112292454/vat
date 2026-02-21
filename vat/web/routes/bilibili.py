@@ -659,6 +659,38 @@ async def get_season_episodes(season_id: int):
         return JSONResponse({"success": False, "error": str(e)})
 
 
+@router.post("/resync-info/{aid}")
+async def resync_video_info_route(aid: int):
+    """从 DB 模板重新渲染视频元信息（title/desc/tags/tid）并同步到 B站
+    
+    用于修正历史不一致（如 upload_order_index 变更后标题编号不对、
+    翻译更新后需要同步等）。
+    """
+    try:
+        from ...uploaders.bilibili import resync_video_info
+        
+        config = load_config()
+        db = Database(config.storage.database_path, output_base_dir=config.storage.output_dir)
+        uploader = _get_uploader(with_upload_params=False)
+        
+        result = resync_video_info(db, uploader, config, aid)
+        
+        if result['success']:
+            return JSONResponse({
+                "success": True,
+                "message": result['message'],
+                "title": result.get('title', ''),
+            })
+        else:
+            return JSONResponse({
+                "success": False,
+                "error": result['message'],
+            })
+    except Exception as e:
+        logger.error(f"resync-info 失败 av{aid}: {e}", exc_info=True)
+        return JSONResponse({"success": False, "error": str(e)})
+
+
 @router.get("/sync-playlists")
 async def get_sync_playlists():
     """获取所有配置了 season_id 的 playlist，以及各自的待同步视频数

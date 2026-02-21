@@ -1109,36 +1109,30 @@ def _run_dtime_uploads(config, db, logger, video_ids, cron_expr, force, dry_run,
         batches.append(queue[i:i + batch_size])
     
     # 计算每批次的发布时间（dtime）
-    now = datetime.now()
-    cron = croniter(cron_expr, now)
-    batch_dtimes = []  # [(batch, dtime_timestamp), ...]
+    # B站 dtime 必须距当前时间 > 2小时，因此 croniter 从 now + 2h1m 开始，
+    # 自动跳过太近的 cron 时间点，无需事后校验再报错
+    from datetime import timedelta
     
     DTIME_MIN_OFFSET = 7200 + 60  # 至少 2小时1分钟（留余量）
     DTIME_MAX_OFFSET = 15 * 86400  # 最多 15 天
+    
+    now = datetime.now()
+    cron_start = now + timedelta(seconds=DTIME_MIN_OFFSET)
+    cron = croniter(cron_expr, cron_start)
+    batch_dtimes = []  # [(batch, dtime_timestamp), ...]
     
     for batch in batches:
         next_time = cron.get_next(datetime)
         dtime_ts = int(next_time.timestamp())
         batch_dtimes.append((batch, dtime_ts, next_time))
     
-    # 校验所有 dtime
+    # 校验 dtime 上限（下限已通过 cron_start 偏移保证）
     now_ts = int(_time.time())
-    too_early = []
     too_late = []
     for batch, dtime_ts, next_time in batch_dtimes:
         offset = dtime_ts - now_ts
-        if offset < DTIME_MIN_OFFSET:
-            too_early.append(next_time)
         if offset > DTIME_MAX_OFFSET:
             too_late.append(next_time)
-    
-    if too_early:
-        logger.error(
-            f"以下发布时间距现在不足 2 小时（B站要求 dtime > 2小时）:\n"
-            + "\n".join(f"  {t.strftime('%Y-%m-%d %H:%M')}" for t in too_early)
-        )
-        logger.error("请调整 cron 表达式，确保首次触发时间距现在至少 2 小时")
-        return
     
     if too_late:
         logger.warning(

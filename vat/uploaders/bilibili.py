@@ -1289,15 +1289,41 @@ class BilibiliUploader(BaseUploader):
             logger.error(f"稿件 av{aid} 无视频信息")
             return False
         
-        # 创作中心 API 会截断 desc 到 250 字符，需要从公共 API 获取完整 desc
+        # 创作中心 API 的 tag 字段对退回视频通常为空，desc 被截断到 250 字符。
+        # 必须从公共 API 补全这些字段（与 edit_video_info 一致）。
         creator_desc = archive.get('desc', '')
-        full_desc = self._get_full_desc(aid, session)
-        if full_desc and len(full_desc) > len(creator_desc):
-            archive['desc'] = full_desc
-            logger.info(f"  使用公共 API 获取完整 desc ({len(full_desc)} 字符，创作中心仅 {len(creator_desc)})")
+        creator_tag = archive.get('tag', '')
+        
+        pub_detail = self.get_video_detail(aid)
+        if pub_detail:
+            # 补全 tags：公共 API 返回 tag 对象列表或逗号分隔字符串
+            if not creator_tag:
+                pub_tags = pub_detail.get('tag', '')
+                if isinstance(pub_tags, list):
+                    pub_tags = ','.join(
+                        t.get('tag_name', '') if isinstance(t, dict) else str(t) for t in pub_tags
+                    )
+                if pub_tags:
+                    archive['tag'] = pub_tags
+                    logger.info(f"  使用公共 API 补全 tags: {pub_tags[:80]}")
+            
+            # 补全 desc：公共 API 通常返回更完整的 desc
+            pub_desc = pub_detail.get('desc', '')
+            if len(pub_desc) > len(creator_desc):
+                archive['desc'] = pub_desc
+                logger.info(f"  使用公共 API 补全 desc ({len(pub_desc)} 字符，创作中心仅 {len(creator_desc)})")
+        
+        # 额外尝试：_get_full_desc 单独请求完整 desc（双重保险）
+        if len(archive.get('desc', '')) <= 250:
+            full_desc = self._get_full_desc(aid, session)
+            if full_desc and len(full_desc) > len(archive.get('desc', '')):
+                archive['desc'] = full_desc
+                logger.info(f"  _get_full_desc 获取更完整 desc ({len(full_desc)} 字符)")
         
         logger.info(f"替换视频 av{aid}: {archive.get('title', '')[:50]}")
         logger.info(f"  新视频文件: {new_video_path}")
+        logger.info(f"  tag: {archive.get('tag', '')[:80] or '(空)'}")
+        logger.info(f"  desc 长度: {len(archive.get('desc', ''))} 字符")
         
         # 2. 上传新视频文件（只上传文件，不创建稿件）
         try:
@@ -1348,6 +1374,7 @@ class BilibiliUploader(BaseUploader):
                     'title': old_videos[0].get('title', ''),
                     'desc': old_videos[0].get('desc', ''),
                 }],
+                'csrf': bili_jct,
             }
             
             resp = session.post(

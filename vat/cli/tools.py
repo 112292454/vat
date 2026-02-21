@@ -176,12 +176,12 @@ def tools_fix_violation(aid, video_path, margin, mask_text, dry_run, max_rounds,
                 _emit(f"已达最大轮次 ({max_rounds})，最后一轮修复已提交")
                 break
 
-            # 计算等待时间：用户指定 > 上传耗时*2 > 下限900秒(15分钟)
+            # 计算等待时间：用户指定 > 上传耗时*3 > 下限900秒(15分钟)
             upload_dur = result.get('upload_duration', 0)
             if wait_seconds > 0:
                 actual_wait = wait_seconds
             else:
-                actual_wait = max(int(upload_dur * 2), 900)
+                actual_wait = max(int(upload_dur * 3), 900)
             _emit(f"上传耗时 {upload_dur:.0f}s，等待审核 {actual_wait}s ({actual_wait // 60} 分钟)...")
 
             # 等待，每10分钟输出一次日志

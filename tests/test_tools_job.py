@@ -410,7 +410,7 @@ class TestFixViolationLoop(TestCase):
         """upload_duration 很短时，等待时间不低于900s"""
         from unittest.mock import MagicMock, patch
         mock_uploader = MagicMock()
-        # upload_duration = 100s → 100*2 = 200s < 900s → 用 900s
+        # upload_duration = 100s → 100*3 = 300s < 900s → 用 900s
         mock_uploader.fix_violation.return_value = self._make_fix_result(upload_duration=100)
         mock_uploader.get_rejected_videos.return_value = []
 
@@ -419,16 +419,16 @@ class TestFixViolationLoop(TestCase):
         self.assertIn('等待审核 900s', result.output)
 
     def test_wait_time_uses_upload_duration(self):
-        """upload_duration 足够大时，等待时间 = upload_duration * 2"""
+        """upload_duration 足够大时，等待时间 = upload_duration * 3"""
         from unittest.mock import MagicMock, patch
         mock_uploader = MagicMock()
-        # upload_duration = 600s → 600*2 = 1200s > 900s → 用 1200s
+        # upload_duration = 600s → 600*3 = 1800s > 900s → 用 1800s
         mock_uploader.fix_violation.return_value = self._make_fix_result(upload_duration=600)
         mock_uploader.get_rejected_videos.return_value = []
 
         result, mocks = self._invoke(mock_uploader, max_rounds=2, wait_seconds=0)
 
-        self.assertIn('等待审核 1200s', result.output)
+        self.assertIn('等待审核 1800s', result.output)
 
     def test_explicit_wait_seconds_overrides(self):
         """显式指定 --wait-seconds 覆盖自动计算"""

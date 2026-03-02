@@ -1,5 +1,7 @@
 # ASR参数评估实验记录
 
+> **综合评测报告见 `docs/TRANSLATION_AND_ASR_EVALUATION.md`**，本文件保留350视频参数评测的详细数据。
+
 实验时间：2026年2月
 
 ---

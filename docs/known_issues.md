@@ -4,23 +4,17 @@
 
 ---
 
-## 一、LLM 成本策略
+## 一、LLM 各阶段模型配置
 
-### 当前方案
+各阶段按能力需求分配不同模型。每个视频处理完成后，实际使用的模型配置会记录到 `metadata['stage_models']` 中，在 WebUI 详情页和 B站简介中展示。
 
-各阶段按重要性分配不同模型，控制成本：
+| 阶段 | 当前模型 | 来源 | 说明 |
+|------|---------|------|------|
+| Split（断句） | gpt-4o-mini | 中转站 | 断句对模型要求低；国产模型测试过度断句（在日语条件句ば后、宾格を后错误断开） |
+| Optimize（优化） | kimi-k2.5 | 火山引擎 Coding Plan | 同语言 ASR 纠错能力好（能修正人名、自我介绍等），节省 Gemini 额度 |
+| Translate（翻译） | gemini-3-flash | Google API | 质量最优，ASR 乱码纠错能力无可替代 |
 
-| 阶段 | 模型 | 相对成本 | 说明 |
-|------|------|---------|------|
-| Split | gpt-4o-mini | 1x | 断句对模型要求低，后有时间戳修正兜底 |
-| Optimize | gpt-5-nano | 6x | 术语纠错靠 custom prompt 引导 |
-| Translate | gemini-3-flash | 40x（开 reflect 约 60-80x） | 翻译质量要求最高，直接面向用户 |
-
-### 效果对比
-
-- **gpt-4o-mini 全流程**：明显不通顺，不可用于正式翻译
-- **gpt-5-nano（optimize+translate）**：基本通顺，但专有名词误报多，缺乏个人风格
-- **gemini-3-flash 全流程**：接近人工翻译质量，术语处理正确，风格自然
+详细评测数据见 [翻译评测报告](TRANSLATION_AND_ASR_EVALUATION.md)。
 
 ### Reflect 开销说明
 
@@ -70,7 +64,7 @@ Reflect 不是多次 LLM 调用，而是单次调用中输出 3 个字段（init
 
 ---
 
-## 四、Translate（翻译）
+## 三、Translate（翻译）
 
 ### Translate-1: chunk 间上下文传递
 
@@ -79,6 +73,6 @@ Reflect 不是多次 LLM 调用，而是单次调用中输出 3 个字段（init
 
 ---
 
-## 五、B 站上传
+## 四、B 站上传
 
-*Upload-1 ~ Upload-4 已修复，归档至 [docs/archive/fixed_issues.md](archive/fixed_issues.md)*
+*Upload-1 ~ Upload-7 已修复，归档至 [docs/archive/fixed_issues.md](archive/fixed_issues.md)*

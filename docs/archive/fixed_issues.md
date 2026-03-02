@@ -51,14 +51,14 @@
 
 - **现象**：fubuki 频道的 playlist 同步后视频数量不增长（始终 2948），且视频和直播混在同一个 playlist 中
 - **根因**：
-  1. `source_url` 指向 `/@xxx/videos` tab，YouTube 该 tab 只返回 ~172 个热门视频（非全量），导致 sync 无法发现新视频
-  2. 单一 playlist 混合了 2668 个直播和 280 个普通视频，语义不清晰，且 yt-dlp 对 `/videos` 和 `/streams` tab 返回相同的 channel ID，无法区分
-- **修复**：
-  1. **Playlist 拆分**：将原 `UCdn5BQ06XqgXoAxIhbqw5Rg` 拆为 `-videos`（280 个）和 `-streams`（2668 个）
-  2. **Videos playlist**：source_url 改为 UU uploads playlist（全量上传列表），metadata 中 `sync_live_filter: "not_live"` 自动过滤 `live_status=was_live` 的直播条目
-  3. **Streams playlist**：source_url 使用 `/@xxx/streams`（只返回直播）
-  4. **`sync_playlist` 新增 `target_playlist_id` 参数**：显式指定 DB 中的 playlist ID，不再依赖 yt-dlp 返回的（可能不唯一的）playlist ID
-  5. **`get_playlist_info` 新增 `live_status` 字段**：从 yt-dlp flat 模式中提取，用于 sync 时自动区分视频和直播
+  1. 早期使用单一 playlist 混合了所有类型的视频
+  2. 中间方案使用 UU uploads playlist（全量）+ `sync_live_filter` 代码过滤，但 shorts 穿透了过滤导致交叉
+- **修复**（最终方案）：
+  1. **按 YouTube tab URL 区分**：`/@channel/shorts`、`/@channel/videos`、`/@channel/streams` 三个 tab 天然互斥且完整覆盖全部上传（经验证：三者并集 = UU 全量 = 2951，零交叉，零遗漏）
+  2. **Playlist 拆分**：`-shorts`（95）、`-videos`（172）、`-streams`（2684），source_url 直接指向对应 tab URL
+  3. **移除 `sync_live_filter`**：不再需要代码层面的特征过滤，分类完全由来源 URL 决定
+  4. **删除遗留全量 playlist**：`UCdn5BQ06XqgXoAxIhbqw5Rg`（无后缀）和 `UUdn5BQ06XqgXoAxIhbqw5Rg`，它们与分片 playlist 完全重叠
+  5. **`sync_playlist` 新增 `target_playlist_id` 参数**：显式指定 DB 中的 playlist ID，不再依赖 yt-dlp 返回的（可能不唯一的）playlist ID
   6. B 站合集同步更新：拆分后重算 `upload_order_index`，批量更新 39 个已上传直播的 B 站标题中的 `#N` 编号
 
 ### Upload-3: 视频编号（#N）与时间顺序不一致
@@ -90,6 +90,31 @@
   4. 所有 `video.playlist_id` 读取点（executor、CLI、WebUI）改为查询 `playlist_videos` 关联表
   5. 数据清理：从 streams 移除 2 个重复视频（streams ∩ videos），videos playlist 重排索引 1-279
 - **验证**：15 个 upload_order_index 测试 + 319 个全量测试通过；dry-run 验证 shorts `#17`、videos `#161` 索引正确
+
+### Upload-6: Playlist 数据清理与 index 重建
+
+- **背景**：经过 Upload-2 的 playlist 拆分（tab URL 分离）后，数据库中残留了大量历史遗留数据：过期 B 站元数据、会员限定孤儿视频、rurudo playlist 多余关联、upload_order_index gap
+- **清理内容**：
+  1. **过期 B 站元数据**：54 个 B 站已删除（稿件不可见，code=62002）的视频，清除 `bilibili_bvid`/`bilibili_aid`/`bilibili_url`/`bilibili_target_season_id`/`bilibili_season_added` 字段
+  2. **孤儿视频删除**：109 个不属于任何 playlist 的视频（108 个会员限定 + 1 个冗余历史记录），从 `videos` 表删除
+  3. **rurudo playlist 清理**：移除 6 个不在 YouTube `/streams` tab 中的多余关联，其中产生的 6 个新孤儿一并删除
+  4. **upload_order_index 重建**：全部 4 个 playlist 重新编号为连续 1~N（消除因删除产生的 gap）
+  5. **B 站标题同步**：21 个 rurudo playlist 中 index 变化的已上传视频，批量 resync 标题编号
+- **验证**：全量一致性检查通过——0 孤儿、0 跨 playlist 交叉、4 个 playlist index 连续、139 个 B 站关联完整
+- **最终数据**：4 个 playlist（白上 shorts/videos/streams + rurudo），2975 个视频，405 个单元测试通过
+
+### Upload-7: yt-dlp get_playlist_info 刷屏 + NoneType 比较 bug
+
+- **现象**：
+  1. `sync_playlist` 时 yt-dlp 输出数千行 `[download] Downloading item X of Y` 日志，严重刷屏
+  2. `_assign_indices_to_new_videos` 中 `pv_info.get('upload_order_index', 0)` 返回 `None`（key 存在但值为 None），与整数比较导致 `TypeError`
+- **根因**：
+  1. `get_playlist_info` 调用 `ydl.extract_info(url)` 时 `process` 默认为 `True`，触发 `__process_playlist` 逐条迭代并打印日志
+  2. `.get(key, default)` 在 key 存在但值为 `None` 时返回 `None` 而非 default
+- **修复**：
+  1. `get_playlist_info`：`ydl.extract_info(url, process=False)`，跳过内部迭代，只做 API 分页获取
+  2. `_assign_indices_to_new_videos`：`(pv_info.get('upload_order_index') or 0)` 将 `None` 合并为 0
+- **验证**：sync 日志量从数千行降至 ~30 行（仅 API 分页请求）；405 个单元测试通过
 
 ### Upload-5: 创作中心 API 截断 desc 导致编辑操作覆盖完整简介
 

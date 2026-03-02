@@ -108,7 +108,14 @@
                     <!-- 阶段信息 -->
                     <div class="flex-1 min-w-0">
                         <div class="flex items-center justify-between">
-                            <span class="font-medium text-gray-900">{{ task.step_name }}</span>
+                            <div class="flex items-center space-x-2">
+                                <span class="font-medium text-gray-900">{{ task.step_name }}</span>
+                                {% if task.model %}
+                                <span class="inline-flex items-center px-1.5 py-0.5 rounded text-xs bg-gray-100 text-gray-600 font-mono">
+                                    {{ task.model }}
+                                </span>
+                                {% endif %}
+                            </div>
                             <span class="text-xs text-gray-500">
                                 {% if task.status == 'completed' %}已完成
                                 {% elif task.status == 'running' %}运行中

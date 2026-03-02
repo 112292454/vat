@@ -51,6 +51,11 @@ vat/resources/fonts/
 config/config.yaml
 config/bilibili_cookies.txt
 
+# 翻译评测实验数据（结果数据不上传，脚本保留）
+scripts/translation_benchmark_prompts/
+scripts/translation_benchmark_results/
+scripts/asr_evaluation/
+
 # 参考项目（独立仓库）
 ref/
 

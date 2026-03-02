@@ -10,6 +10,16 @@
   <img src="docs/assets/webui_index.png" alt="视频管理总览" width="80%">
 </p>
 
+### 翻译效果
+
+B 站上有使用 VAT 翻译的视频实例（日语 VTuber → 中文字幕），可直接查看翻译效果：
+
+- [**白上吹雪 | 试吃测评**](https://www.bilibili.com/video/BV1Vkf7B9E5x/) — 闲聊类，纯对话场景
+- [**白上吹雪 | 皇牌空战7**](https://www.bilibili.com/video/BV15kf7B9EwZ/) — 游戏实况，解说+操作
+- [**白上吹雪 | 马里奥赛车**](https://www.bilibili.com/video/BV1G1f7BQEkv/) — 短视频，高密度对话
+
+更多翻译视频见 [B 站空间](https://space.bilibili.com/37276818)（158+ 视频）。
+
 ---
 
 ## 目录

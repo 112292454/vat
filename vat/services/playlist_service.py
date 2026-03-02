@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 
 from vat.models import Video, Playlist, SourceType
 from vat.database import Database
-from vat.downloaders import YouTubeDownloader
+from vat.downloaders import YouTubeDownloader, VideoInfoResult
 from vat.utils.logger import setup_logger
 
 logger = setup_logger("playlist_service")
@@ -128,29 +128,15 @@ class PlaylistService:
             )
             self.db.add_playlist(existing_playlist)
         
-        # 读取 sync_live_filter：用于从混合 playlist（如 UU uploads）中按 live_status 过滤
-        # "not_live": 只保留非直播视频（排除 was_live / is_live）
-        # None: 不过滤（默认）
-        pl_metadata = existing_playlist.metadata or {}
-        sync_live_filter = pl_metadata.get('sync_live_filter')
-        
         # 获取已存在的视频 ID
         existing_video_ids = self.db.get_playlist_video_ids(playlist_id)
         callback(f"已有 {len(existing_video_ids)} 个视频")
         
         # 获取 Playlist 中的所有视频
+        # 注意：不在代码中按视频特征过滤。shorts/videos/streams 的区分
+        # 完全依赖 YouTube tab URL（/@channel/shorts, /videos, /streams），
+        # 各 tab 天然互斥且完整覆盖全部上传。
         entries = playlist_info.get('entries', [])
-        
-        # 按 sync_live_filter 过滤 entries
-        if sync_live_filter == 'not_live':
-            # 排除直播录像（was_live / is_live），只保留普通上传视频
-            original_count = len(entries)
-            entries = [
-                e for e in entries
-                if e and e.get('live_status') not in ('was_live', 'is_live')
-            ]
-            callback(f"live_status 过滤: {original_count} → {len(entries)} (排除直播)")
-        
         total_videos = len(entries)
         callback(f"Playlist 共 {total_videos} 个视频")
         
@@ -233,65 +219,61 @@ class PlaylistService:
             max_workers = 10  # 并行获取数量（测试可用 5-10 个）
             callback(f"开始并行获取视频信息（共 {len(videos_to_fetch)} 个，{max_workers} 个并发）...")
             
-            # 收集所有视频的日期信息，用于后续插值我
-            date_results = []  # [(video_id, upload_date or None, is_unavailable)]
+            # 收集所有视频的获取结果，用于后续插值和状态更新
+            fetch_results = []  # [(video_id, VideoInfoResult)]
             completed_count = 0
             results_lock = threading.Lock()
             
             def fetch_video_info(vid: str) -> tuple:
-                """获取单个视频的信息"""
+                """获取单个视频的信息，返回结构化结果"""
                 nonlocal completed_count
-                upload_date = None
-                is_unavailable = False
-                video_info = None
                 
-                try:
-                    video_info = self.downloader.get_video_info(f"https://www.youtube.com/watch?v={vid}")
-                    if video_info and video_info.get('upload_date'):
-                        upload_date = video_info['upload_date']
-                        
-                        # 立即更新基本信息到 metadata（duration、thumbnail 等）
-                        video = self.db.get_video(vid)
-                        if video:
-                            metadata = video.metadata or {}
-                            metadata['upload_date'] = upload_date
-                            metadata['duration'] = video_info.get('duration', 0)
-                            metadata['thumbnail'] = video_info.get('thumbnail', '')
-                            metadata['uploader'] = video_info.get('uploader', '')
-                            metadata['view_count'] = video_info.get('view_count', 0)
-                            metadata['like_count'] = video_info.get('like_count', 0)
-                            self.db.update_video(vid, metadata=metadata)
-                        
-                        # 异步发起 LLM 翻译（第二层异步）
-                        self._submit_translate_task(vid, video_info)
-                    else:
-                        is_unavailable = True
-                except Exception as e:
-                    is_unavailable = True
-                    logger.warning(f"获取视频 {vid} 信息失败: {e}")
+                result = self.downloader.get_video_info(f"https://www.youtube.com/watch?v={vid}")
+                
+                if result.ok and result.upload_date:
+                    # 成功获取：立即更新 metadata
+                    video = self.db.get_video(vid)
+                    if video:
+                        info = result.info
+                        metadata = video.metadata or {}
+                        metadata['upload_date'] = result.upload_date
+                        metadata['duration'] = info.get('duration', 0)
+                        metadata['thumbnail'] = info.get('thumbnail', '')
+                        metadata['uploader'] = info.get('uploader', '')
+                        metadata['view_count'] = info.get('view_count', 0)
+                        metadata['like_count'] = info.get('like_count', 0)
+                        # 成功获取时，清除可能存在的错误 unavailable 标记
+                        metadata.pop('unavailable', None)
+                        metadata.pop('upload_date_interpolated', None)
+                        self.db.update_video(vid, metadata=metadata)
+                    
+                    # 异步发起 LLM 翻译
+                    self._submit_translate_task(vid, result.info)
                 
                 with results_lock:
                     completed_count += 1
                     if completed_count % 5 == 0 or completed_count == len(videos_to_fetch):
                         callback(f"已获取 {completed_count}/{len(videos_to_fetch)} 个视频信息...")
                 
-                return (vid, upload_date, is_unavailable, video_info)
+                return (vid, result)
             
             # 使用线程池并行获取
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 futures = {executor.submit(fetch_video_info, vid): vid for vid in videos_to_fetch}
                 for future in futures:
                     try:
-                        vid, upload_date, is_unavailable, video_info = future.result(timeout=60)
-                        date_results.append((vid, upload_date, is_unavailable))
+                        vid, result = future.result(timeout=60)
+                        fetch_results.append((vid, result))
                     except Exception as e:
                         vid = futures[future]
                         logger.warning(f"获取视频 {vid} 超时或异常: {e}")
-                        date_results.append((vid, None, True))
+                        fetch_results.append((vid, VideoInfoResult(
+                            status='error', error_message=str(e)
+                        )))
             
-            # 对获取失败的视频进行时间插值（传入 playlist_id 以利用已有视频日期作为上下文）
+            # 对未成功获取日期的视频进行插值 + 标记永久不可用
             callback("处理无法获取日期的视频...")
-            self._interpolate_missing_dates(playlist_id, date_results, callback)
+            self._process_failed_fetches(playlist_id, fetch_results, callback)
             
             callback("发布日期获取完成")
         
@@ -307,53 +289,52 @@ class PlaylistService:
             total_videos=total_videos
         )
     
-    def _interpolate_missing_dates(
+    def _process_failed_fetches(
         self,
         playlist_id: str,
-        date_results: List[tuple],
+        fetch_results: List[tuple],
         callback: callable
     ) -> None:
         """
-        对获取失败的视频进行时间插值
+        处理未成功获取信息的视频：日期插值 + 状态标记
         
-        利用 playlist 中已有视频的日期作为上下文：
-        - YouTube playlist 中 playlist_index=1 是最新视频，越大越旧
-        - 基于 playlist_index 顺序找到最近的已知日期进行插值
+        根据 VideoInfoResult.status 区分处理：
+        - ok: 已在 fetch_video_info 中更新，此处跳过
+        - unavailable: 标记 unavailable=True + 日期插值
+        - error: 仅日期插值，不标记 unavailable（下次 sync 可能恢复）
         
         Args:
             playlist_id: Playlist ID（用于查询已有视频日期上下文）
-            date_results: [(video_id, upload_date or None, is_unavailable), ...]
+            fetch_results: [(video_id, VideoInfoResult), ...]
             callback: 进度回调
         """
         # 构建完整的日期上下文：playlist 中所有已知的（非插值的）日期
-        # key: video_id, value: upload_date
         known_dates = {}
         all_playlist_videos = self.db.list_videos(playlist_id=playlist_id)
         for v in all_playlist_videos:
             if v.metadata:
                 date = v.metadata.get('upload_date', '')
-                # 只使用非插值的可靠日期
                 if date and not v.metadata.get('upload_date_interpolated'):
                     known_dates[v.id] = date
         
-        # 加入本轮成功获取的日期（这些是新鲜可靠的）
-        for vid, upload_date, is_unavailable in date_results:
-            if upload_date:
-                known_dates[vid] = upload_date
+        # 加入本轮成功获取的日期
+        for vid, result in fetch_results:
+            if result.upload_date:
+                known_dates[vid] = result.upload_date
         
-        # 构建 playlist_index -> upload_date 的映射（用于基于位置的插值）
-        index_date_map = {}  # playlist_index -> upload_date
+        # 构建 playlist_index -> upload_date 映射（用于插值）
+        index_date_map = {}
         for v in all_playlist_videos:
             idx = v.playlist_index or 0
             if v.id in known_dates:
                 index_date_map[idx] = known_dates[v.id]
         
-        for vid, upload_date, is_unavailable in date_results:
-            if upload_date:
-                # 已在 fetch_video_info 中更新，跳过
-                continue
-            if not is_unavailable:
-                continue
+        # 处理每个非 ok 的结果
+        unavailable_count = 0
+        error_count = 0
+        for vid, result in fetch_results:
+            if result.ok and result.upload_date:
+                continue  # 已在 fetch_video_info 中更新
             
             video = self.db.get_video(vid)
             if not video:
@@ -365,9 +346,22 @@ class PlaylistService:
             metadata = video.metadata or {}
             metadata['upload_date'] = interpolated_date
             metadata['upload_date_interpolated'] = True
-            metadata['unavailable'] = True
-            self.db.update_video(vid, metadata=metadata)
-            callback(f"  视频 {vid}: 使用插值日期 {interpolated_date}（不可用）")
+            
+            if result.is_unavailable:
+                # 视频永久不可用：标记 unavailable
+                metadata['unavailable'] = True
+                metadata['unavailable_reason'] = result.error_message
+                self.db.update_video(vid, metadata=metadata)
+                callback(f"  视频 {vid}: 永久不可用 ({result.error_message})")
+                unavailable_count += 1
+            else:
+                # 临时性获取失败：仅插值日期，不标记 unavailable
+                self.db.update_video(vid, metadata=metadata)
+                callback(f"  视频 {vid}: 获取失败，使用插值日期 {interpolated_date}（下次sync可重试）")
+                error_count += 1
+        
+        if unavailable_count or error_count:
+            callback(f"  汇总: {unavailable_count} 个永久不可用, {error_count} 个临时获取失败")
     
     def _calc_interpolated_date(self, target_index: int, index_date_map: dict) -> str:
         """
@@ -445,7 +439,7 @@ class PlaylistService:
         new_videos = []
         for video in all_videos:
             pv_info = self.db.get_playlist_video_info(playlist_id, video.id)
-            current_index = pv_info.get('upload_order_index', 0) if pv_info else 0
+            current_index = (pv_info.get('upload_order_index') or 0) if pv_info else 0
             if current_index > 0:
                 max_index = max(max_index, current_index)
             else:

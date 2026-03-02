@@ -4,6 +4,7 @@ YouTube下载器实现
 import re
 import time
 import hashlib
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Dict, Optional, Any
 from yt_dlp import YoutubeDL
@@ -55,11 +56,74 @@ _NON_RETRYABLE_ERROR_PATTERNS = [
     r'This video has been removed',
 ]
 
+# 视频永久不可用的错误模式（视频本身的问题，非环境/网络因素）
+# 区别于 rate limit / sign in / bot detection 等临时性、环境性问题
+_VIDEO_PERMANENTLY_UNAVAILABLE_PATTERNS = [
+    r'Video unavailable',
+    r'This video is private',
+    r'copyright',
+    r'removed by',
+    r'This content isn.t available',
+    r'been terminated',
+    r'This video has been removed',
+    r'members-only',
+    r'Join this channel',
+    r'This video is no longer available',
+    r'This video requires payment',
+]
+
 # 重试参数
 _RETRY_INITIAL_WAIT_SEC = 30     # 首次重试等待（秒）
 _RETRY_MAX_WAIT_SEC = 300        # 单次最大等待（秒）
 _RETRY_BACKOFF_FACTOR = 2        # 退避倍数
 _RETRY_MAX_TOTAL_SEC = 1800      # 最大总等待时间（30分钟）
+
+
+def is_video_permanently_unavailable(error_msg: str) -> bool:
+    """判断错误是否表示视频本身永久不可用（已删除/私有/会员限定等）
+    
+    区别于 rate limit / sign in / bot detection 等临时性环境问题。
+    用于决定是否在 DB 中标记 unavailable=True。
+    
+    Args:
+        error_msg: 错误信息字符串
+        
+    Returns:
+        True = 视频本身不可用（永久性），False = 其他原因（临时/未知）
+    """
+    for pattern in _VIDEO_PERMANENTLY_UNAVAILABLE_PATTERNS:
+        if re.search(pattern, error_msg, re.IGNORECASE):
+            return True
+    return False
+
+
+@dataclass
+class VideoInfoResult:
+    """get_video_info 的结构化返回值
+    
+    清晰区分三种结果，避免调用方用 None 猜测原因：
+    - status='ok': 成功获取，info 中有完整视频信息
+    - status='unavailable': 视频永久不可用（已删除/私有/会员限定），不应再尝试处理
+    - status='error': 临时性获取失败（网络/限流/超时），视频本身可能正常，下次 sync 可能恢复
+    """
+    status: str                              # 'ok' | 'unavailable' | 'error'
+    info: Optional[Dict[str, Any]] = None    # 视频信息（status='ok' 时有值）
+    error_message: Optional[str] = None      # 错误详情（非 ok 时有值）
+    
+    @property
+    def ok(self) -> bool:
+        return self.status == 'ok'
+    
+    @property
+    def is_unavailable(self) -> bool:
+        return self.status == 'unavailable'
+    
+    @property
+    def upload_date(self) -> Optional[str]:
+        """便捷取 upload_date，失败时返回 None"""
+        if self.info:
+            return self.info.get('upload_date') or None
+        return None
 
 
 def _is_retryable_network_error(error_msg: str) -> bool:
@@ -100,7 +164,7 @@ class YtDlpLogger:
         'has been deprecated',
     ]
     def debug(self, msg):
-        # 忽略一些无用的调试信息
+        # 忽略 yt-dlp 内部调试信息
         if msg.startswith('[debug] '):
             return
         logger.debug(msg)
@@ -488,40 +552,70 @@ class YouTubeDownloader(BaseDownloader):
         
         return None
     
-    def get_video_info(self, url: str) -> Optional[Dict[str, Any]]:
+    def get_video_info(self, url: str) -> 'VideoInfoResult':
         """
         获取视频信息（不下载）
+        
+        返回结构化结果，清晰区分三种情况：
+        - ok: 成功获取到视频信息
+        - unavailable: 视频永久不可用（已删除/私有/会员限定等）
+        - error: 临时性获取失败（网络/限流/超时，视频本身可能正常）
         
         Args:
             url: YouTube视频URL
             
         Returns:
-            视频信息字典
+            VideoInfoResult
         """
         ydl_opts = {'quiet': True, 'logger': YtDlpLogger()}
         if self.proxy:
             ydl_opts['proxy'] = self.proxy
+        # cookies 和 remote_components 与 download 路径保持一致，
+        # 否则 YouTube bot 检测会拦截请求，导致 playlist sync 获取 upload_date 失败
+        if self.cookies_file:
+            cookie_path = Path(self.cookies_file)
+            if cookie_path.exists():
+                ydl_opts['cookiefile'] = str(cookie_path)
+        if self.remote_components:
+            ydl_opts['remote_components'] = self.remote_components
         
         try:
             with YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
                 
                 if info is None:
-                    return None
+                    return VideoInfoResult(
+                        status='error',
+                        error_message='yt-dlp extract_info 返回 None（原因未知）',
+                    )
                 
-                return {
-                    'video_id': info.get('id', ''),
-                    'title': info.get('title', ''),
-                    'description': info.get('description', ''),
-                    'duration': info.get('duration', 0),
-                    'uploader': info.get('uploader', ''),
-                    'upload_date': info.get('upload_date', ''),
-                    'thumbnail': info.get('thumbnail', ''),
-                    'url': url,
-                }
+                return VideoInfoResult(
+                    status='ok',
+                    info={
+                        'video_id': info.get('id', ''),
+                        'title': info.get('title', ''),
+                        'description': info.get('description', ''),
+                        'duration': info.get('duration', 0),
+                        'uploader': info.get('uploader', ''),
+                        'upload_date': info.get('upload_date', ''),
+                        'thumbnail': info.get('thumbnail', ''),
+                        'url': url,
+                    },
+                )
         except Exception as e:
-            logger.error(f"获取视频信息失败: {e}")
-            return None
+            error_msg = str(e)
+            if is_video_permanently_unavailable(error_msg):
+                logger.info(f"视频永久不可用: {url} — {error_msg}")
+                return VideoInfoResult(
+                    status='unavailable',
+                    error_message=error_msg,
+                )
+            else:
+                logger.warning(f"获取视频信息失败（临时性）: {url} — {error_msg}")
+                return VideoInfoResult(
+                    status='error',
+                    error_message=error_msg,
+                )
     
     def check_manual_subtitles(self, url: str, target_lang: str = "ja") -> Dict[str, Any]:
         """
@@ -617,13 +711,17 @@ class YouTubeDownloader(BaseDownloader):
         
         try:
             with YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(playlist_url, download=False)
+                # process=False: 跳过 yt-dlp 的 __process_playlist 内部遍历
+                # 这样只做 API 分页获取（~30 次请求），不会对每个条目执行处理循环
+                # 也不会产生 "Downloading item X of Y" 日志
+                info = ydl.extract_info(playlist_url, download=False, process=False)
                 
                 if info is None:
                     logger.error(f"无法获取 Playlist 信息: {playlist_url}")
                     return None
                 
-                # 提取 entries 中的关键信息
+                # process=False 返回的 entries 是懒迭代器（generator）
+                # 迭代时触发 API 分页，每页 ~100 条目
                 entries = []
                 for entry in info.get('entries', []):
                     if entry is None:
@@ -634,11 +732,11 @@ class YouTubeDownloader(BaseDownloader):
                         'duration': entry.get('duration', 0),
                         'uploader': entry.get('uploader', info.get('uploader', '')),
                         'thumbnail': entry.get('thumbnail', ''),
-                        # upload_date 在 flat 模式下可能不可用，但尝试获取
                         'upload_date': entry.get('upload_date', ''),
-                        # live_status: "was_live"=直播录像, "is_live"=正在直播, None/"NA"=普通视频
                         'live_status': entry.get('live_status'),
                     })
+                
+                logger.info(f"Playlist 列表获取完成: {len(entries)} 个条目")
                 
                 return {
                     'id': info.get('id', ''),

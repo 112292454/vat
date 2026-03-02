@@ -22,6 +22,9 @@ from .styles import RoundedBgStyle
 from .text_utils import hex_to_rgba, is_mainly_cjk, wrap_text
 
 
+from .scale_utils import compute_subtitle_scale_factor  # noqa: E402
+
+
 def get_subtitle_style(style_name: str, style_dir: Optional[str] = None) -> Optional[str]:
     """Get subtitle style content"""
     if not style_dir:
@@ -44,6 +47,7 @@ __all__ = [
     "render_preview",
     "render_rounded_video",
     "RoundedBgStyle",
+    "compute_subtitle_scale_factor",
     "get_subtitle_style",
     "FontType",
     "get_font",

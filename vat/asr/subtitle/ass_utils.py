@@ -183,10 +183,6 @@ def wrap_ass_text(
     if not text or "\\N" in text:
         return text
 
-    # 只处理 CJK 文本（英文由 FFmpeg ASS 引擎自动换行）
-    if not is_mainly_cjk(text):
-        return text
-
     # Convert ASS font size to PIL font size
     ratio = get_ass_to_pil_ratio(font_name, fonts_dir=fonts_dir)
     pil_font_size = int(round(font_size / ratio))
@@ -221,9 +217,6 @@ def auto_wrap_ass_file(
     if video_width is None:
         video_width = ass_info.video_width
 
-    # 使用95%宽度作为最大文本宽度
-    max_text_width = int(video_width * 0.95)
-
     def process_dialogue_line(match):
         """处理每一行对话"""
         full_line = match.group(0)
@@ -235,11 +228,14 @@ def auto_wrap_ass_file(
 
         # 获取该样式对应的字体信息
         style = ass_info.get_style(style_name)
+        
+        # 可用文本宽度 = 视频宽度 - 左右边距
+        available_width = video_width - style.margin_l - style.margin_r
         text_part = match.group(1)
 
         # 使用实际字体渲染进行换行（考虑字符间距）
         wrapped_text = wrap_ass_text(
-            text_part, max_text_width, style.font_name, style.font_size, style.spacing, fonts_dir=fonts_dir
+            text_part, available_width, style.font_name, style.font_size, style.spacing, fonts_dir=fonts_dir
         )
 
         return full_line.replace(text_part, wrapped_text)

@@ -13,6 +13,7 @@ from PIL import Image, ImageDraw
 from vat.subtitle_utils.entities import SubtitleLayoutEnum
 from vat.utils.logger import setup_logger
 
+from .scale_utils import compute_subtitle_scale_factor
 from .font_utils import FontType, get_font
 from .styles import RoundedBgStyle
 from .text_utils import hex_to_rgba, wrap_text
@@ -206,8 +207,8 @@ def render_preview(
     # 确保 width 和 height 不为 None（类型收窄）
     assert width is not None and height is not None
 
-    # 从样式中获取参考高度，根据图片高度自动缩放样式
-    scale_factor = height / reference_height
+    # 根据图片分辨率自动缩放样式（竖屏按宽度缩放）
+    scale_factor = compute_subtitle_scale_factor(width, height, reference_height)
 
     if scale_factor != 1.0:
         style = replace(
@@ -283,7 +284,7 @@ def render_rounded_video(
     style_config["layout"] = layout
     style = RoundedBgStyle(**style_config)
 
-    scale_factor = height / reference_height
+    scale_factor = compute_subtitle_scale_factor(width, height, reference_height)
     if scale_factor != 1.0:
         style = replace(
             style,

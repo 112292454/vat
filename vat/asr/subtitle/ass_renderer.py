@@ -13,6 +13,7 @@ from PIL import Image
 from vat.subtitle_utils.entities import SubtitleLayoutEnum
 from vat.utils.logger import setup_logger
 
+from .scale_utils import compute_subtitle_scale_factor
 from .ass_utils import auto_wrap_ass_file
 
 if TYPE_CHECKING:
@@ -133,8 +134,8 @@ def render_ass_preview(
             f"Dialogue: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,{original_text}"
         ]
 
-    # 从 ASS 内容中提取参考高度，根据图片高度自动缩放样式
-    scale_factor = height / reference_height
+    # 根据视频/图片分辨率自动缩放样式（竖屏按宽度缩放）
+    scale_factor = compute_subtitle_scale_factor(width, height, reference_height)
     style_str = _scale_ass_style(style_str, scale_factor)
 
     # 生成 ASS 内容
@@ -266,8 +267,8 @@ def render_ass_video(
     # 获取视频分辨率
     width, height = _get_video_resolution(video_path)
 
-    # 根据视频高度自动缩放样式
-    scale_factor = height / reference_height
+    # 根据视频分辨率自动缩放样式（竖屏按宽度缩放）
+    scale_factor = compute_subtitle_scale_factor(width, height, reference_height)
     style_str = _scale_ass_style(style_str, scale_factor)
 
     # 生成临时 ASS 文件（传入实际视频分辨率）

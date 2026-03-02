@@ -302,10 +302,26 @@ class FFmpegWrapper:
             return int(match.group(1)), int(match.group(2))
         return 1920, 1080  # 默认返回 1080P
     
-    def _scale_ass_style(self, style_str: str, scale_factor: float) -> str:
-        """缩放 ASS 样式中的数值参数"""
-        if scale_factor == 1.0:
+    def _scale_ass_style(
+        self, style_str: str, scale_factor: float,
+        video_width: int = 0, video_height: int = 0,
+    ) -> str:
+        """缩放 ASS 样式中的数值参数
+        
+        竖屏额外调整：
+        - MarginV：在缩放基础上再翻倍（模板值 * scale * 2）
+        - MarginL/R：至少保证 5% 视频宽度，防止文字贴边
+        
+        Args:
+            style_str: ASS 样式字符串
+            scale_factor: 字体等通用缩放因子
+            video_width: 视频宽度（用于判断横竖屏，0=不做竖屏特殊处理）
+            video_height: 视频高度
+        """
+        if scale_factor == 1.0 and not (video_height > video_width > 0):
             return style_str
+        
+        is_portrait = video_height > video_width > 0
         
         lines = style_str.split("\n")
         scaled_lines = []
@@ -320,8 +336,23 @@ class FFmpegWrapper:
                     parts[13] = str(float(parts[13]) * scale_factor)
                     # parts[16]: Outline
                     parts[16] = str(float(parts[16]) * scale_factor)
-                    # parts[21]: MarginV (垂直间距)
-                    parts[21] = str(int(float(parts[21]) * scale_factor))
+                    # parts[19]: MarginL
+                    parts[19] = str(int(float(parts[19]) * scale_factor))
+                    # parts[20]: MarginR
+                    parts[20] = str(int(float(parts[20]) * scale_factor))
+                    # parts[21]: MarginV
+                    scaled_mv = int(float(parts[21]) * scale_factor)
+                    
+                    if is_portrait:
+                        # 竖屏：MarginV 在缩放基础上再翻倍
+                        scaled_mv *= 2
+                        # 竖屏：MarginL/R 至少 5% 视频宽度，防止文字贴边
+                        min_margin = int(video_width * 0.05)
+                        parts[19] = str(max(int(parts[19]), min_margin))
+                        parts[20] = str(max(int(parts[20]), min_margin))
+                    
+                    parts[21] = str(scaled_mv)
+                    
                     line = ",".join(parts)
             scaled_lines.append(line)
         
@@ -395,7 +426,7 @@ class FFmpegWrapper:
         if subtitle_ext == '.ass' and subtitle_style:
             try:
                 from vat.asr import ASRData
-                from vat.asr.subtitle import get_subtitle_style, auto_wrap_ass_file
+                from vat.asr.subtitle import get_subtitle_style, auto_wrap_ass_file, compute_subtitle_scale_factor
                 
                 # Step 1: 获取视频分辨率，用于样式缩放
                 width, height = self._get_video_resolution(video_path)
@@ -406,8 +437,11 @@ class FFmpegWrapper:
                     logger.warning(f"无法加载样式 '{subtitle_style}'，使用默认样式")
                     style_str = get_subtitle_style("default", style_dir=style_dir) or ""
                 
-                scale_factor = height / reference_height
-                style_str = self._scale_ass_style(style_str, scale_factor)
+                scale_factor = compute_subtitle_scale_factor(width, height, reference_height)
+                style_str = self._scale_ass_style(
+                    style_str, scale_factor,
+                    video_width=width, video_height=height,
+                )
                 
                 # Step 3: 加载字幕数据并重新生成 ASS
                 asr_data = ASRData.from_subtitle_file(str(subtitle_path))

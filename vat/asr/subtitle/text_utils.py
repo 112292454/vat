@@ -9,6 +9,11 @@ from .font_utils import FontType
 _NO_SPACE_LANGUAGES = r"[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af\u0e00-\u0eff\u1000-\u109f\u1780-\u17ff\u0900-\u0dff]"
 
 
+def has_cjk(text: str) -> bool:
+    """Check if text contains ANY CJK or Asian characters (for wrapping strategy)"""
+    return bool(re.search(_NO_SPACE_LANGUAGES, text)) if text else False
+
+
 def is_mainly_cjk(text: str, threshold: float = 0.5) -> bool:
     """Check if text is mainly CJK or Asian languages without spaces"""
     if not text:
@@ -88,29 +93,54 @@ def wrap_text(
     """
     available_width = max_width - horizontal_padding * 2 - extra_margin
 
-    # 检测是否主要是 CJK 字符
-    if is_mainly_cjk(text):
+    # 含任何 CJK 字符的文本用字符级换行（正确处理中英混合）
+    # 纯英文才用词级换行
+    if has_cjk(text):
         return _wrap_cjk_balanced(text, font, available_width, spacing)
     else:
         return _wrap_english_balanced(text, font, available_width, spacing)
 
 
+def _tokenize_mixed(text: str) -> List[str]:
+    """将混合文本分为 token 列表：CJK 字符单独为 token，连续非 CJK 字符（英文单词等）为一个 token"""
+    tokens = []
+    current_non_cjk = ""
+    cjk_re = re.compile(_NO_SPACE_LANGUAGES)
+    for char in text:
+        if cjk_re.match(char):
+            if current_non_cjk:
+                tokens.append(current_non_cjk)
+                current_non_cjk = ""
+            tokens.append(char)
+        else:
+            current_non_cjk += char
+    if current_non_cjk:
+        tokens.append(current_non_cjk)
+    return tokens
+
+
 def _wrap_cjk_balanced(
     text: str, font: FontType, available_width: int, spacing: float = 0.0
 ) -> List[str]:
-    """Wrap CJK text with balanced line lengths"""
+    """Wrap CJK/mixed text with balanced line lengths
+    
+    对混合文本（中英混合），英文单词作为不可分割单元，CJK 字符可逐字断开。
+    """
+    tokens = _tokenize_mixed(text)
+    if not tokens:
+        return [text]
 
     # Step 1: Calculate minimum required lines using greedy algorithm
     temp_lines = []
     current_line = ""
-    for char in text:
-        test_line = current_line + char
+    for token in tokens:
+        test_line = current_line + token
         if _calculate_text_width(test_line, font, spacing) <= available_width:
             current_line = test_line
         else:
             if current_line:
                 temp_lines.append(current_line)
-            current_line = char
+            current_line = token
     if current_line:
         temp_lines.append(current_line)
 
@@ -126,15 +156,13 @@ def _wrap_cjk_balanced(
     num_lines = len(temp_lines)
     target_width = total_text_width / num_lines
 
-    # Step 3: Redistribute text to achieve balanced lines
-    # Important: Do not exceed the minimum line count from greedy algorithm
+    # Step 3: Redistribute tokens to achieve balanced lines
     lines = []
     current_line = ""
-    for i, char in enumerate(text):
-        test_line = current_line + char
+    for i, token in enumerate(tokens):
+        test_line = current_line + token
         current_width = _calculate_text_width(test_line, font, spacing)
 
-        # Check if we should break the line
         should_break = False
 
         if current_width > available_width:
@@ -145,11 +173,8 @@ def _wrap_cjk_balanced(
             and current_line
             and current_width >= target_width * 0.9
         ):
-            # Only balance if we haven't reached the minimum line count yet
-            # Close to target width (90% threshold)
-            # Check if next char would significantly exceed target
-            if i + 1 < len(text):
-                next_test = test_line + text[i + 1]
+            if i + 1 < len(tokens):
+                next_test = test_line + tokens[i + 1]
                 next_width = _calculate_text_width(next_test, font, spacing)
                 if next_width > target_width * 1.1:
                     should_break = True
@@ -157,7 +182,7 @@ def _wrap_cjk_balanced(
         if should_break:
             if current_line:
                 lines.append(current_line)
-                current_line = char
+                current_line = token
             else:
                 current_line = test_line
         else:

@@ -268,7 +268,7 @@ class TestToolsTaskTypes(TestCase):
         expected = {
             'fix-violation', 'sync-playlist', 'refresh-playlist',
             'retranslate-playlist', 'upload-sync', 'update-info',
-            'sync-db', 'season-sync',
+            'sync-db', 'season-sync', 'watch',
         }
         self.assertEqual(TOOLS_TASK_TYPES, expected)
 

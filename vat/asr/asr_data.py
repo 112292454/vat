@@ -855,8 +855,12 @@ class ASRData:
                 return False
 
         all_four_lines = all(len(b.splitlines()) == 4 for b in blocks)
+        sample = blocks[:50]
+        sample_size = len(sample)
         is_bilingual = (
-            all_four_lines and sum(map(is_different_lang, blocks[:50])) / 50 >= 0.7
+            sample_size > 0
+            and all_four_lines
+            and sum(map(is_different_lang, sample)) / sample_size >= 0.7
         )
 
         # Process all blocks based on detected mode

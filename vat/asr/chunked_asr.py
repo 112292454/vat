@@ -48,6 +48,7 @@ _MEMORY_CHECK_INTERVAL_SEC = 20   # 显存不足时的重试间隔（秒）
 _OOM_MAX_RETRIES = 3              # 单个 chunk OOM 最大重试次数
 _OOM_COOLDOWN_SEC = 10            # OOM 后冷却等待时间（秒）
 _WORKER_QUEUE_TIMEOUT_SEC = 2     # worker 从队列取任务的超时时间（秒）
+_EMPTY_CHUNK_MAX_RETRIES = 2     # 空 chunk 结果最大重试次数（重试后仍为空则视为真正无语音）
 
 
 def _get_available_gpu_count() -> int:
@@ -481,11 +482,15 @@ class ChunkedASR:
                 p.start()
                 workers.append(p)
             
-            # 5. 收集结果
-            completed = 0
+            # 5. 收集结果（含空 chunk 自动重试）
+            # empty_retry_count[chunk_idx] 记录该 chunk 已因空结果重试的次数
+            empty_retry_count = [0] * total_chunks
+            # expected_results: 还需要收到的结果数（初始 = total_chunks，重试时增加）
+            expected_results = total_chunks
+            received_results = 0
             failed_chunks = []
             
-            while completed < total_chunks:
+            while received_results < expected_results:
                 try:
                     result = result_queue.get(timeout=600)  # 10分钟超时（单个 chunk 最长处理时间）
                 except queue.Empty:
@@ -493,17 +498,17 @@ class ChunkedASR:
                     alive_workers = [w for w in workers if w.is_alive()]
                     if not alive_workers:
                         logger.error(
-                            f"所有 worker 已退出，但只收到 {completed}/{total_chunks} 个结果"
+                            f"所有 worker 已退出，但只收到 {received_results}/{expected_results} 个结果"
                         )
                         break
                     logger.warning(
-                        f"等待结果超时，已完成 {completed}/{total_chunks}，"
+                        f"等待结果超时，已完成 {received_results}/{expected_results}，"
                         f"存活 worker: {len(alive_workers)}"
                     )
                     continue
                 
                 idx = result['chunk_idx']
-                completed += 1
+                received_results += 1
                 
                 if result['error']:
                     logger.error(f"Chunk {idx} 最终失败: {result['error']}")
@@ -519,11 +524,26 @@ class ChunkedASR:
                         for seg in result['segments']
                     ]
                     results[idx] = ASRData(segments)
+                    
+                    # 空 chunk 自动重试：结果为空且未超过重试次数，重新入队
+                    if len(segments) == 0 and empty_retry_count[idx] < _EMPTY_CHUNK_MAX_RETRIES:
+                        empty_retry_count[idx] += 1
+                        logger.warning(
+                            f"⚠️ Chunk {idx} ({chunks[idx][1]/1000:.0f}s-"
+                            f"{(chunks[idx][1] + self.chunk_length_ms)/1000:.0f}s) "
+                            f"转录结果为空，自动重试 ({empty_retry_count[idx]}/{_EMPTY_CHUNK_MAX_RETRIES})"
+                        )
+                        chunk_queue.put((idx, temp_files[idx], 0))
+                        expected_results += 1
+                        continue
+                    
                     logger.info(f"Chunk {idx+1}/{total_chunks} 完成 ({len(segments)} 片段)")
                 
                 if callback:
-                    progress = int(completed / total_chunks * 100)
-                    callback(progress, f"已完成 {completed}/{total_chunks} 块")
+                    # 进度只基于首次完成的 chunk 数
+                    done_count = sum(1 for r in results if r is not None)
+                    progress = int(done_count / total_chunks * 100)
+                    callback(progress, f"已完成 {done_count}/{total_chunks} 块")
             
             # 6. 发送哨兵值通知 worker 退出
             for _ in workers:
@@ -554,6 +574,20 @@ class ChunkedASR:
                 raise RuntimeError(
                     f"多 GPU 转录失败: {len(failed_chunks)}/{total_chunks} 个 chunk 失败 "
                     f"(chunk 索引: {failed_chunks})"
+                )
+            
+            # 8. 最终空 chunk 警告（经过自动重试后仍为空）
+            final_empty = [i for i, r in enumerate(results) if r is not None and len(r.segments) == 0]
+            if final_empty:
+                chunk_details = ", ".join(
+                    f"chunk {i} ({chunks[i][1]/1000:.0f}s-{(chunks[i][1] + self.chunk_length_ms)/1000:.0f}s, "
+                    f"重试{empty_retry_count[i]}次)"
+                    for i in final_empty
+                )
+                logger.warning(
+                    f"⚠️ 经过自动重试，仍有 {len(final_empty)}/{total_chunks} 个 chunk "
+                    f"转录结果为空（确认为真正无语音或持续性异常）: {chunk_details}。"
+                    f"这些时间段的字幕将缺失。"
                 )
             
             logger.info(f"多进程转录完成，共 {total_chunks} 块")
@@ -622,7 +656,11 @@ class ChunkedASR:
         chunks: List[Tuple[bytes, int]],
         callback: Optional[Callable[[int, str], None]],
     ) -> List[ASRData]:
-        """使用线程池转录（单 GPU 场景，原有逻辑）"""
+        """使用线程池转录（单 GPU 场景，原有逻辑）
+        
+        空 chunk 自动重试：如果某个 chunk 转录成功但返回 0 segments，
+        最多自动重试 _EMPTY_CHUNK_MAX_RETRIES 次。连续多次为空才视为真正无语音。
+        """
         results: List[Optional[ASRData]] = [None] * len(chunks)
         total_chunks = len(chunks)
 
@@ -667,6 +705,46 @@ class ChunkedASR:
                 idx, asr_data = future.result()
                 results[idx] = asr_data
 
+        # 空 chunk 自动重试：whisper 偶尔会因 GPU 瞬时错误返回空结果，重试通常能恢复
+        empty_chunks = [i for i, r in enumerate(results) if r is not None and len(r.segments) == 0]
+        for retry_round in range(1, _EMPTY_CHUNK_MAX_RETRIES + 1):
+            if not empty_chunks:
+                break
+            chunk_details = ", ".join(
+                f"chunk {i} ({chunks[i][1]/1000:.0f}s-{(chunks[i][1] + self.chunk_length_ms)/1000:.0f}s)"
+                for i in empty_chunks
+            )
+            logger.warning(
+                f"⚠️ 第 {retry_round} 次重试: {len(empty_chunks)}/{total_chunks} 个 chunk 转录结果为空: "
+                f"{chunk_details}"
+            )
+            
+            # 重试空 chunk
+            retry_futures = {}
+            with ThreadPoolExecutor(max_workers=min(self.chunk_concurrency, len(empty_chunks))) as executor:
+                for i in empty_chunks:
+                    chunk_bytes, offset = chunks[i]
+                    retry_futures[executor.submit(asr_single_chunk, i, chunk_bytes, offset)] = i
+                
+                for future in as_completed(retry_futures):
+                    idx, asr_data = future.result()
+                    results[idx] = asr_data
+            
+            # 重新检查
+            empty_chunks = [i for i, r in enumerate(results) if r is not None and len(r.segments) == 0]
+        
+        # 最终仍有空 chunk：发出严重警告
+        if empty_chunks:
+            chunk_details = ", ".join(
+                f"chunk {i} ({chunks[i][1]/1000:.0f}s-{(chunks[i][1] + self.chunk_length_ms)/1000:.0f}s)"
+                for i in empty_chunks
+            )
+            logger.warning(
+                f"⚠️ 经过 {_EMPTY_CHUNK_MAX_RETRIES} 次重试，仍有 {len(empty_chunks)}/{total_chunks} 个 chunk "
+                f"转录结果为空（确认为真正无语音或持续性异常）: {chunk_details}。"
+                f"这些时间段的字幕将缺失。"
+            )
+        
         logger.info(f"所有 {total_chunks} 个块转录完成")
         return [r for r in results if r is not None]
 

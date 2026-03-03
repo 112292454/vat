@@ -80,6 +80,8 @@ _RETRY_MAX_TOTAL_SEC = 1800      # 最大总等待时间（30分钟）
 
 # 直播等待参数
 _LIVE_POLL_INTERVAL_SEC = 120    # 轮询直播状态的间隔（秒）
+_LIVE_FROM_START_MAX_RETRIES = 3 # live_from_start 因 fragment 错误失败时的最大重试次数
+_LIVE_FROM_START_RETRY_WAIT = 30 # live_from_start 重试间隔（秒）
 _LIVE_FRAGMENT_ERROR_PATTERNS = [
     r'fragment \d+ not found',
     r'unable to continue',
@@ -502,8 +504,9 @@ class YouTubeDownloader(PlatformDownloader):
         """处理直播视频的下载策略
         
         三阶段策略（在 download 步骤内阻塞，对上层透明）：
-        1. 尝试 live_from_start：如果直播刚开始，早期分片仍在 CDN，可从头完整下载
-        2. 如果 fragment 错误（早期分片已被 CDN 清除）：阻塞轮询等待直播结束
+        1. 尝试 live_from_start（带重试）：fragment 错误可能是 SSL/网络瞬态问题导致
+           yt-dlp 误判分片不存在，因此需要重试而非一次失败就放弃
+        2. 重试耗尽仍失败：阻塞轮询等待直播结束
         3. 直播结束后：作为普通 VOD 下载完整视频
         
         Args:
@@ -514,33 +517,56 @@ class YouTubeDownloader(PlatformDownloader):
             download_subs: 是否下载字幕
             sub_langs: 字幕语言列表
         """
-        # === 阶段 1：尝试 live_from_start ===
+        # === 阶段 1：尝试 live_from_start（带重试） ===
+        # fragment 错误常由 SSL/网络瞬态问题导致（如 EOF occurred in violation of protocol），
+        # yt-dlp 误判为分片不存在。重试通常能成功。
         live_opts = {**ydl_opts, 'live_from_start': True}
-        try:
-            logger.info(f"[直播] 尝试 live_from_start 从开头下载: {video_id}")
-            with YoutubeDL(live_opts) as ydl:
-                ret_code = ydl.download([url])
-            if ret_code == 0:
-                logger.info(f"[直播] live_from_start 成功完成: {video_id}")
-                return
-            # 非零返回码但没有异常，检查文件是否已存在（可能是字幕下载失败等非致命错误）
-            for ext in ['mp4', 'webm', 'mkv']:
-                if (output_dir / f"{video_id}.{ext}").exists():
-                    logger.info(f"[直播] live_from_start 返回码 {ret_code}，但视频文件已存在")
-                    return
-            logger.warning(f"[直播] live_from_start 返回码 {ret_code}，视频文件不存在，进入等待模式")
-        except Exception as e:
-            error_msg = str(e)
-            if self._is_live_fragment_error(error_msg):
-                logger.warning(
-                    f"[直播] live_from_start 失败（早期分片已被 CDN 清除）: {error_msg[:120]}。"
-                    f"将等待直播结束后下载完整 VOD。"
-                )
-            else:
-                # 非 fragment 错误（网络/认证等），正常抛出
-                raise RuntimeError(f"直播下载失败: {error_msg}") from e
+        last_error = None
         
-        # 清理 live_from_start 失败留下的残留文件
+        for attempt in range(1, _LIVE_FROM_START_MAX_RETRIES + 1):
+            # 每次重试前清理上次的残留文件
+            if attempt > 1:
+                self._clean_partial_downloads(output_dir, video_id)
+                logger.info(
+                    f"[直播] live_from_start 第 {attempt}/{_LIVE_FROM_START_MAX_RETRIES} 次重试，"
+                    f"等待 {_LIVE_FROM_START_RETRY_WAIT}s..."
+                )
+                time.sleep(_LIVE_FROM_START_RETRY_WAIT)
+            
+            try:
+                logger.info(f"[直播] 尝试 live_from_start 从开头下载: {video_id} (第 {attempt} 次)")
+                with YoutubeDL(live_opts) as ydl:
+                    ret_code = ydl.download([url])
+                if ret_code == 0:
+                    logger.info(f"[直播] live_from_start 成功完成: {video_id}")
+                    return
+                # 非零返回码但没有异常，检查文件是否已存在
+                for ext in ['mp4', 'webm', 'mkv']:
+                    if (output_dir / f"{video_id}.{ext}").exists():
+                        logger.info(f"[直播] live_from_start 返回码 {ret_code}，但视频文件已存在")
+                        return
+                logger.warning(f"[直播] live_from_start 返回码 {ret_code}，视频文件不存在")
+                last_error = f"yt-dlp 返回码 {ret_code}"
+            except Exception as e:
+                error_msg = str(e)
+                last_error = error_msg
+                if self._is_live_fragment_error(error_msg):
+                    logger.warning(
+                        f"[直播] live_from_start 第 {attempt} 次失败（fragment 错误，"
+                        f"可能是网络瞬态问题）: {error_msg[:120]}"
+                    )
+                    continue  # 重试
+                else:
+                    # 非 fragment 错误（认证/永久性错误），不重试
+                    raise RuntimeError(f"直播下载失败: {error_msg}") from e
+        
+        # 所有重试耗尽，进入等待模式
+        logger.warning(
+            f"[直播] live_from_start {_LIVE_FROM_START_MAX_RETRIES} 次重试均失败，"
+            f"最后错误: {last_error[:120]}。将等待直播结束后下载完整 VOD。"
+        )
+        
+        # 清理残留文件
         self._clean_partial_downloads(output_dir, video_id)
         
         # === 阶段 2：阻塞等待直播结束 ===
@@ -548,7 +574,6 @@ class YouTubeDownloader(PlatformDownloader):
         
         # === 阶段 3：直播结束，作为普通 VOD 下载 ===
         logger.info(f"[直播] 直播已结束，开始下载完整 VOD: {video_id}")
-        # 重新构建 opts（直播结束后不需要 live_from_start，按普通视频下载）
         vod_opts = self._get_ydl_opts(output_dir, download_subs=download_subs, sub_langs=sub_langs)
         self._download_with_retry(url, vod_opts, video_id)
     

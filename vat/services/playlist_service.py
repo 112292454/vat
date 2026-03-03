@@ -253,11 +253,14 @@ class PlaylistService:
                         info = result.info
                         metadata = video.metadata or {}
                         metadata['upload_date'] = result.upload_date
-                        metadata['duration'] = info.get('duration', 0)
-                        metadata['thumbnail'] = info.get('thumbnail', '')
-                        metadata['uploader'] = info.get('uploader', '')
-                        metadata['view_count'] = info.get('view_count', 0)
-                        metadata['like_count'] = info.get('like_count', 0)
+                        metadata['duration'] = info.get('duration') or 0
+                        metadata['thumbnail'] = info.get('thumbnail') or ''
+                        # uploader: 仅在新值非空时覆盖（保护 sync 时从 channel 设置的 fallback）
+                        new_uploader = info.get('uploader') or ''
+                        if new_uploader:
+                            metadata['uploader'] = new_uploader
+                        metadata['view_count'] = info.get('view_count') or 0
+                        metadata['like_count'] = info.get('like_count') or 0
                         # 成功获取时，清除可能存在的错误 unavailable 标记
                         metadata.pop('unavailable', None)
                         metadata.pop('upload_date_interpolated', None)

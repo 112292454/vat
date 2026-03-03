@@ -235,8 +235,17 @@ async def retranslate_video_info(video_id: str, db: Database = Depends(get_db)):
             'title': video.title or '',
             'description': metadata.get('description', ''),
             'tags': metadata.get('tags', []),
-            'uploader': metadata.get('uploader', ''),
+            'uploader': metadata.get('uploader') or '',
         }
+    
+    # uploader fallback：如果视频 metadata 中缺失，从所属 playlist 的 channel 获取
+    if not video_info.get('uploader'):
+        playlists = db.get_video_playlists(video_id)
+        for pl_id in playlists:
+            pl = db.get_playlist(pl_id)
+            if pl and pl.channel:
+                video_info['uploader'] = pl.channel
+                break
     
     if not video_info.get('title'):
         raise HTTPException(400, "视频缺少标题信息，无法翻译")

@@ -191,10 +191,12 @@ class PlaylistService:
                             playlist_id=playlist_id,
                             playlist_index=index,
                             metadata={
-                                'duration': entry.get('duration', 0),
-                                'uploader': entry.get('uploader', channel),
-                                'thumbnail': entry.get('thumbnail', ''),
-                                'upload_date': entry.get('upload_date', ''),  # YYYYMMDD 格式
+                                'duration': entry.get('duration') or 0,
+                                # flat extract 的 entry 中 uploader key 存在但值为 None，
+                                # dict.get('uploader', channel) 不会 fallback，必须用 or
+                                'uploader': entry.get('uploader') or channel,
+                                'thumbnail': entry.get('thumbnail') or '',
+                                'upload_date': entry.get('upload_date') or '',
                             }
                         )
                         self.db.add_video(video)

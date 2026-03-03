@@ -1,6 +1,7 @@
 """
 YouTube下载器实现
 """
+import logging
 import re
 import time
 import hashlib
@@ -171,9 +172,14 @@ def _is_retryable_network_error(error_msg: str) -> bool:
 
 
 class YtDlpLogger:
-    """yt-dlp 日志适配器"""
-        # 需要降级为 debug 的 warning 关键词
-    WARNING_TO_DEBUG_KEYWORDS = [
+    """yt-dlp 日志适配器
+    
+    根据 logger 的实际级别动态决定输出：
+    - DEBUG 级别：输出所有 yt-dlp 日志（含内部调试、下载进度等）
+    - INFO 级别：只输出关键信息（下载目标、完成、错误），过滤进度刷屏
+    """
+    # 需要降级为 debug 的 warning 关键词（非关键性 warning）
+    _WARNING_TO_DEBUG_KEYWORDS = [
         'No supported JavaScript runtime',
         'JavaScript runtime',
         'SABR streaming',
@@ -182,26 +188,36 @@ class YtDlpLogger:
         'formats have been skipped',
         'has been deprecated',
     ]
+    
+    # info 级别下值得保留的关键信息模式
+    _INFO_KEEP_PREFIXES = [
+        '[download] Destination:',
+        '[download] 100%',
+        '[merger]',
+        '[ffmpeg]',
+    ]
+    
     def debug(self, msg):
-        # 忽略 yt-dlp 内部调试信息
-        if msg.startswith('[debug] '):
-            return
+        # DEBUG 级别：输出所有（含 [debug] 前缀的 yt-dlp 内部调试）
+        # INFO 级别：全部静默
         logger.debug(msg)
 
     def info(self, msg):
-        # 将 yt-dlp 的 info 降级为 debug，避免刷屏
-        # 除非是关键信息
-        if msg.startswith('[download] Destination:'):
-            logger.info(msg)
-        elif msg.startswith('[download] 100%'):
-            logger.info(msg)
-        else:
-            logger.debug(msg)
+        # DEBUG 级别：全量输出
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(f"[yt-dlp] {msg}")
+            return
+        # INFO 级别：只保留关键信息
+        for prefix in self._INFO_KEEP_PREFIXES:
+            if msg.startswith(prefix):
+                logger.info(msg)
+                return
+        # 其余静默（进度百分比、格式选择等）
 
     def warning(self, msg):
         # 将常见的非关键 warning 降级为 debug
         msg_lower = msg.lower()
-        for keyword in self.WARNING_TO_DEBUG_KEYWORDS:
+        for keyword in self._WARNING_TO_DEBUG_KEYWORDS:
             if keyword.lower() in msg_lower:
                 logger.debug(msg)
                 return

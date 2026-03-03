@@ -519,7 +519,12 @@ Watch 发现新视频后的任务提交方式：
 
 ### 已知限制与未来规划
 
-- **直播视频处理**：当 watch 检测到正在直播的视频时，yt-dlp 会通过 HLS 实时录制直播流，download 阶段会阻塞直到直播结束。当前行为可接受（直播结束后自动完成下载并进入后续处理），但会长时间占用 process job。流式 pipeline 等长期优化方向见 [future.md](future.md)。
+- **直播视频处理**：当 download 阶段检测到视频正在直播时，采用三阶段策略（在 download 步骤内阻塞，对上层透明）：
+  1. **尝试 `live_from_start`**：如果直播刚开始，早期 HLS 分片仍在 YouTube CDN，可从头完整下载直到直播结束
+  2. **等待直播结束**：如果 `live_from_start` 因早期分片被 CDN 清除而报 `fragment N not found`，则进入轮询等待模式（每 2 分钟检查一次直播状态）
+  3. **VOD 下载**：直播结束后，作为普通视频下载完整 VOD
+  
+  这意味着 download 阶段可能会长时间阻塞（直到直播结束），占用 process job。流式 pipeline 等长期优化方向见 [future.md](future.md)。
 
 ### 涉及的文件
 

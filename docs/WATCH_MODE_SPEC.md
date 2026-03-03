@@ -517,6 +517,11 @@ Watch 发现新视频后的任务提交方式：
 4. **Watch 通过 JobManager 提交 process job**：`WatchService` 通过 `JobManager.submit_job(task_type='process')` 提交处理任务，而非直接 `subprocess.Popen`。这样 watch 提交的处理任务在 `web_jobs` 表有正式记录，WebUI 可见、可追踪、可取消。Watch 只做轻量编排（sync → filter → submit），不干涉处理流程内部。WebUI 通过 `JobManager` 提交 `watch` tools 任务来启动 watch 进程本身。
 5. **视频候选范围修复**：`_get_processable_videos` 只接收 sync 报告的新增视频 ID，不再扫描全量 playlist（旧实现导致首次 watch 提交数千视频）。retry 范围限定为本 session 提交过的视频，防止历史失败被大规模重试。额外增加安全上限（代码硬上限 50 + 配置默认 20）。
 
+### 已知限制与未来规划
+
+- **直播视频处理**：当 watch 检测到正在直播的视频时，yt-dlp 会通过 HLS 实时录制直播流，download 阶段会阻塞直到直播结束。当前行为可接受（直播结束后自动完成下载并进入后续处理），但会长时间占用 process job。
+- **（未来）流式 pipeline**：当前 pipeline 各阶段（download → whisper → translate → ...）是严格顺序执行的。未来可改为流式处理：边下载边做 ASR，边 ASR 边翻译，适用于直播实时处理场景。改动范围较大，仅作规划记录。
+
 ### 涉及的文件
 
 - `vat/utils/resource_lock.py` — 跨进程资源锁

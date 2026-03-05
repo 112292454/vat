@@ -154,7 +154,7 @@ bilibili:
   templates:
     custom_vars:
       brand: 全熟
-      project_url: https://github.com/112292454/VAT
+      project_url: https://github.com/112292454/Video-Auto-Translator
 ```
 
 模板中使用 `${brand}`、`${project_url}` 即可引用。

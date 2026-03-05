@@ -467,6 +467,16 @@ See [GPU Allocation Spec](docs/gpu_allocation_spec.md) for multi-GPU task distri
 
 ---
 
+## Related Work
+
+If you're interested in bridging graph structures with Transformer architectures, check out our research work:
+
+**[Graph Tokenization for Bridging Graphs and Transformers](https://github.com/BUPT-GAMMA/Graph-Tokenization-for-Bridging-Graphs-and-Transformers)**
+
+Exploring effective methods to convert graph-structured data into token sequences processable by Transformers.
+
+---
+
 ## Acknowledgments
 
 This project integrates content from or wraps calls to the following open-source projects:

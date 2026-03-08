@@ -441,6 +441,35 @@ class YouTubeDownloader(PlatformDownloader):
         if video_path.stat().st_size == 0:
             raise RuntimeError(f"下载的视频文件大小为0: {video_path}")
         
+        # ====== Phase 3: 元数据补全（针对 upcoming/live 视频） ======
+        # upcoming/live 视频在 Phase 1 extract_info 时元数据可能不完整
+        # （duration=0、description 为空等），下载完成后重新获取以补全
+        metadata_incomplete = (not duration) or (not description)
+        if metadata_incomplete:
+            logger.info(
+                f"检测到元数据不完整（duration={duration}, desc={'空' if not description else '有'}），"
+                f"重新获取视频信息以补全..."
+            )
+            try:
+                refreshed = self._extract_info_with_retry(url, extract_opts)
+                # 只补全缺失字段，不覆盖已有数据
+                if not duration and refreshed.get('duration'):
+                    duration = refreshed['duration']
+                    logger.info(f"补全 duration: {duration}s")
+                if not description and refreshed.get('description'):
+                    description = refreshed['description']
+                    logger.info(f"补全 description: {len(description)} 字符")
+                if not upload_date and refreshed.get('upload_date'):
+                    upload_date = refreshed['upload_date']
+                    logger.info(f"补全 upload_date: {upload_date}")
+                if not uploader and refreshed.get('uploader'):
+                    uploader = refreshed['uploader']
+                    logger.info(f"补全 uploader: {uploader}")
+                # 更新 info 用于后续 thumbnail 等字段
+                info.update({k: v for k, v in refreshed.items() if v and not info.get(k)})
+            except Exception as e:
+                logger.warning(f"元数据补全失败（不影响下载结果）: {e}")
+        
         # 查找下载的字幕文件
         subtitles = {}
         if download_subs:

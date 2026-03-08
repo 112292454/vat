@@ -79,8 +79,17 @@ _RETRY_MAX_WAIT_SEC = 300        # 单次最大等待（秒）
 _RETRY_BACKOFF_FACTOR = 2        # 退避倍数
 _RETRY_MAX_TOTAL_SEC = 1800      # 最大总等待时间（30分钟）
 
+# 预约/首播视频错误模式（yt-dlp 在 extract_info 阶段直接抛异常）
+# 这类视频尚无可下载内容，需要等待直播开始
+_UPCOMING_EVENT_PATTERNS = [
+    r'This live event will begin in',
+    r'Premieres in',
+    r'This video is not yet available',
+    r'Watch this video .* it premieres',
+]
+
 # 直播等待参数
-_LIVE_POLL_INTERVAL_SEC = 120    # 轮询直播状态的间隔（秒）
+_LIVE_POLL_INTERVAL_SEC = 600    # 轮询直播状态的间隔（秒）
 _LIVE_FROM_START_MAX_RETRIES = 3 # live_from_start 因 fragment 错误失败时的最大重试次数
 _LIVE_FROM_START_RETRY_WAIT = 30 # live_from_start 重试间隔（秒）
 _LIVE_FRAGMENT_ERROR_PATTERNS = [
@@ -136,12 +145,40 @@ class VideoInfoResult:
         return None
 
 
+def is_upcoming_event_error(error_msg: str) -> bool:
+    """判断错误是否表示视频为预约/首播状态（尚未开始）
+    
+    yt-dlp 对 upcoming 直播/首播视频在 extract_info 阶段直接抛异常，
+    此函数用于从异常信息中识别这类情况。
+    
+    Args:
+        error_msg: 错误信息字符串
+        
+    Returns:
+        True = 视频为预约/首播，尚未开始
+    """
+    for pattern in _UPCOMING_EVENT_PATTERNS:
+        if re.search(pattern, error_msg, re.IGNORECASE):
+            return True
+    return False
+
+
 class LiveStreamError(RuntimeError):
     """视频正在直播中，无法下载。
     
     YouTube 直播由 _download_live_stream 内部处理（live_from_start → 等待结束 → VOD），
     不会抛出此异常。此类保留用于非 YouTube 平台的直播场景。
     调用方应捕获此异常并将视频标记为"待重试"而非"失败"。
+    """
+    pass
+
+
+class VideoUpcomingError(RuntimeError):
+    """视频为预约/首播状态（is_upcoming），尚无实际内容可下载。
+    
+    YouTube 预约直播或首播（premiere）在开始前 live_status='is_upcoming'，
+    此时没有可下载的视频流。
+    调用方应捕获此异常并将视频标记为不可用（可后续重试）。
     """
     pass
 
@@ -331,7 +368,22 @@ class YouTubeDownloader(PlatformDownloader):
         ydl_opts = self._get_ydl_opts(output_dir, download_subs=download_subs, sub_langs=sub_langs)
         
         # ====== Phase 1: 提取视频信息（带网络重试） ======
-        info = self._extract_info_with_retry(url, ydl_opts)
+        # 预约/首播视频：yt-dlp 在 extract_info 就会抛 VideoUpcomingError，
+        # 此时阻塞轮询等待视频开始，类似直播等待机制
+        upcoming_poll_count = 0
+        while True:
+            try:
+                info = self._extract_info_with_retry(url, ydl_opts)
+                break  # 成功获取 info，跳出等待循环
+            except VideoUpcomingError as e:
+                upcoming_poll_count += 1
+                logger.info(
+                    f"[预约] 视频尚未开始: {e}. "
+                    f"第 {upcoming_poll_count} 次等待，"
+                    f"{_LIVE_POLL_INTERVAL_SEC}s 后重试..."
+                )
+                time.sleep(_LIVE_POLL_INTERVAL_SEC)
+                # 不设上限：预约视频可能在数小时后开始，持续等待直到可用
         
         video_id = info.get('id', '')
         if not video_id:
@@ -346,6 +398,9 @@ class YouTubeDownloader(PlatformDownloader):
         if not uploader:
             logger.warning(f"yt-dlp 未返回 uploader: {url}，翻译质量可能受影响")
         upload_date = info.get('upload_date', '')
+        
+        if upcoming_poll_count > 0:
+            logger.info(f"[预约] 视频已开始！等待了 {upcoming_poll_count} 次轮询，继续下载流程")
         
         # 记录可用字幕信息
         available_subs = list(info.get('subtitles', {}).keys())
@@ -442,6 +497,20 @@ class YouTubeDownloader(PlatformDownloader):
                 
             except Exception as e:
                 error_msg = str(e)
+                
+                # 调试：输出实际异常类型和消息
+                logger.debug(f"捕获异常: type={type(e).__name__}, msg={error_msg[:200]}")
+                
+                # 预约/首播视频：yt-dlp 在 extract_info 就会抛异常，
+                # 必须在网络重试判断之前检测，否则会被包装为通用 RuntimeError
+                if is_upcoming_event_error(error_msg):
+                    raise VideoUpcomingError(
+                        f"视频为预约/首播状态，尚未开始: {error_msg}"
+                    ) from e
+                
+                # 调试：如果不是 upcoming，输出为什么没匹配
+                if "live event will begin" in error_msg.lower() or "premieres in" in error_msg.lower():
+                    logger.warning(f"Upcoming 模式匹配失败，实际消息: {error_msg}")
                 
                 if not _is_retryable_network_error(error_msg):
                     # 不可重试（YouTube 限制等），立即失败
@@ -795,11 +864,20 @@ class YouTubeDownloader(PlatformDownloader):
                         'uploader': info.get('uploader', ''),
                         'upload_date': info.get('upload_date', ''),
                         'thumbnail': info.get('thumbnail', ''),
+                        'live_status': info.get('live_status'),
                         'url': url,
                     },
                 )
         except Exception as e:
             error_msg = str(e)
+            # 预约/首播视频：临时性错误，视频开始后会变为可用
+            # 返回 error 状态，不要伪造成 ok（upcoming 会变化，不是永久失败）
+            if is_upcoming_event_error(error_msg):
+                logger.info(f"视频为预约/首播状态（临时）: {url} — {error_msg}")
+                return VideoInfoResult(
+                    status='error',
+                    error_message=f"upcoming: {error_msg}",
+                )
             if is_video_permanently_unavailable(error_msg):
                 logger.info(f"视频永久不可用: {url} — {error_msg}")
                 return VideoInfoResult(

@@ -91,8 +91,9 @@ class VideoProcessor:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         
         # 音频临时目录：WAV 等过程性文件不放在 output_dir（用户可见目录），
-        # 而放在 cache_dir/audio_temp/{video_id}/（对用户不可见，仅作为 ASR 中间文件和缓存）
-        self._audio_temp_dir = Path(config.storage.cache_dir).expanduser() / "audio_temp" / video_id
+        # 而放在系统临时目录 /tmp/vat_audio/{video_id}/（系统重启后自动清理）
+        import tempfile
+        self._audio_temp_dir = Path(tempfile.gettempdir()) / "vat_audio" / video_id
         self._audio_temp_dir.mkdir(parents=True, exist_ok=True)
         
         # 设置GPU环境变量

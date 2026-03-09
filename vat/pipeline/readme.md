@@ -143,7 +143,7 @@ DEFAULT_STAGE_SEQUENCE = [
 │      └──▶ original.mp4 / <yt_id>.mp4  (下载/导入的视频)                  │
 │                 │                                                        │
 │  WHISPER        ▼                                                        │
-│      │     [cache_dir/audio_temp/<video>.wav]  (提取的音频，不在output中) │
+│      │     [/tmp/vat_audio/<video_id>/<video>.wav]  (系统临时目录，不在output中) │
 │      │                                                                   │
 │      └──▶ original_raw.srt          (原始 Whisper 转录)                  │
 │                 │                                                        │

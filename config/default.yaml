@@ -172,6 +172,9 @@ translator:
     model: "gemini-3-flash-preview"              # 翻译模型（使用全局 Google API）
     # api_key: ""                             # 留空 = 使用全局 llm 配置（Google API）
     # base_url: ""                            # 留空 = 使用全局 llm 配置（Google API）
+    # model: "kimi-k2.5"                          # 优化模型
+    # api_key: "${VAT_VOLC_APIKEY}"               # 火山引擎 API Key
+    # base_url: "https://ark.cn-beijing.volces.com/api/coding/v3"  # 火山引擎方舟 API
     enable_reflect: true                    # 反思翻译（启用后质量更高，但消耗更多 token）
     batch_size: 100                          # 每批处理的字幕数量
     thread_num: 10                           # 并发线程数
@@ -190,7 +193,7 @@ translator:
       api_key: "${VAT_VOLC_APIKEY}"               # 火山引擎 API Key
       base_url: "https://ark.cn-beijing.volces.com/api/coding/v3"  # 火山引擎方舟 API
       batch_size: 100                        # 覆写批大小（大 BS 减少 API 调用次数）
-      thread_num: 3                          # 覆写线程数（火山引擎建议低并发）
+      thread_num: 10                          # 覆写线程数（火山引擎建议低并发）
   
   
   # 本地模型配置

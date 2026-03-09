@@ -220,6 +220,8 @@ def _make_vp(tmp_path, force=False, video_metadata=None):
     vp._downloader = None
     vp._asr = None
     vp._ffmpeg = None
+    vp._playlist_id = None
+    vp._prompt_backup = None
 
     # 进度回调记录
     vp._log = []

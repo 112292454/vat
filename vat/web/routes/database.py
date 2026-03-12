@@ -80,7 +80,7 @@ async def query_table(
     page_size: int = Query(50, ge=1, le=500),
     search: Optional[str] = Query(None, description="全文搜索（跨所有文本列）"),
     sort_by: Optional[str] = Query(None, description="排序列名"),
-    sort_dir: str = Query("asc", regex="^(asc|desc)$"),
+    sort_dir: str = Query("asc", pattern="^(asc|desc)$"),
     column_filter: Optional[str] = Query(None, description="列名=值 格式的精确筛选"),
 ):
     """

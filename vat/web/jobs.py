@@ -8,6 +8,7 @@ import signal
 import subprocess
 import json
 import sqlite3
+import time
 from typing import Optional, List, Dict
 from dataclasses import dataclass
 from datetime import datetime
@@ -467,27 +468,61 @@ class JobManager:
             return [self._row_to_job(row) for row in cursor.fetchall()]
     
     def cancel_job(self, job_id: str) -> bool:
-        """取消任务（发送 SIGTERM）"""
+        """取消任务，并确认整个进程组真正退出。"""
         job = self.get_job(job_id)
         if not job or job.status != JobStatus.RUNNING or not job.pid:
             return False
         
         try:
-            os.kill(job.pid, signal.SIGTERM)
-            
-            with self._get_connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute("""
-                    UPDATE web_jobs 
-                    SET status = ?, finished_at = ?
-                    WHERE job_id = ?
-                """, (JobStatus.CANCELLED.value, datetime.now(), job_id))
-            
-            logger.info(f"任务已取消: {job_id}, PID: {job.pid}")
+            pgid = os.getpgid(job.pid)
+            os.killpg(pgid, signal.SIGTERM)
+
+            if self._wait_for_process_group_exit(pgid):
+                return self._mark_job_cancelled(job_id, job.pid)
+
+            logger.warning(f"任务进程组未在宽限期内退出，升级 SIGKILL: {job_id}, PGID: {pgid}")
+            os.killpg(pgid, signal.SIGKILL)
+            if self._wait_for_process_group_exit(pgid):
+                return self._mark_job_cancelled(job_id, job.pid)
+
+            logger.error(f"任务取消失败，进程组仍存活: {job_id}, PGID: {pgid}")
+            return False
+        except ProcessLookupError:
+            # 进程组已不存在，视为取消完成
+            return self._mark_job_cancelled(job_id, job.pid)
+
+    def _mark_job_cancelled(self, job_id: str, pid: int) -> bool:
+        """将任务标记为已取消。"""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                UPDATE web_jobs 
+                SET status = ?, finished_at = ?
+                WHERE job_id = ?
+            """, (JobStatus.CANCELLED.value, datetime.now(), job_id))
+        
+        logger.info(f"任务已取消: {job_id}, PID: {pid}")
+        return True
+
+    def _is_process_group_alive(self, pgid: int) -> bool:
+        """检查进程组是否仍存在。"""
+        try:
+            os.killpg(pgid, 0)
             return True
         except ProcessLookupError:
-            # 进程已结束
             return False
+        except PermissionError:
+            # 进程组存在但当前进程无权限发送信号。
+            return True
+
+    def _wait_for_process_group_exit(self, pgid: int, timeout_s: float = 5.0, poll_interval_s: float = 0.1) -> bool:
+        """等待进程组退出。"""
+        deadline = time.time() + timeout_s
+        while time.time() < deadline:
+            if not self._is_process_group_alive(pgid):
+                return True
+            time.sleep(poll_interval_s)
+        return not self._is_process_group_alive(pgid)
     
     def _parse_progress_from_log(self, log_file: str) -> float:
         """从日志中解析实时进度
@@ -631,8 +666,8 @@ class JobManager:
             return JobStatus.COMPLETED, None, 1.0
         
         # 查询所有相关视频的任务状态
-        # 对每个视频，检查请求步骤中是否有 failed 状态的任务
-        failed_videos = []  # [(video_id, failed_step, error_message)]
+        # 对每个视频，检查请求步骤中是否存在 failed / missing / incomplete。
+        failed_videos = []  # [(video_id, step, error_message)]
         completed_videos = []
         
         with self._get_connection() as conn:
@@ -668,7 +703,21 @@ class JobManager:
                         failed_videos.append((vid, step_name, info.get('error', '')))
                         break
                 
-                if not has_failed:
+                if has_failed:
+                    continue
+
+                incomplete_steps = []
+                for step_name in requested_steps:
+                    info = step_statuses.get(step_name, {})
+                    if info.get('status') != 'completed':
+                        incomplete_steps.append(step_name)
+
+                if incomplete_steps:
+                    step_name = incomplete_steps[0]
+                    failed_videos.append(
+                        (vid, step_name, f"步骤未完成或缺少任务记录: {step_name}")
+                    )
+                else:
                     completed_videos.append(vid)
         
         total = len(video_ids)

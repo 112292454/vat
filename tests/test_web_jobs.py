@@ -458,3 +458,149 @@ class TestTaskParamsPersistence:
         assert "--delay-start" in cmd
         idx = cmd.index("--delay-start")
         assert cmd[idx + 1] == "120"
+
+
+class TestProcessJobResultContracts:
+    @pytest.fixture
+    def env(self):
+        import sqlite3, shutil
+        tmpdir = tempfile.mkdtemp()
+        db_path = os.path.join(tmpdir, "test.db")
+        log_dir = os.path.join(tmpdir, "logs")
+        jm = JobManager(db_path, log_dir)
+        conn = sqlite3.connect(db_path)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS tasks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                video_id TEXT NOT NULL,
+                step TEXT NOT NULL,
+                status TEXT NOT NULL,
+                gpu_id INTEGER,
+                started_at TIMESTAMP,
+                completed_at TIMESTAMP,
+                error_message TEXT
+            )
+        """)
+        conn.commit()
+        conn.close()
+        yield jm, db_path
+        shutil.rmtree(tmpdir)
+
+    def _insert_job(self, jm, job_id, video_ids, steps, pid=1234):
+        import json
+        from datetime import datetime
+        with jm._get_connection() as conn:
+            conn.execute("""
+                INSERT INTO web_jobs (job_id, video_ids, steps, gpu_device, force, status, pid, created_at)
+                VALUES (?, ?, ?, 'auto', 0, 'running', ?, ?)
+            """, (job_id, json.dumps(video_ids), json.dumps(steps), pid, datetime.now().isoformat()))
+
+    def _insert_task(self, db_path, video_id, step, status, error_message=None):
+        import sqlite3
+        conn = sqlite3.connect(db_path)
+        conn.execute("""
+            INSERT INTO tasks (video_id, step, status, error_message) VALUES (?, ?, ?, ?)
+        """, (video_id, step, status, error_message))
+        conn.commit()
+        conn.close()
+
+    def test_determine_job_result_fails_when_no_task_records_exist(self, env):
+        jm, _ = env
+        self._insert_job(jm, "job1", ["v1"], ["download", "whisper"])
+        job = jm.get_job("job1")
+
+        status, error, progress = jm._determine_job_result(job)
+
+        assert status == JobStatus.FAILED
+        assert progress == 0.0
+        assert error is not None
+        assert "缺少" in error or "未完成" in error
+
+    def test_determine_job_result_marks_missing_videos_as_partial_failure(self, env):
+        jm, db_path = env
+        self._insert_job(jm, "job2", ["v1", "v2"], ["download", "whisper"])
+        self._insert_task(db_path, "v1", "download", "completed")
+        self._insert_task(db_path, "v1", "whisper", "completed")
+        job = jm.get_job("job2")
+
+        status, error, progress = jm._determine_job_result(job)
+
+        assert status == JobStatus.PARTIAL_COMPLETED
+        assert progress == 0.5
+        assert error is not None
+        assert "v2" in error
+
+
+class TestCancelJobContracts:
+    def test_cancel_job_terminates_process_group(self, job_env, monkeypatch):
+        jm, _, _ = job_env
+        from datetime import datetime
+        import json
+
+        with jm._get_connection() as conn:
+            conn.execute("""
+                INSERT INTO web_jobs (
+                    job_id, video_ids, steps, gpu_device, force, status, pid, created_at
+                ) VALUES (?, ?, ?, 'auto', 0, 'running', ?, ?)
+            """, ("job-cancel", json.dumps(["v1"]), json.dumps(["download"]), 4321, datetime.now().isoformat()))
+
+        killpg_calls = []
+        monkeypatch.setattr("vat.web.jobs.os.getpgid", lambda pid: 9876)
+        monkeypatch.setattr("vat.web.jobs.os.killpg", lambda pgid, sig: killpg_calls.append((pgid, sig)))
+        monkeypatch.setattr("vat.web.jobs.os.kill", lambda pid, sig: (_ for _ in ()).throw(AssertionError("should use killpg")))
+        monkeypatch.setattr("vat.web.jobs.JobManager._wait_for_process_group_exit", lambda _self, _pgid: True)
+
+        assert jm.cancel_job("job-cancel") is True
+        assert killpg_calls == [(9876, __import__("signal").SIGTERM)]
+
+    def test_cancel_job_escalates_to_sigkill_when_process_group_survives(self, job_env, monkeypatch):
+        jm, _, _ = job_env
+        from datetime import datetime
+        import json
+        import signal
+
+        with jm._get_connection() as conn:
+            conn.execute("""
+                INSERT INTO web_jobs (
+                    job_id, video_ids, steps, gpu_device, force, status, pid, created_at
+                ) VALUES (?, ?, ?, 'auto', 0, 'running', ?, ?)
+            """, ("job-kill", json.dumps(["v1"]), json.dumps(["download"]), 4322, datetime.now().isoformat()))
+
+        signals = []
+        wait_results = iter([False, True])
+
+        monkeypatch.setattr("vat.web.jobs.os.getpgid", lambda pid: 9999)
+        monkeypatch.setattr(
+            "vat.web.jobs.JobManager._wait_for_process_group_exit",
+            lambda _self, _pgid: next(wait_results),
+        )
+        monkeypatch.setattr(
+            "vat.web.jobs.os.killpg",
+            lambda pgid, sig: signals.append((pgid, sig)),
+        )
+
+        assert jm.cancel_job("job-kill") is True
+        assert signals == [(9999, signal.SIGTERM), (9999, signal.SIGKILL)]
+        assert jm.get_job("job-kill").status == JobStatus.CANCELLED
+
+    def test_cancel_job_does_not_mark_cancelled_when_group_still_alive(self, job_env, monkeypatch):
+        jm, _, _ = job_env
+        from datetime import datetime
+        import json
+
+        with jm._get_connection() as conn:
+            conn.execute("""
+                INSERT INTO web_jobs (
+                    job_id, video_ids, steps, gpu_device, force, status, pid, created_at
+                ) VALUES (?, ?, ?, 'auto', 0, 'running', ?, ?)
+            """, ("job-stubborn", json.dumps(["v1"]), json.dumps(["download"]), 4323, datetime.now().isoformat()))
+
+        monkeypatch.setattr("vat.web.jobs.os.getpgid", lambda pid: 7777)
+        monkeypatch.setattr(
+            "vat.web.jobs.JobManager._wait_for_process_group_exit",
+            lambda _self, _pgid: False,
+        )
+        monkeypatch.setattr("vat.web.jobs.os.killpg", lambda *_args, **_kwargs: None)
+
+        assert jm.cancel_job("job-stubborn") is False
+        assert jm.get_job("job-stubborn").status == JobStatus.RUNNING

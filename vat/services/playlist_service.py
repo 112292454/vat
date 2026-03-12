@@ -3,6 +3,7 @@ Playlist 管理服务
 
 提供 Playlist 的增量同步、视频排序等功能。
 """
+import re
 import time
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -21,6 +22,50 @@ if TYPE_CHECKING:
     from vat.config import Config
 
 logger = setup_logger("playlist_service")
+
+# YouTube channel tab URL 中 tab 路径到 playlist ID 后缀的映射
+# yt-dlp 对 channel tab URL 返回裸 channel ID（如 UCxxx），
+# 需要追加后缀（如 -shorts）以在 DB 中区分不同 tab 的 playlist。
+_CHANNEL_TAB_SUFFIX_MAP = {
+    'shorts': '-shorts',
+    'videos': '-videos',
+    'streams': '-streams',
+}
+
+# 匹配 YouTube channel tab URL 中的 tab 部分
+# 支持 /@handle/tab 和 /channel/UCxxx/tab 两种格式
+_CHANNEL_TAB_RE = re.compile(
+    r'youtube\.com/(?:@[^/]+|channel/[^/]+)/('
+    + '|'.join(_CHANNEL_TAB_SUFFIX_MAP.keys())
+    + r')(?:[/?#]|$)',
+    re.IGNORECASE,
+)
+
+
+def resolve_playlist_id(url: str, yt_playlist_id: str) -> str:
+    """从 YouTube URL 和 yt-dlp 返回的 playlist ID 推断正确的 DB playlist ID
+    
+    YouTube channel tab URL（如 /@channel/shorts）的 yt-dlp 返回裸 channel ID，
+    需要追加对应 tab 后缀（-shorts/-videos/-streams）。
+    普通 playlist URL（/playlist?list=PLxxx）不需要后缀。
+    
+    Args:
+        url: 原始 YouTube URL
+        yt_playlist_id: yt-dlp extract_info 返回的 playlist ID
+        
+    Returns:
+        带 tab 后缀的 playlist ID（如果是 channel tab URL），否则原样返回
+    """
+    m = _CHANNEL_TAB_RE.search(url)
+    if not m:
+        return yt_playlist_id
+    
+    tab = m.group(1).lower()
+    suffix = _CHANNEL_TAB_SUFFIX_MAP.get(tab, '')
+    if suffix and not yt_playlist_id.endswith(suffix):
+        return yt_playlist_id + suffix
+    return yt_playlist_id
+
 
 # 全局翻译线程池（限制并发避免 LLM API 过载）
 _translate_executor = ThreadPoolExecutor(max_workers=10, thread_name_prefix="translate_")
@@ -124,8 +169,9 @@ class PlaylistService:
         channel = playlist_info.get('uploader', '')
         channel_id = playlist_info.get('uploader_id', '')
         
-        # 使用显式指定的 playlist_id，或回退到 yt-dlp 返回的 ID
-        playlist_id = target_playlist_id or yt_playlist_id
+        # 使用显式指定的 playlist_id，或从 URL 推断 tab 后缀后回退到 yt-dlp ID
+        # （防止 channel tab URL 创建裸 channel ID 的 playlist）
+        playlist_id = target_playlist_id or resolve_playlist_id(playlist_url, yt_playlist_id)
         
         callback(f"Playlist: {playlist_title} (yt_id={yt_playlist_id}, db_id={playlist_id})")
         

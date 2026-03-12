@@ -8,6 +8,7 @@ from pydantic import BaseModel
 from vat.database import Database
 from vat.models import Playlist
 from vat.services import PlaylistService
+from vat.services.playlist_service import resolve_playlist_id
 from vat.utils.logger import setup_logger
 from vat.web.deps import get_db
 
@@ -178,7 +179,9 @@ async def add_playlist(
         if not playlist_info:
             raise HTTPException(400, "无法获取 Playlist 信息")
         
-        playlist_id = playlist_info['id']
+        # yt-dlp 对 channel tab URL（/@channel/shorts 等）返回裸 channel ID，
+        # 需要根据 URL 中的 tab 追加后缀（-shorts/-videos/-streams）以区分不同 tab
+        playlist_id = resolve_playlist_id(request.url, playlist_info['id'])
         
         # 检查是否已有 running job
         existing = _sync_status.get(playlist_id, {})

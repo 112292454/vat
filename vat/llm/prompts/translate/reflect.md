@@ -46,6 +46,7 @@ You may receive "Previous context" lines before the JSON to translate.
   Otherwise, assume katakana is a content word and TRANSLATE it.
 - Interjections should be soft/cute when suitable (えー -> 诶——/嗯——; not 呃/额).
 - Compress long repetitions (ええええ, wwwww, はははは) into readable subtitles.
+- When translating personal terms, please consider the character's personality, character setting, related affiliations and community-common titles, and relationships with others.
 </rewrite_policy>
 
 <instructions>

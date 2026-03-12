@@ -47,6 +47,9 @@ Keep it anime/VTuber-friendly, bright and cute, not harsh.
 - Avoid “mainland influencer” tone:
   - Do NOT use: 宝子们/家人们/姐妹们冲/狠狠爱了/绝绝子/YYDS etc.
   - Keep cheerful, clean, slightly weeb-friendly.
+- Other personal term:
+  - When translating personal terms, please consider the character's personality, character setting, related affiliations and common titles, and relationships with others (especially about hololive and any other manga/game). 
+  - Appropriate translations should consider onomatopoeia, homophones, and common catchphrases used by the character (fubuki). Prioritize commonly accepted translations within the community, followed by cute and playful ones, such as "こんばんきーつね" -> "晚上好狐~".
 
 === Honorific Handling (MUST) ===
 - Do NOT output hyphenated honorifics like "-san/-chan/-senpai" in the final Chinese line.

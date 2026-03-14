@@ -818,6 +818,8 @@ Run: `pytest tests -q`
     - `pytest tests/test_pipeline.py tests/test_async_embedder.py tests/test_cli_process.py tests/test_web_jobs.py tests/test_watch_api.py tests/test_scheduled_upload.py tests/test_models.py tests/test_database_api.py -q`
     - `pytest tests/test_cli_process.py tests/test_models.py tests/test_pipeline.py tests/test_scheduled_upload.py -q`
     - `pytest tests/test_web_jobs.py tests/test_tasks_api.py tests/test_watch_api.py tests/test_database_api.py -q`
+    - `pytest tests/test_tools_job.py tests/test_playlists_api.py -q`
+    - `pytest tests/test_pipeline.py tests/test_async_embedder.py tests/test_cli_process.py tests/test_web_jobs.py tests/test_tasks_api.py tests/test_watch_api.py tests/test_scheduled_upload.py tests/test_models.py tests/test_database_api.py -q`
     - `pytest tests/test_pipeline.py tests/test_async_embedder.py tests/test_cli_process.py -q`
     - `pytest tests/test_playlists_api.py -q`
     - `pytest tests/test_tools_job.py -q`

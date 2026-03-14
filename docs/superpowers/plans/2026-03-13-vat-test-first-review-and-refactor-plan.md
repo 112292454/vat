@@ -854,6 +854,7 @@ Run: `pytest tests -q`
   - `tests/test_season_sorting.py` 中新增 `_extract_title_index()`、`sort_season_episodes()`、`auto_sort_season()` 的函数级契约测试
   - `tests/test_translator_contracts.py` 中新增 `BaseTranslator._safe_translate_chunk()` 的缓存命中、写回、SQLite 锁降级测试
   - `tests/test_services.py` 中新增 `_calc_interpolated_date()` 与 `_process_failed_fetches()` 的失败恢复 helper 测试
+  - `tests/test_services.py` 中新增 `_submit_translate_task()` 的“已有翻译跳过 / force 重翻并更新 metadata”测试
 - `本轮修复的问题`:
   - 已完成工作区清理，按 task 提交现有改动，并在 `refactor/test-first-hardening` 分支开始正式修复。
   - 修复 `VideoProcessor` 直接持有共享 `config` 的问题；现在在初始化时深拷贝配置，每个 processor 都拥有独立配置副本，避免 `passthrough` 和自动 playlist prompt 覆写跨视频串扰。
@@ -945,7 +946,7 @@ Run: `pytest tests -q`
 | `vat/translator/base.py` | `_set_segments_translated_text` `_safe_translate_chunk` | `contract / regression` | `covered_this_round` | 已收紧为“缺少任何翻译段即立即失败”，并补了缓存命中、写回、SQLite 锁降级的直接测试 |
 | `vat/translator/llm_translator.py` | `_get_cache_key` | `contract / regression` | `covered_this_round` | 已补 prompt / reflect / context 维度进入缓存键，避免不同翻译语义错误复用旧缓存 |
 | `vat/uploaders/bilibili.py` | `_extract_title_index` `sort_season_episodes` `auto_sort_season` | `unit / contract` | `covered_this_round` | 已补标题编号提取、缺失 aid 直接失败、未列出视频自动补尾、顺序已正确时跳过排序、新增视频已在末尾时跳过排序 |
-| `vat/services/playlist_service.py` | `_calc_interpolated_date` `_process_failed_fetches` | `unit / contract` | `covered_this_round` | 已补日期插值、永久不可用标记、临时错误只插值不打 unavailable 标记的恢复语义 |
+| `vat/services/playlist_service.py` | `_calc_interpolated_date` `_process_failed_fetches` `_submit_translate_task` | `unit / contract` | `covered_this_round` | 已补日期插值、永久不可用标记、临时错误只插值不打 unavailable 标记，以及视频信息翻译的跳过/重翻更新语义 |
 
 本节的维护规则：
 

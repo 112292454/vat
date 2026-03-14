@@ -5,6 +5,7 @@ services 模块单元测试
 """
 import os
 import tempfile
+from types import SimpleNamespace
 import pytest
 from vat.database import Database
 from vat.models import (
@@ -353,3 +354,120 @@ class TestPlaylistRecoveryHelpers:
         assert "unavailable" not in target.metadata
         assert "unavailable_reason" not in target.metadata
         assert any("获取失败" in msg for msg in messages)
+
+
+class TestSubmitTranslateTaskContracts:
+    def test_submit_translate_task_skips_when_translated_exists_and_not_forced(self, db, monkeypatch):
+        _add_pl_video(db, "v_translated")
+        db.update_video("v_translated", metadata={"translated": {"title_translated": "已有翻译"}})
+
+        service = PlaylistService(db)
+
+        submit_calls = []
+
+        class _InlineExecutor:
+            def submit(self, fn):
+                submit_calls.append("submitted")
+                fn()
+
+        monkeypatch.setattr("vat.services.playlist_service._translate_executor", _InlineExecutor())
+        monkeypatch.setattr(
+            "vat.config.load_config",
+            lambda: SimpleNamespace(
+                llm=SimpleNamespace(is_available=lambda: True, model="model"),
+                downloader=SimpleNamespace(
+                    video_info_translate=SimpleNamespace(model="", api_key="", base_url="")
+                ),
+                get_stage_proxy=lambda _stage: "",
+            ),
+        )
+        monkeypatch.setattr(
+            "vat.llm.video_info_translator.VideoInfoTranslator",
+            lambda **kwargs: (_ for _ in ()).throw(AssertionError("should not instantiate translator")),
+        )
+
+        service._submit_translate_task(
+            "v_translated",
+            {"title": "原始标题", "uploader": "频道", "description": "", "tags": []},
+            force=False,
+        )
+
+        assert submit_calls == ["submitted"]
+        assert db.get_video("v_translated").metadata["translated"] == {"title_translated": "已有翻译"}
+
+    def test_submit_translate_task_force_retranslates_and_updates_metadata(self, db, monkeypatch):
+        _add_pl_video(db, "v_force")
+        db.update_video("v_force", metadata={"translated": {"title_translated": "旧翻译"}})
+
+        service = PlaylistService(db)
+
+        class _InlineExecutor:
+            def submit(self, fn):
+                fn()
+
+        class _TranslatedInfo:
+            recommended_tid_name = "日常"
+
+            def to_dict(self):
+                return {
+                    "title_translated": "新翻译标题",
+                    "description_translated": "新翻译简介",
+                    "description_summary": "摘要",
+                    "tags_translated": ["标签A"],
+                    "tags_generated": ["标签B"],
+                    "recommended_tid": 21,
+                    "recommended_tid_name": "日常",
+                    "tid_reason": "test",
+                    "original_title": "原始标题",
+                    "original_description": "",
+                    "original_tags": [],
+                }
+
+        created = {}
+
+        class _FakeTranslator:
+            def __init__(self, **kwargs):
+                created["kwargs"] = kwargs
+
+            def translate(self, **kwargs):
+                created["translate_kwargs"] = kwargs
+                return _TranslatedInfo()
+
+        monkeypatch.setattr("vat.services.playlist_service._translate_executor", _InlineExecutor())
+        monkeypatch.setattr(
+            "vat.config.load_config",
+            lambda: SimpleNamespace(
+                llm=SimpleNamespace(is_available=lambda: True, model="fallback-model"),
+                downloader=SimpleNamespace(
+                    video_info_translate=SimpleNamespace(model="vit-model", api_key="k", base_url="u")
+                ),
+                get_stage_proxy=lambda _stage: "http://proxy:7890",
+            ),
+        )
+        monkeypatch.setattr("vat.llm.video_info_translator.VideoInfoTranslator", _FakeTranslator)
+
+        service._submit_translate_task(
+            "v_force",
+            {
+                "id": "v_force",
+                "webpage_url": "https://www.youtube.com/watch?v=v_force",
+                "title": "原始标题",
+                "uploader": "频道",
+                "description": "简介",
+                "tags": ["tag1"],
+                "duration": 120,
+                "upload_date": "20250101",
+                "thumbnail": "thumb",
+                "width": 1920,
+                "height": 1080,
+            },
+            force=True,
+        )
+
+        updated = db.get_video("v_force")
+        assert updated.title == "原始标题"
+        assert updated.metadata["translated"]["title_translated"] == "新翻译标题"
+        assert updated.metadata["_video_info"]["title"] == "原始标题"
+        assert created["kwargs"]["model"] == "vit-model"
+        assert created["kwargs"]["proxy"] == "http://proxy:7890"
+        assert created["translate_kwargs"]["uploader"] == "频道"

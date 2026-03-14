@@ -15,7 +15,9 @@ import pytest
 from datetime import datetime
 from unittest.mock import MagicMock, patch
 
-from vat.cli.commands import parse_stages, _format_duration
+from types import SimpleNamespace
+
+from vat.cli.commands import parse_stages, _format_duration, _auto_season_sync
 from vat.models import TaskStep, TaskStatus
 from vat.web.jobs import JobManager, JobStatus, WebJob
 
@@ -210,3 +212,79 @@ class TestCroniterScheduling:
 
         t2 = cron.get_next(datetime)
         assert t2 == datetime(2026, 2, 15, 12, 0, 0)
+
+
+class TestAutoSeasonSync:
+
+    def _make_config(self):
+        return SimpleNamespace(
+            uploader=SimpleNamespace(
+                bilibili=SimpleNamespace(
+                    cookies_file="cookies.json",
+                    line="AUTO",
+                    threads=3,
+                )
+            )
+        )
+
+    def test_auto_season_sync_returns_when_no_pending(self, monkeypatch):
+        config = self._make_config()
+        logger = MagicMock()
+        db = MagicMock()
+
+        uploader_instances = []
+
+        class FakeUploader:
+            def __init__(self, **kwargs):
+                uploader_instances.append(kwargs)
+
+        season_calls = []
+
+        monkeypatch.setattr("vat.uploaders.bilibili.BILIUP_AVAILABLE", True)
+        monkeypatch.setattr("vat.uploaders.bilibili.BilibiliUploader", FakeUploader)
+        monkeypatch.setattr(
+            "vat.uploaders.bilibili.season_sync",
+            lambda _db, _uploader, playlist_id: season_calls.append(playlist_id) or {
+                "total": 0,
+                "success": 0,
+                "failed": 0,
+            },
+        )
+
+        _auto_season_sync(config, db, logger, "PL1", retry_delay_minutes=5)
+
+        assert season_calls == ["PL1"]
+        assert len(uploader_instances) == 1
+        logger.info.assert_any_call("没有待同步的视频，跳过 season-sync")
+
+    def test_auto_season_sync_retries_once_after_failures(self, monkeypatch):
+        config = self._make_config()
+        logger = MagicMock()
+        db = MagicMock()
+
+        uploader_instances = []
+
+        class FakeUploader:
+            def __init__(self, **kwargs):
+                uploader_instances.append(kwargs)
+
+        results = iter([
+            {"total": 2, "success": 1, "failed": 1},
+            {"total": 1, "success": 1, "failed": 0},
+        ])
+        season_calls = []
+        sleep_calls = []
+
+        monkeypatch.setattr("vat.uploaders.bilibili.BILIUP_AVAILABLE", True)
+        monkeypatch.setattr("vat.uploaders.bilibili.BilibiliUploader", FakeUploader)
+        monkeypatch.setattr(
+            "vat.uploaders.bilibili.season_sync",
+            lambda _db, _uploader, playlist_id: season_calls.append(playlist_id) or next(results),
+        )
+        monkeypatch.setattr("time.sleep", lambda seconds: sleep_calls.append(seconds))
+
+        _auto_season_sync(config, db, logger, "PL2", retry_delay_minutes=7)
+
+        assert season_calls == ["PL2", "PL2"]
+        assert len(uploader_instances) == 2
+        assert sleep_calls == [7 * 60]

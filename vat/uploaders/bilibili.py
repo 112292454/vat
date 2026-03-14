@@ -1955,32 +1955,31 @@ def season_sync(db, uploader: BilibiliUploader, playlist_id: str) -> Dict[str, A
     
     if not pending:
         logger.info(f"Playlist {playlist_id}: 没有待同步的视频")
-        return result
-    
-    logger.info(f"Playlist {playlist_id}: 找到 {len(pending)} 个待同步视频")
-    
-    for i, (video, aid, season_id) in enumerate(pending):
-        result['season_ids'].add(season_id)
-        try:
-            add_result = uploader.add_to_season(aid, season_id)
-            if add_result:
-                result['success'] += 1
-                # 更新 DB 标记
-                updated_meta = dict(video.metadata or {})
-                updated_meta['bilibili_season_added'] = True
-                db.update_video(video.id, metadata=updated_meta)
-                logger.info(f"✓ {video.title or video.id} -> 合集 {season_id}")
-            else:
+    else:
+        logger.info(f"Playlist {playlist_id}: 找到 {len(pending)} 个待同步视频")
+        
+        for i, (video, aid, season_id) in enumerate(pending):
+            result['season_ids'].add(season_id)
+            try:
+                add_result = uploader.add_to_season(aid, season_id)
+                if add_result:
+                    result['success'] += 1
+                    # 更新 DB 标记
+                    updated_meta = dict(video.metadata or {})
+                    updated_meta['bilibili_season_added'] = True
+                    db.update_video(video.id, metadata=updated_meta)
+                    logger.info(f"✓ {video.title or video.id} -> 合集 {season_id}")
+                else:
+                    result['failed'] += 1
+                    result['failed_videos'].append(video.id)
+                    logger.warning(f"✗ {video.title or video.id} -> 合集 {season_id} 失败")
+            except Exception as e:
                 result['failed'] += 1
                 result['failed_videos'].append(video.id)
-                logger.warning(f"✗ {video.title or video.id} -> 合集 {season_id} 失败")
-        except Exception as e:
-            result['failed'] += 1
-            result['failed_videos'].append(video.id)
-            logger.error(f"✗ {video.title or video.id} -> 合集 {season_id} 异常: {e}")
-        # B站合集编辑 API 有频率限制（code=20111），请求间需间隔避免触发
-        if i < len(pending) - 1:
-            time.sleep(3)
+                logger.error(f"✗ {video.title or video.id} -> 合集 {season_id} 异常: {e}")
+            # B站合集编辑 API 有频率限制（code=20111），请求间需间隔避免触发
+            if i < len(pending) - 1:
+                time.sleep(3)
     
     # === 诊断：检测有 aid 但 B站找不到的视频 ===
     # 从失败列表中，尝试区分"B站找不到"和"添加接口报错"两种情况

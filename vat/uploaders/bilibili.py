@@ -819,7 +819,6 @@ class BilibiliUploader(BaseUploader):
         Returns:
             是否成功
         """
-        session = self._get_authenticated_session()
         bili_jct = self.cookie_data.get('bili_jct', '')
         assert bili_jct, "bili_jct 为空，无法调用需要 CSRF 的 API（cookie 未正确加载？）"
         
@@ -868,6 +867,7 @@ class BilibiliUploader(BaseUploader):
                 'Referer': 'https://member.bilibili.com/platform/upload-manager/ep',
                 'Origin': 'https://member.bilibili.com',
             }
+            session = self._get_authenticated_session()
             resp = session.post(
                 f'https://member.bilibili.com/x2/creative/web/season/section/edit?csrf={bili_jct}',
                 json=payload,

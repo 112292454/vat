@@ -1,5 +1,6 @@
 """翻译契约测试。"""
 
+import sqlite3
 from types import SimpleNamespace
 
 import pytest
@@ -93,3 +94,90 @@ class TestTranslatorCacheKeyContracts:
         key_b = translator._get_cache_key(chunk)
 
         assert key_b != key_a
+
+
+class TestSafeTranslateChunkContracts:
+    def _make_chunk(self):
+        from vat.translator.base import SubtitleProcessData
+
+        return [SubtitleProcessData(index=1, original_text="おはよう")]
+
+    def test_cache_hit_returns_cached_result_without_calling_translate(self, translator, monkeypatch):
+        chunk = self._make_chunk()
+        cached = [SimpleNamespace(index=1, translated_text="缓存命中")]
+
+        class FakeCache:
+            def get(self, key, default=None):
+                return cached
+
+        translator._cache = FakeCache()
+        monkeypatch.setattr("vat.translator.base.is_cache_enabled", lambda: True)
+        translator._translate_chunk = lambda _chunk: (_ for _ in ()).throw(AssertionError("should not translate"))
+
+        result = translator._safe_translate_chunk(chunk)
+
+        assert result is cached
+        assert translator._cache_hit_count == 1
+
+    def test_cache_miss_writes_result_and_calls_update_callback(self, translator, monkeypatch):
+        chunk = self._make_chunk()
+        writes = []
+        updates = []
+
+        class FakeCache:
+            def get(self, key, default=None):
+                return None
+
+            def set(self, key, value, expire=None):
+                writes.append((key, value, expire))
+
+        expected = [SimpleNamespace(index=1, translated_text="翻译结果")]
+        translator._cache = FakeCache()
+        translator.update_callback = lambda result: updates.append(result)
+        translator._translate_chunk = lambda _chunk: expected
+        monkeypatch.setattr("vat.translator.base.is_cache_enabled", lambda: True)
+
+        result = translator._safe_translate_chunk(chunk)
+
+        assert result is expected
+        assert updates == [expected]
+        assert len(writes) == 1
+        assert writes[0][1] is expected
+
+    def test_sqlite_error_on_cache_get_falls_back_to_translate(self, translator, monkeypatch):
+        chunk = self._make_chunk()
+
+        class FakeCache:
+            def get(self, key, default=None):
+                raise sqlite3.OperationalError("database is locked")
+
+            def set(self, key, value, expire=None):
+                return None
+
+        expected = [SimpleNamespace(index=1, translated_text="回退结果")]
+        translator._cache = FakeCache()
+        translator._translate_chunk = lambda _chunk: expected
+        monkeypatch.setattr("vat.translator.base.is_cache_enabled", lambda: True)
+
+        result = translator._safe_translate_chunk(chunk)
+
+        assert result is expected
+
+    def test_sqlite_error_on_cache_set_does_not_fail_translation(self, translator, monkeypatch):
+        chunk = self._make_chunk()
+
+        class FakeCache:
+            def get(self, key, default=None):
+                return None
+
+            def set(self, key, value, expire=None):
+                raise sqlite3.OperationalError("database is locked")
+
+        expected = [SimpleNamespace(index=1, translated_text="写缓存失败也返回")]
+        translator._cache = FakeCache()
+        translator._translate_chunk = lambda _chunk: expected
+        monkeypatch.setattr("vat.translator.base.is_cache_enabled", lambda: True)
+
+        result = translator._safe_translate_chunk(chunk)
+
+        assert result is expected

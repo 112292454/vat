@@ -168,6 +168,68 @@ class TestDetermineToolsJobResult(TestCase):
         self.assertEqual(status, JobStatus.FAILED)
 
 
+class TestToolsJobLifecycle(TestCase):
+    """测试 tools job 在 JobManager.update_job_status 中的状态收敛。"""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.jm = JobManager(
+            db_path=os.path.join(self.tmpdir, 'test_jobs.db'),
+            log_dir=os.path.join(self.tmpdir, 'logs')
+        )
+
+    def _insert_running_job(self, job_id, log_content, cancel_requested=False):
+        from datetime import datetime
+
+        log_file = os.path.join(self.tmpdir, f'{job_id}.log')
+        Path(log_file).write_text(log_content)
+
+        with self.jm._get_connection() as conn:
+            conn.execute("""
+                INSERT INTO web_jobs (
+                    job_id, video_ids, steps, gpu_device, force, status, pid, log_file, created_at,
+                    task_type, task_params, cancel_requested
+                ) VALUES (?, '[]', '["sync-playlist"]', 'auto', 0, 'running', ?, ?, ?, ?, ?, ?)
+            """, (
+                job_id,
+                4321,
+                log_file,
+                datetime.now(),
+                'sync-playlist',
+                json.dumps({'playlist_id': 'PL1'}),
+                1 if cancel_requested else 0,
+            ))
+
+    def test_update_job_status_marks_tools_job_completed_from_success_log(self):
+        self._insert_running_job("job-success", "[SUCCESS] done")
+
+        with patch.object(self.jm, "_is_process_alive", return_value=False):
+            self.jm.update_job_status("job-success")
+
+        job = self.jm.get_job("job-success")
+        self.assertEqual(job.status, JobStatus.COMPLETED)
+        self.assertEqual(job.progress, 1.0)
+
+    def test_update_job_status_marks_tools_job_failed_from_failed_log(self):
+        self._insert_running_job("job-failed", "[FAILED] boom")
+
+        with patch.object(self.jm, "_is_process_alive", return_value=False):
+            self.jm.update_job_status("job-failed")
+
+        job = self.jm.get_job("job-failed")
+        self.assertEqual(job.status, JobStatus.FAILED)
+        self.assertIn("boom", job.error)
+
+    def test_update_job_status_prioritizes_cancel_requested_for_tools_job(self):
+        self._insert_running_job("job-cancelled", "[SUCCESS] would-have-succeeded", cancel_requested=True)
+
+        with patch.object(self.jm, "_is_process_alive", return_value=False):
+            self.jm.update_job_status("job-cancelled")
+
+        job = self.jm.get_job("job-cancelled")
+        self.assertEqual(job.status, JobStatus.CANCELLED)
+
+
 class TestWebJobToolsFields(TestCase):
     """测试 WebJob 的 tools 相关字段"""
 

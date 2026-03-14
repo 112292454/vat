@@ -792,6 +792,7 @@ Run: `pytest tests -q`
   - `tests/test_web_jobs.py` 中新增 process job 结果判定、取消请求收敛与 zombie contract 测试
   - `tests/test_tasks_api.py`
   - `tests/test_playlists_api.py`
+  - `tests/test_tools_job.py` 中新增 tools job lifecycle 收敛测试
   - `tests/test_database_api.py`
   - `tests/test_cli_process.py` 中新增 `parse_stages` / `process -s` 阶段语义与 `--force` 下游失效契约测试
 - `本轮修复的问题`:
@@ -807,17 +808,22 @@ Run: `pytest tests -q`
   - 修复 `JobManager.cancel_job()` 的同步阻塞设计；取消现在改为“接受请求并向进程组发送 `SIGTERM`”，不再在 Web 请求线程里等待退出。
   - 修复 `cancel_job()` / `cancel_task` 的 zombie 与事件循环问题；取消状态通过 `cancel_requested` 持久化，由 `update_job_status()` 在确认子进程结束后收敛为 `cancelled`，`POST /api/tasks/{id}/cancel` 也改为 `asyncio.to_thread(...)` 非阻塞调用。
   - 收敛 `update_job_status()` 的进程活性判断；僵尸进程现在视为已结束并尝试回收，不再把 zombie 当成“仍在运行”。
+  - 修复 `JobManager.submit_job()` 的原子性缺口；当 `_start_job_process()` 失败时，现在会回滚 `web_jobs` 记录，避免残留脏的 `pending` job。
   - 修复 `vat/web/routes/database.py` 的 FastAPI 弃用项；`Query(..., regex=...)` 已迁移为 `pattern=`，并补了 API 参数校验测试。
-  - 补齐 `vat/web/routes/tasks.py` 的关键 API 契约测试：覆盖 `parse_steps`、`execute`、`get/list`、`cancel`、`delete`、`retry`，把 stage group 展开、force 下游失效、冲突拒绝、CLI 预览、异步取消等路由语义固定下来。
-  - 补齐 `vat/web/routes/playlists.py` 的第一批 API 契约测试：覆盖同步状态查询、重复同步保护、prompt/metadata 更新和删除委托，为 playlist 管理层建立直接测试护栏。
+  - 修复 `vat/web/routes/tasks.py` 的陈旧状态问题；`delete` 与 `retry` 现在都会先 `update_job_status()` 再判定 running，避免已结束任务因陈旧状态被误拦截。
+  - 补齐 `vat/web/routes/tasks.py` 的关键 API 契约测试：覆盖 `parse_steps`、`execute`、`get/list`、`cancel`、`delete`、`retry`，把 stage group 展开、force 下游失效、冲突拒绝、CLI 预览、异步取消与状态刷新语义固定下来。
+  - 补齐 `vat/web/routes/playlists.py` 的第一批 API 契约测试：覆盖 `add/sync/refresh/retranslate` 的后台任务提交、重复提交保护，以及 `sync-status/refresh-status` 的状态映射。
+  - 补齐 tools job 生命周期测试：`update_job_status()` 现在对 `[SUCCESS] / [FAILED] / cancel_requested` 三条收敛路径都有直接测试。
   - 已完成本轮回归：
     - `pytest tests/test_pipeline.py tests/test_async_embedder.py tests/test_cli_process.py tests/test_web_jobs.py tests/test_watch_api.py tests/test_scheduled_upload.py tests/test_models.py tests/test_database_api.py -q`
     - `pytest tests/test_cli_process.py tests/test_models.py tests/test_pipeline.py tests/test_scheduled_upload.py -q`
     - `pytest tests/test_web_jobs.py tests/test_tasks_api.py tests/test_watch_api.py tests/test_database_api.py -q`
     - `pytest tests/test_pipeline.py tests/test_async_embedder.py tests/test_cli_process.py -q`
     - `pytest tests/test_playlists_api.py -q`
+    - `pytest tests/test_tools_job.py -q`
     - `pytest tests/test_tasks_api.py tests/test_playlists_api.py tests/test_web_jobs.py tests/test_watch_api.py tests/test_database_api.py -q`
-- `下一步`: 继续自底向上补 Web / pipeline 邻近模块的遗漏测试，优先检查 `tools job` 生命周期、playlist sync 原子性，以及阶段语义漂移收口
+    - `pytest tests/test_web_jobs.py tests/test_tasks_api.py tests/test_playlists_api.py tests/test_tools_job.py tests/test_watch_api.py tests/test_database_api.py tests/test_pipeline.py tests/test_async_embedder.py tests/test_cli_process.py -q`
+- `下一步`: 继续自底向上补剩余高风险模块测试，优先是阶段语义漂移、playlist/upload/season 的原子性，以及翻译零容忍契约
 
 ## 11. 进入下一阶段的门槛
 

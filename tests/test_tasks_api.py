@@ -312,6 +312,7 @@ class TestDeleteTaskApi:
         assert response.status_code == 400
         assert response.json()["detail"] == "Cannot delete running task. Cancel it first."
         assert job_manager.delete_calls == []
+        assert job_manager.update_calls == ["job-running"]
 
     @pytest.mark.anyio
     async def test_delete_task_deletes_terminal_job(self, app, client):
@@ -326,6 +327,7 @@ class TestDeleteTaskApi:
         assert response.status_code == 200
         assert response.json() == {"status": "deleted", "task_id": "job-done"}
         assert job_manager.delete_calls == ["job-done"]
+        assert job_manager.update_calls == ["job-done"]
 
 
 class TestRetryTaskApi:
@@ -377,6 +379,7 @@ class TestRetryTaskApi:
         assert response.status_code == 400
         assert response.json()["detail"] == "Task is still running"
         assert job_manager.submit_calls == []
+        assert job_manager.update_calls == ["job-running"]
 
     @pytest.mark.anyio
     async def test_retry_task_resubmits_original_job_parameters(self, app, client):
@@ -406,6 +409,7 @@ class TestRetryTaskApi:
             "new_task_id": "retry-new-task",
             "original_task_id": "job-original",
         }
+        assert job_manager.update_calls == ["job-original"]
         assert job_manager.submit_calls == [{
             "video_ids": ["v1", "v2"],
             "steps": ["download", "translate"],

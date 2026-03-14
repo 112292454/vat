@@ -7,6 +7,7 @@ database.py 单元测试
 import os
 import tempfile
 import pytest
+import sqlite3
 from vat.database import Database
 from vat.models import (
     Video, Task, Playlist, TaskStep, TaskStatus, SourceType,
@@ -79,6 +80,80 @@ class TestVideoCRUD:
             _add_video(db, f"v{i}")
         videos = db.list_videos()
         assert len(videos) == 3
+
+    def test_add_video_rejects_empty_id(self, db):
+        with pytest.raises(AssertionError, match="video.id 不能为空"):
+            db.add_video(Video(
+                id="",
+                source_type=SourceType.YOUTUBE,
+                source_url="https://youtube.com/watch?v=bad",
+            ))
+
+    def test_get_video_resolves_output_dir_from_runtime_base(self):
+        fd, path = tempfile.mkstemp(suffix='.db')
+        os.close(fd)
+        try:
+            db = Database(path, output_base_dir="/tmp/runtime-output")
+            _add_video(db, "v_out")
+            loaded = db.get_video("v_out")
+            assert loaded.output_dir == "/tmp/runtime-output/v_out"
+        finally:
+            os.unlink(path)
+
+    def test_update_video_ignores_output_dir_field(self):
+        fd, path = tempfile.mkstemp(suffix='.db')
+        os.close(fd)
+        try:
+            db = Database(path, output_base_dir="/tmp/runtime-output")
+            _add_video(db, "v_ignore", title="before")
+
+            db.update_video("v_ignore", title="after", output_dir="/tmp/should-not-stick")
+
+            loaded = db.get_video("v_ignore")
+            assert loaded.title == "after"
+            assert loaded.output_dir == "/tmp/runtime-output/v_ignore"
+        finally:
+            os.unlink(path)
+
+
+class TestConnectionContracts:
+
+    def test_get_connection_rolls_back_on_exception(self, db):
+        with pytest.raises(RuntimeError, match="boom"):
+            with db.get_connection() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO videos (id, source_type, source_url, title, output_dir, metadata, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                    """,
+                    ("rolled-back", "youtube", "https://youtube.com/watch?v=rb", "Rollback", None, "{}"),
+                )
+                raise RuntimeError("boom")
+
+        assert db.get_video("rolled-back") is None
+
+
+class TestRetryOnLocked:
+
+    def test_retry_on_locked_retries_until_success(self, db, monkeypatch):
+        sleep_calls = []
+        monkeypatch.setattr("vat.database.time.sleep", lambda delay: sleep_calls.append(delay))
+
+        attempts = {"count": 0}
+
+        def flaky():
+            attempts["count"] += 1
+            if attempts["count"] < 3:
+                raise sqlite3.OperationalError("database is locked")
+            return "ok"
+
+        assert db._retry_on_locked(flaky) == "ok"
+        assert attempts["count"] == 3
+        assert sleep_calls == [1.0, 2.0]
+
+    def test_retry_on_locked_does_not_swallow_non_locked_operational_error(self, db):
+        with pytest.raises(sqlite3.OperationalError, match="disk I/O error"):
+            db._retry_on_locked(lambda: (_ for _ in ()).throw(sqlite3.OperationalError("disk I/O error")))
 
 
 # ==================== Task CRUD ====================

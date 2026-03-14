@@ -844,6 +844,8 @@ Run: `pytest tests -q`
   - `tests/test_database_api.py`
   - `tests/test_cli_process.py` 中新增 `parse_stages` / `process -s` 阶段语义与 `--force` 下游失效契约测试
   - `tests/test_services.py` 中新增 `sync_playlist()` 基础契约测试
+  - `tests/test_database.py` 中新增连接回滚、锁重试、运行时 output_dir 解析、字段过滤与空 video_id 约束测试
+  - `tests/test_pipeline.py` 中新增 passthrough config 恢复、playlist prompt 自动应用/恢复、`_is_no_speech`、`_is_shorts_video` 的函数级测试
 - `本轮修复的问题`:
   - 已完成工作区清理，按 task 提交现有改动，并在 `refactor/test-first-hardening` 分支开始正式修复。
   - 修复 `VideoProcessor` 直接持有共享 `config` 的问题；现在在初始化时深拷贝配置，每个 processor 都拥有独立配置副本，避免 `passthrough` 和自动 playlist prompt 覆写跨视频串扰。
@@ -878,6 +880,9 @@ Run: `pytest tests -q`
     - `pytest tests/test_web_jobs.py tests/test_tasks_api.py tests/test_playlists_api.py tests/test_tools_job.py tests/test_watch_api.py tests/test_database_api.py tests/test_pipeline.py tests/test_async_embedder.py tests/test_cli_process.py -q`
     - `pytest tests/test_services.py tests/test_tasks_api.py tests/test_playlists_api.py tests/test_web_jobs.py tests/test_watch_api.py tests/test_database_api.py -q`
     - `pytest tests/test_pipeline.py tests/test_async_embedder.py tests/test_cli_process.py tests/test_web_jobs.py tests/test_tasks_api.py tests/test_playlists_api.py tests/test_watch_api.py tests/test_database_api.py -q`
+    - `HOME=/tmp pytest tests/test_database.py -q`
+    - `HOME=/tmp pytest tests/test_pipeline.py -q`
+    - `HOME=/tmp pytest tests/test_models.py tests/test_database.py tests/test_pipeline.py -q`
 - `下一步`: 继续自底向上补剩余高风险模块测试，优先是阶段语义漂移、playlist/upload/season 的原子性，以及翻译零容忍契约
 
 ### 10.2 规划文档当前状态
@@ -906,6 +911,22 @@ Run: `pytest tests -q`
    - 按 `6.6 文件 / 函数级测试审计法` 追加
 3. `高风险模块收口记录`
    - 当某个模块进入“可重构”状态时，在风险映射表和当前状态中同时更新
+
+### 10.3 当前文件 / 函数级测试审计进展
+
+这一节从 `models.py -> database.py -> executor.py` 的底层链开始维护，只记录“已经实际审过并补过测试”的文件。
+
+| 文件 | 本轮已审函数/方法 | 测试层级 | 当前状态 | 备注 |
+|---|---|---|---|---|
+| `vat/models.py` | `expand_stage_group` `get_required_stages` `Video.__post_init__` `Task.__post_init__` `Playlist.__post_init__` | `unit / contract` | `partially_covered` | 阶段语义主路径已有测试；后续仍可补显式时间戳保留与枚举 coercion 边界 |
+| `vat/database.py` | `get_connection` `_retry_on_locked` `add_video` `get_video` `_row_to_video` `update_video` | `unit / contract` | `covered_this_round` | 已补事务回滚、锁重试、运行时 output_dir 解析、字段过滤、空 video_id 约束 |
+| `vat/pipeline/executor.py` | `VideoProcessor.process` `_resolve_stage_gaps` `_set_passthrough_config` `_restore_passthrough_config` `_auto_apply_playlist_prompts` `_restore_playlist_prompts` `_is_no_speech` `_is_shorts_video` | `unit / contract / regression` | `covered_this_round` | 仍有大量 stage 实现函数未做直接函数级测试，但辅助控制逻辑这一轮已下探 |
+
+本节的维护规则：
+
+- 只有真正新增或重写了测试后，才更新状态。
+- `partially_covered` 不等于“可以停止”，而是表示已经进入函数级审计。
+- `covered_this_round` 仅表示本轮新增了直接测试，不表示该文件已无缺口。
 
 ## 11. 进入下一阶段的门槛
 

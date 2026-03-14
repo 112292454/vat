@@ -495,6 +495,28 @@ class TestPassthroughConfigBackupRestore:
 
         assert vp.config.asr.split.enable == original_split_enable
 
+    def test_restore_passthrough_config_recovers_original_flags(self, tmp_path):
+        vp, _ = _make_vp(tmp_path)
+        original = (
+            vp.config.asr.split.enable,
+            vp.config.translator.llm.optimize.enable,
+            vp.config.translator.skip_translate,
+        )
+
+        vp._set_passthrough_config({"split", "optimize", "translate"})
+
+        assert vp.config.asr.split.enable is False
+        assert vp.config.translator.llm.optimize.enable is False
+        assert vp.config.translator.skip_translate is True
+
+        vp._restore_passthrough_config()
+
+        assert (
+            vp.config.asr.split.enable,
+            vp.config.translator.llm.optimize.enable,
+            vp.config.translator.skip_translate,
+        ) == original
+
 
 class TestConfigIsolationContracts:
     """VideoProcessor 不应污染调用方共享配置。"""
@@ -564,6 +586,96 @@ class TestConfigIsolationContracts:
         assert result is True
         assert shared_config.translator.llm.custom_prompt == original_translate_prompt
         assert shared_config.translator.llm.optimize.custom_prompt == original_optimize_prompt
+
+
+class TestPlaylistPromptAutoApply:
+    def test_auto_apply_playlist_prompts_for_single_playlist(self, tmp_path):
+        processor, _, _ = _make_real_vp(
+            tmp_path,
+            playlist_id="PL_SINGLE",
+            playlist_metadata={
+                "custom_prompt_translate": "fubuki",
+                "custom_prompt_optimize": "fubuki",
+            },
+        )
+        original_translate = processor.config.translator.llm.custom_prompt
+        original_optimize = processor.config.translator.llm.optimize.custom_prompt
+
+        processor._playlist_id = None
+        processor._auto_apply_playlist_prompts()
+
+        assert processor._prompt_backup is not None
+        assert processor._prompt_backup["translate_custom_prompt"] == original_translate
+        assert processor._prompt_backup["optimize_custom_prompt"] == original_optimize
+
+    def test_auto_apply_playlist_prompts_skips_when_video_has_multiple_playlists(self, tmp_path):
+        processor, database, _ = _make_real_vp(
+            tmp_path,
+            playlist_id="PL_A",
+            playlist_metadata={"custom_prompt_translate": "fubuki"},
+        )
+        database.add_playlist(
+            Playlist(
+                id="PL_B",
+                title="Playlist B",
+                source_url="https://youtube.com/playlist?list=PL_B",
+                metadata={"custom_prompt_translate": "other"},
+            )
+        )
+        database.add_video_to_playlist("test_vid", "PL_B", playlist_index=2)
+        original_translate_prompt = processor.config.translator.llm.custom_prompt
+
+        processor._playlist_id = None
+        processor._auto_apply_playlist_prompts()
+
+        assert processor._prompt_backup is None
+        assert processor.config.translator.llm.custom_prompt == original_translate_prompt
+
+    def test_restore_playlist_prompts_recovers_original_values(self, tmp_path):
+        processor, _, _ = _make_real_vp(
+            tmp_path,
+            playlist_id="PL_RESTORE",
+            playlist_metadata={
+                "custom_prompt_translate": "fubuki",
+                "custom_prompt_optimize": "fubuki",
+            },
+        )
+        original_translate = processor.config.translator.llm.custom_prompt
+        original_optimize = processor.config.translator.llm.optimize.custom_prompt
+
+        processor._playlist_id = None
+        processor._auto_apply_playlist_prompts()
+        processor._restore_playlist_prompts()
+
+        assert processor.config.translator.llm.custom_prompt == original_translate
+        assert processor.config.translator.llm.optimize.custom_prompt == original_optimize
+
+
+class TestVideoMetadataHelpers:
+    def test_is_no_speech_reads_flag_from_latest_video_metadata(self, tmp_path):
+        processor, database, _ = _make_real_vp(
+            tmp_path,
+            video_metadata={"no_speech": False},
+        )
+        database.update_video("test_vid", metadata={"no_speech": True})
+
+        assert processor._is_no_speech() is True
+
+    def test_is_shorts_video_detects_shorts_playlist_suffix(self, tmp_path):
+        processor, database, _ = _make_real_vp(
+            tmp_path,
+            playlist_id="PL_REGULAR",
+        )
+        database.add_playlist(
+            Playlist(
+                id="UC_demo-shorts",
+                title="Shorts",
+                source_url="https://youtube.com/@demo/shorts",
+            )
+        )
+        database.add_video_to_playlist("test_vid", "UC_demo-shorts", playlist_index=2)
+
+        assert processor._is_shorts_video() is True
 
 
 class TestExecuteStepDispatch:

@@ -24,11 +24,16 @@
 
 ## 2. 当前上下文
 
-- 日期：`2026-03-13`
+- 日期：`2026-03-14`
 - 当前分支：`refactor/test-first-hardening`
-- 当前工作区已清理并切入新的开发分支。
-- 当前基线提交：`cfc60ce chore: bump fastapi minimum version`
-- 当前正处于测试优先修复阶段，工作区包含未提交的无争议修复与补测。
+- 当前工作区：`clean`
+- 当前分支尖端提交：`59491f8 test: assert task routes refresh stale status`
+- 当前阶段：`测试补强仍在进行中，尚未进入高争议核心模块的大规模重构`
+- 当前已完成的主线：
+  - Web job 生命周期第一轮契约收口
+  - CLI / pipeline 第一轮阶段语义与 force 失效护栏
+  - `tasks` / `playlists` 路由第一轮 API 契约测试
+  - `PlaylistService.sync_playlist()` 第一轮基础契约测试
 - 当前仓库应用代码与测试代码总量约 `33894` 行。
 - 目录体量最大的区域：`vat/web`、`vat/asr`、`vat/llm`、`tests`。
 
@@ -466,6 +471,49 @@
 - 关联回归测试转绿。
 - 文档同步后，才能勾选任务完成。
 
+### 6.6 文件 / 函数级测试审计法
+
+从这一轮开始，测试策略进一步收紧：不只按“模块”补测试，还要按“文件 -> 函数 -> 上层调用链”自底向上审计。
+
+执行顺序固定为：
+
+1. 先扫纯函数和数据转换函数。
+2. 再扫单文件内状态推进函数。
+3. 再扫 service / manager 层的组合逻辑。
+4. 再扫 CLI / Web route / JobManager 这类入口层。
+5. 最后补跨层集成与回归测试。
+
+每个文件都必须建立一个最小审计记录，至少回答：
+
+- 这个文件的职责是什么。
+- 这个文件里哪些函数是纯逻辑、哪些是状态推进、哪些是 I/O 边界。
+- 哪些函数已经有直接测试。
+- 哪些函数目前只被上层间接覆盖。
+- 哪些函数完全没有测试。
+- 哪些测试是在“验证需求/契约”，哪些只是“贴实现”。
+
+从现在开始，后续每轮新增测试时，都要在文档或状态回写中至少标出下面四项：
+
+- `文件`
+- `函数/方法`
+- `测试层级`：`unit / contract / integration / regression`
+- `当前状态`：`covered / indirectly_covered / missing / needs_rewrite`
+
+禁止把“被某个大集成测试顺便走到”当成充分覆盖。对于高风险函数，默认要求直接测试，而不是只靠上层路由或命令间接经过。
+
+优先要做函数级审计的文件：
+
+- `vat/models.py`
+- `vat/database.py`
+- `vat/pipeline/executor.py`
+- `vat/web/jobs.py`
+- `vat/web/routes/tasks.py`
+- `vat/web/routes/playlists.py`
+- `vat/services/playlist_service.py`
+- `vat/uploaders/bilibili.py`
+- `vat/translator/llm_translator.py`
+- `vat/embedder/async_embedder.py`
+
 ## 7. 工作区整理计划
 
 这一步先执行，未完成前不进入后续重构。
@@ -831,6 +879,33 @@ Run: `pytest tests -q`
     - `pytest tests/test_services.py tests/test_tasks_api.py tests/test_playlists_api.py tests/test_web_jobs.py tests/test_watch_api.py tests/test_database_api.py -q`
     - `pytest tests/test_pipeline.py tests/test_async_embedder.py tests/test_cli_process.py tests/test_web_jobs.py tests/test_tasks_api.py tests/test_playlists_api.py tests/test_watch_api.py tests/test_database_api.py -q`
 - `下一步`: 继续自底向上补剩余高风险模块测试，优先是阶段语义漂移、playlist/upload/season 的原子性，以及翻译零容忍契约
+
+### 10.2 规划文档当前状态
+
+这份规划文档相较最初版本，已经不再是“待完善草案”，而是当前正式执行中的主控文档。
+
+当前判断：
+
+- `契约基线`: 已基本成型，可以直接指导后续实现与 review。
+- `测试优先总策略`: 已成型，并已在多个子块实际执行验证。
+- `状态回写机制`: 已成型，但后续还要继续按轮次更新。
+- `文件 / 函数级测试审计台账`: 已立项并写入本计划，下一轮开始要按此方式持续落地。
+- `高争议重构规划`: 仍未完成，必须等更底层测试护栏补齐后再进入。
+
+因此，本规划文件当前状态应视为：
+
+- `已完成 70% 的长期执行基线定义`
+- `已进入持续维护状态，而不是继续大改结构的草案阶段`
+- `后续新增内容以状态更新、测试审计台账、风险收口记录为主`
+
+后续记录方式固定为三类：
+
+1. `状态回写`
+   - 写进 `10.1 当前状态`
+2. `测试审计进展`
+   - 按 `6.6 文件 / 函数级测试审计法` 追加
+3. `高风险模块收口记录`
+   - 当某个模块进入“可重构”状态时，在风险映射表和当前状态中同时更新
 
 ## 11. 进入下一阶段的门槛
 

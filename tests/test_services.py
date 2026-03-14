@@ -264,3 +264,92 @@ class TestSyncPlaylistContracts:
         assert result.existing_videos == ["vid1"]
         pv_info = db.get_playlist_video_info("PL_IDX", "vid1")
         assert pv_info["playlist_index"] == 1
+
+
+class TestPlaylistRecoveryHelpers:
+    def test_calc_interpolated_date_between_newer_and_older(self, db):
+        service = PlaylistService(db)
+
+        date = service._calc_interpolated_date(
+            2,
+            {
+                1: "20250110",  # 更新
+                3: "20250106",  # 更旧
+            },
+        )
+
+        assert date == "20250108"
+
+    def test_calc_interpolated_date_for_oldest_video_uses_previous_day(self, db):
+        service = PlaylistService(db)
+
+        date = service._calc_interpolated_date(
+            5,
+            {
+                2: "20250110",
+            },
+        )
+
+        assert date == "20250109"
+
+    def test_process_failed_fetches_marks_unavailable_with_interpolated_date(self, db):
+        _setup_playlist(db, "PL_FAIL")
+        _add_pl_video(db, "v_known_newer", playlist_id="PL_FAIL", index=1)
+        _add_pl_video(db, "v_target", playlist_id="PL_FAIL", index=2)
+        _add_pl_video(db, "v_known_older", playlist_id="PL_FAIL", index=3)
+
+        db.update_video("v_known_newer", metadata={"upload_date": "20250110"})
+        db.update_video("v_known_older", metadata={"upload_date": "20250106"})
+
+        service = PlaylistService(db)
+        messages = []
+
+        class _Result:
+            ok = False
+            is_unavailable = True
+            upload_date = None
+            error_message = "video unavailable"
+
+        service._process_failed_fetches(
+            "PL_FAIL",
+            [("v_target", _Result())],
+            messages.append,
+        )
+
+        target = db.get_video("v_target")
+        assert target.metadata["upload_date"] == "20250108"
+        assert target.metadata["upload_date_interpolated"] is True
+        assert target.metadata["unavailable"] is True
+        assert target.metadata["unavailable_reason"] == "video unavailable"
+        assert any("永久不可用" in msg for msg in messages)
+
+    def test_process_failed_fetches_error_only_interpolates_without_unavailable(self, db):
+        _setup_playlist(db, "PL_ERR")
+        _add_pl_video(db, "v_known_newer", playlist_id="PL_ERR", index=1)
+        _add_pl_video(db, "v_target", playlist_id="PL_ERR", index=2)
+        _add_pl_video(db, "v_known_older", playlist_id="PL_ERR", index=3)
+
+        db.update_video("v_known_newer", metadata={"upload_date": "20250110"})
+        db.update_video("v_known_older", metadata={"upload_date": "20250106"})
+
+        service = PlaylistService(db)
+        messages = []
+
+        class _Result:
+            ok = False
+            is_unavailable = False
+            upload_date = None
+            error_message = "temporary network issue"
+
+        service._process_failed_fetches(
+            "PL_ERR",
+            [("v_target", _Result())],
+            messages.append,
+        )
+
+        target = db.get_video("v_target")
+        assert target.metadata["upload_date"] == "20250108"
+        assert target.metadata["upload_date_interpolated"] is True
+        assert "unavailable" not in target.metadata
+        assert "unavailable_reason" not in target.metadata
+        assert any("获取失败" in msg for msg in messages)

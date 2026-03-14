@@ -201,12 +201,16 @@ class BaseTranslator(ABC):
         """设置字幕段的翻译文本"""
         # 创建索引到翻译文本的映射
         translation_map = {data.index: data.translated_text for data in translated_list}
+        missing_indexes = []
 
         for i, seg in enumerate(original_segments, 1):
             if i not in translation_map:
-                logger.error(f"字幕段 {i} 没有翻译")
+                missing_indexes.append(i)
                 continue
             seg.translated_text = translation_map[i]
+
+        if missing_indexes:
+            raise RuntimeError(f"缺少翻译的字幕段: {missing_indexes}")
 
         return original_segments
 

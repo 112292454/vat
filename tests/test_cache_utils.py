@@ -103,3 +103,16 @@ class TestCacheInitAndSwitchContracts:
         assert cache_module._cache_enabled is True
         assert len(created) == 5
         assert cache_module.get_translate_cache() is not None
+
+    def test_getters_return_none_when_uninitialized(self, monkeypatch):
+        monkeypatch.setattr(cache_module, "_llm_cache", None)
+        monkeypatch.setattr(cache_module, "_asr_cache", None)
+        monkeypatch.setattr(cache_module, "_tts_cache", None)
+        monkeypatch.setattr(cache_module, "_translate_cache", None)
+        monkeypatch.setattr(cache_module, "_version_state_cache", None)
+
+        assert cache_module.get_llm_cache() is None
+        assert cache_module.get_asr_cache() is None
+        assert cache_module.get_tts_cache() is None
+        assert cache_module.get_translate_cache() is None
+        assert cache_module.get_version_state_cache() is None

@@ -215,3 +215,51 @@ class TestDownloadVideoContracts:
         monkeypatch.setattr("subprocess.run", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("ffmpeg should not run")))
 
         assert uploader.download_video(12345, tmp_path / "out.mp4") is False
+
+    def test_download_video_returns_false_when_ffmpeg_fails(self, monkeypatch, tmp_path):
+        uploader = _make_uploader()
+        session = MagicMock()
+        session.get.side_effect = [
+            _make_response({"code": 0, "data": {"pages": [{"cid": 999}]}}),
+            _make_response({
+                "code": 0,
+                "data": {
+                    "dash": {
+                        "video": [{"bandwidth": 2, "baseUrl": "video", "codecs": "h264", "width": 1920, "height": 1080}],
+                        "audio": [{"bandwidth": 1, "baseUrl": "audio", "codecs": "aac"}],
+                    }
+                },
+            }),
+        ]
+        uploader._get_authenticated_session.return_value = session
+        uploader.get_archive_detail = MagicMock(return_value=None)
+        monkeypatch.setattr(
+            "subprocess.run",
+            lambda *args, **kwargs: SimpleNamespace(returncode=1, stderr="ffmpeg failed"),
+        )
+
+        assert uploader.download_video(12345, tmp_path / "out.mp4") is False
+
+    def test_download_video_returns_false_when_ffmpeg_succeeds_without_output_file(self, monkeypatch, tmp_path):
+        uploader = _make_uploader()
+        session = MagicMock()
+        session.get.side_effect = [
+            _make_response({"code": 0, "data": {"pages": [{"cid": 999}]}}),
+            _make_response({
+                "code": 0,
+                "data": {
+                    "dash": {
+                        "video": [{"bandwidth": 2, "baseUrl": "video", "codecs": "h264", "width": 1920, "height": 1080}],
+                        "audio": [{"bandwidth": 1, "baseUrl": "audio", "codecs": "aac"}],
+                    }
+                },
+            }),
+        ]
+        uploader._get_authenticated_session.return_value = session
+        uploader.get_archive_detail = MagicMock(return_value=None)
+        monkeypatch.setattr(
+            "subprocess.run",
+            lambda *args, **kwargs: SimpleNamespace(returncode=0, stderr=""),
+        )
+
+        assert uploader.download_video(12345, tmp_path / "out.mp4") is False

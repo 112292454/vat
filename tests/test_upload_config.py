@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+from vat.uploaders import upload_config as upload_config_module
 from vat.uploaders.upload_config import UploadConfigManager, UploadConfig, save_upload_config, load_upload_config
 
 
@@ -114,3 +115,11 @@ class TestUploadConfigManager:
         )
 
         assert manager.save(config) is False
+
+    def test_get_upload_config_manager_is_singleton(self, monkeypatch):
+        monkeypatch.setattr(upload_config_module, "_manager", None)
+
+        first = upload_config_module.get_upload_config_manager()
+        second = upload_config_module.get_upload_config_manager()
+
+        assert first is second

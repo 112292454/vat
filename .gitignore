@@ -20,7 +20,7 @@ wheels/
 .installed.cfg
 *.egg
 *.pth
-docs/superpowers/worklogs/
+docs/superpowers/
 
 # IDEs & Editors
 .vscode/

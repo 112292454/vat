@@ -41,6 +41,24 @@ class TestCacheMetadataContracts:
         assert metadata.is_substep_valid("split", {"model": "other"}) is False
         assert metadata.is_substep_valid("translate", {"model": "other"}) is False
 
+    def test_load_returns_empty_metadata_when_json_broken(self, tmp_path):
+        (tmp_path / ".cache_metadata.json").write_text("{broken", encoding="utf-8")
+
+        metadata = CacheMetadata.load(tmp_path)
+
+        assert metadata.video_id == ""
+        assert metadata.substeps == {}
+
+    def test_update_substep_records_output_file_and_snapshot(self):
+        metadata = CacheMetadata(version="1.0", video_id="vid1")
+
+        metadata.update_substep("translate", {"model": "gemini"}, "translated.srt")
+
+        substep = metadata.substeps["translate"]
+        assert substep.output_file == "translated.srt"
+        assert substep.config_snapshot == {"model": "gemini"}
+        assert "T" in substep.completed_at
+
 
 class TestExtractKeyConfigContracts:
     def test_extract_key_config_serializes_nested_object_dict(self):

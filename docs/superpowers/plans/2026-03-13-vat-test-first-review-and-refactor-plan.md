@@ -856,6 +856,29 @@ Run: `pytest tests -q`
   - `tests/test_services.py` 中新增 `_calc_interpolated_date()` 与 `_process_failed_fetches()` 的失败恢复 helper 测试
   - `tests/test_services.py` 中新增 `_submit_translate_task()` 的“已有翻译跳过 / force 重翻并更新 metadata”测试
   - `tests/test_translator_contracts.py` 中新增 `_build_input_with_context()` 的纯 JSON / 带 reference context 拼接格式测试
+  - `tests/test_translator_contracts.py` 中新增 `_validate_llm_response()`、`_validate_optimization_result()`、`_try_realign_shifted_keys()`、`_optimize_chunk()` 的函数级契约测试
+  - `tests/test_bilibili_season_api.py` 中新增 `get_season_episodes()`、`add_to_season()`、`remove_from_season()` 的 API 底座契约测试
+  - `tests/test_bilibili_editing_api.py` 中新增 `edit_video_info()` 的 archive 缺失、videos 为空、公共 API 补 tag/desc、显式参数覆盖测试
+  - `tests/test_bilibili_replace_video.py` 中新增 `replace_video()` 的 archive 缺失、videos 为空、上传后无 filename、公共 API 补全字段、编辑失败返回 False 测试
+  - `tests/test_services.py` 中新增 `get_playlist_videos()/get_pending_videos()/get_completed_videos()/delete_playlist()/refresh_videos()` 的函数级契约测试
+  - `tests/test_bilibili_misc_api.py` 中新增 `delete_video()/get_my_videos()/get_video_detail()/get_archive_detail()/_get_full_desc()/bvid_to_aid()/download_video()` 的 wrapper 契约测试
+  - `tests/test_bilibili_upload_api.py` 中新增 `upload()/upload_with_metadata()/validate_credentials()/list_seasons()/create_season()` 的入口契约测试
+  - `tests/test_services.py` 中新增 `retranslate_videos()` 与 `downloader` property 的函数级契约测试
+  - `tests/test_services.py` 中新增 `sync_playlist(fetch_upload_dates=True)` 的成功补抓与异常回退插值测试
+  - `tests/test_video_info_translator.py` 中新增 `TranslatedVideoInfo` roundtrip 与 `VideoInfoTranslator` helper/translate 契约测试
+  - `tests/test_scene_identifier.py` 中新增 `SceneIdentifier` 的 helper 与 `detect_scene()` 契约测试
+  - `tests/test_upload_template.py` 中新增上传模板渲染与上下文构建测试
+  - `tests/test_upload_config.py` 中新增上传配置加载/保存/update_bilibili 测试
+  - `tests/test_docs_and_defaults.py` 中新增 Web 默认端口与 watch 默认值的一致性测试
+  - `tests/test_video_info_translator.py` 中新增空标题 fail-fast 与 JSON 解析重试测试
+  - `tests/test_scene_identifier.py` 中新增 `_load_scenes_config()` 缺失文件 fallback 与 `detect_scene()` 异常 fallback 测试
+  - `tests/test_upload_template.py` 中新增 `get_available_vars()` 与默认模板渲染测试
+  - `tests/test_upload_config.py` 中新增 `save_upload_config()` 便捷函数测试
+  - `tests/test_services.py` 中新增 `sync_playlist()` 的 playlist_info 为空、entries 无效、auto_add_videos=False 测试
+  - `tests/test_video_info_translator.py` 中新增网络重试与缺少 `title_translated` 时失败测试
+  - `tests/test_scene_identifier.py` 中新增 `_build_system_prompt()` 与空 choices fallback 测试
+  - `tests/test_upload_config.py` 中新增 `load_upload_config()` 与 `get_bilibili_dict()` 测试
+  - `tests/test_upload_template.py` 中新增 `_format_duration()` 测试
 - `本轮修复的问题`:
   - 已完成工作区清理，按 task 提交现有改动，并在 `refactor/test-first-hardening` 分支开始正式修复。
   - 修复 `VideoProcessor` 直接持有共享 `config` 的问题；现在在初始化时深拷贝配置，每个 processor 都拥有独立配置副本，避免 `passthrough` 和自动 playlist prompt 覆写跨视频串扰。
@@ -876,6 +899,8 @@ Run: `pytest tests -q`
   - 补齐 `vat/web/routes/playlists.py` 的第一批 API 契约测试：覆盖 `add/sync/refresh/retranslate` 的后台任务提交、重复提交保护，以及 `sync-status/refresh-status` 的状态映射。
   - 补齐 tools job 生命周期测试：`update_job_status()` 现在对 `[SUCCESS] / [FAILED] / cancel_requested` 三条收敛路径都有直接测试。
   - 补齐 `PlaylistService.sync_playlist()` 的基础契约测试：覆盖显式 target playlist ID 归属、已有视频复用关联、不重建视频记录、已有关联 playlist_index 更新等底层语义。
+  - 修复 `PlaylistService.sync_playlist()` 的一个缺陷：已有视频若 `metadata` 恰好为空 dict，会被错误跳过“缺失日期补抓”分支；现在空 metadata 也会正确进入 `videos_missing_date` 检查。
+  - 修复 Web 默认端口漂移：`vat/config.py` 的 `WebConfig`/`Config.from_dict()` fallback 以及 `README.md` / `README_EN.md` / `docs/webui_manual.md` 已统一到 `13579`。
   - 已完成本轮回归：
     - `pytest tests/test_pipeline.py tests/test_async_embedder.py tests/test_cli_process.py tests/test_web_jobs.py tests/test_watch_api.py tests/test_scheduled_upload.py tests/test_models.py tests/test_database_api.py -q`
     - `pytest tests/test_cli_process.py tests/test_models.py tests/test_pipeline.py tests/test_scheduled_upload.py -q`
@@ -905,8 +930,32 @@ Run: `pytest tests -q`
     - `HOME=/tmp pytest tests/test_translator_contracts.py -q`
     - `HOME=/tmp pytest tests/test_translator_contracts.py tests/test_translator_error_handling.py tests/test_vertex_translation_flow.py -q`
     - `HOME=/tmp pytest tests/test_services.py -q`
+    - `HOME=/tmp pytest tests/test_video_info_translator.py tests/test_scene_identifier.py -q`
+    - `HOME=/tmp pytest tests/test_upload_template.py tests/test_upload_config.py -q`
+    - `HOME=/tmp pytest tests/test_docs_and_defaults.py -q`
+    - `HOME=/tmp pytest tests/test_config.py tests/test_docs_and_defaults.py -q`
+    - `HOME=/tmp pytest tests/test_video_info_translator.py tests/test_scene_identifier.py tests/test_upload_template.py tests/test_upload_config.py -q`
+    - `HOME=/tmp pytest tests/test_services.py tests/test_translator_contracts.py tests/test_video_info_translator.py tests/test_scene_identifier.py tests/test_upload_template.py tests/test_upload_config.py tests/test_bilibili_upload_api.py tests/test_bilibili_misc_api.py tests/test_bilibili_season_api.py tests/test_bilibili_editing_api.py tests/test_bilibili_replace_video.py tests/test_bilibili_violation.py tests/test_tools_job.py tests/test_scheduled_upload.py tests/test_season_sync.py tests/test_season_title_sync.py tests/test_season_sorting.py tests/test_docs_and_defaults.py tests/test_config.py -q`
+    - `HOME=/tmp pytest tests --collect-only -q`
+    - `HOME=/tmp pytest tests/test_services.py tests/test_video_info_translator.py tests/test_scene_identifier.py -q`
     - `HOME=/tmp pytest tests/test_translator_contracts.py -q`
+    - `HOME=/tmp pytest tests/test_translator_contracts.py tests/test_translator_error_handling.py tests/test_vertex_translation_flow.py -q`
+    - `HOME=/tmp pytest tests/test_bilibili_season_api.py -q`
+    - `HOME=/tmp pytest tests/test_bilibili_editing_api.py -q`
+    - `HOME=/tmp pytest tests/test_bilibili_replace_video.py -q`
+    - `HOME=/tmp pytest tests/test_bilibili_season_api.py tests/test_bilibili_editing_api.py tests/test_bilibili_replace_video.py tests/test_bilibili_violation.py tests/test_tools_job.py tests/test_scheduled_upload.py tests/test_season_sync.py tests/test_season_title_sync.py tests/test_season_sorting.py -q`
+    - `HOME=/tmp pytest tests/test_services.py -q`
+    - `HOME=/tmp pytest tests/test_bilibili_misc_api.py -q`
+    - `HOME=/tmp pytest tests/test_bilibili_upload_api.py -q`
+    - `HOME=/tmp pytest tests/test_bilibili_upload_api.py tests/test_bilibili_misc_api.py tests/test_bilibili_season_api.py tests/test_bilibili_editing_api.py tests/test_bilibili_replace_video.py tests/test_bilibili_violation.py tests/test_tools_job.py tests/test_scheduled_upload.py tests/test_season_sync.py tests/test_season_title_sync.py tests/test_season_sorting.py -q`
+    - `HOME=/tmp pytest tests/test_services.py -q`
 - `下一步`: 继续自底向上补剩余高风险模块测试，优先是阶段语义漂移、playlist/upload/season 的原子性，以及翻译零容忍契约
+
+补充说明：
+
+- 当前累计的高价值子集回归已经稳定通过，最近一次大子集结果为 `437 passed`。
+- `pytest tests --collect-only -q` 已成功收集 `777` 条测试。
+- `pytest tests -q` 已启动过，但在本轮观察窗口内未收口，因此不能宣称“全量测试已通过”。
 
 ### 10.2 规划文档当前状态
 
@@ -946,9 +995,15 @@ Run: `pytest tests -q`
 | `vat/pipeline/executor.py` | `VideoProcessor.process` `_resolve_stage_gaps` `_set_passthrough_config` `_restore_passthrough_config` `_auto_apply_playlist_prompts` `_restore_playlist_prompts` `_is_no_speech` `_is_shorts_video` | `unit / contract / regression` | `covered_this_round` | 仍有大量 stage 实现函数未做直接函数级测试，但辅助控制逻辑这一轮已下探 |
 | `vat/uploaders/bilibili.py` | `season_sync` `sync_season_episode_titles` | `contract / regression` | `covered_this_round` | 已补成功同步、upload 已完成但无 aid 诊断、aid 查无、DB/合集不一致修复失败回写，以及删后重加标题同步的主要成功/失败路径；后续继续下探排序/删除组合原子性与真正补偿策略 |
 | `vat/translator/base.py` | `_set_segments_translated_text` `_safe_translate_chunk` | `contract / regression` | `covered_this_round` | 已收紧为“缺少任何翻译段即立即失败”，并补了缓存命中、写回、SQLite 锁降级的直接测试 |
-| `vat/translator/llm_translator.py` | `_get_cache_key` `_build_input_with_context` | `contract / regression` | `covered_this_round` | 已补 prompt / reflect / context 维度进入缓存键，并验证上下文输入拼接格式 |
+| `vat/translator/llm_translator.py` | `_get_cache_key` `_build_input_with_context` `_validate_llm_response` `_validate_optimization_result` `_try_realign_shifted_keys` `_optimize_chunk` | `contract / regression` | `covered_this_round` | 已补 prompt / reflect / context 缓存键、上下文输入格式、响应验证、优化验证、错位自动修复和优化反馈循环收敛路径 |
 | `vat/uploaders/bilibili.py` | `_extract_title_index` `sort_season_episodes` `auto_sort_season` | `unit / contract` | `covered_this_round` | 已补标题编号提取、缺失 aid 直接失败、未列出视频自动补尾、顺序已正确时跳过排序、新增视频已在末尾时跳过排序 |
-| `vat/services/playlist_service.py` | `_calc_interpolated_date` `_process_failed_fetches` `_submit_translate_task` | `unit / contract` | `covered_this_round` | 已补日期插值、永久不可用标记、临时错误只插值不打 unavailable 标记，以及视频信息翻译的跳过/重翻更新语义 |
+| `vat/services/playlist_service.py` | `_calc_interpolated_date` `_process_failed_fetches` `_submit_translate_task` `get_playlist_videos` `get_pending_videos` `get_completed_videos` `delete_playlist` `refresh_videos` `retranslate_videos` `downloader` `sync_playlist(fetch_upload_dates=True)` | `unit / contract` | `covered_this_round` | 已补日期插值、失败恢复、视频信息翻译调度，以及选择/删除/刷新/补抓日期/重翻译主路径的关键契约 |
+| `vat/uploaders/bilibili.py` | `get_season_episodes` `add_to_season` `remove_from_season` `edit_video_info` `replace_video` | `unit / contract / regression` | `covered_this_round` | 已补合集 API 底座、编辑 payload 组合、replace_video 两阶段失败返回语义；真正的远端补偿策略仍待后续设计 |
+| `vat/uploaders/bilibili.py` | `upload` `upload_with_metadata` `validate_credentials` `list_seasons` `create_season` `delete_video` `get_my_videos` `get_video_detail` `get_archive_detail` `_get_full_desc` `bvid_to_aid` `download_video` | `unit / contract` | `covered_this_round` | 上传器常规入口与常见 wrapper 现已补到位，剩余重点更多是补偿设计而非明显缺测试 |
+| `vat/llm/video_info_translator.py` | `TranslatedVideoInfo.to_dict/from_dict` `_strip_uploader_prefix` `_normalize_translations` `_build_zones_info` `translate` | `unit / contract` | `covered_this_round` | 已补 roundtrip、旧字段兼容、标题前缀剥离、译名规范化、JSON markdown 解析和重试 |
+| `vat/llm/scene_identifier.py` | `_load_scenes_config` `_is_valid_scene` `_get_scene_name` `_get_default_scene` `get_scene_prompts` `detect_scene` | `unit / contract` | `covered_this_round` | 已补缺失配置 fallback、有效/无效输出、异常 fallback 与默认场景收敛 |
+| `vat/uploaders/template.py` | `TemplateRenderer.render/get_available_vars` `build_upload_context` `render_upload_metadata` | `unit / contract` | `covered_this_round` | 已补模板渲染、未知变量保留、上下文字段构建和默认模板行为 |
+| `vat/uploaders/upload_config.py` | `UploadConfigManager.load/save/update_bilibili` `save_upload_config` | `unit / contract` | `covered_this_round` | 已补默认加载、save/load roundtrip、嵌套模板更新和便捷保存函数 |
 
 本节的维护规则：
 

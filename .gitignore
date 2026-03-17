@@ -20,6 +20,7 @@ wheels/
 .installed.cfg
 *.egg
 *.pth
+docs/superpowers/worklogs/
 
 # IDEs & Editors
 .vscode/
@@ -76,4 +77,3 @@ Thumbs.db
 .venv/
 env/
 venv/
-

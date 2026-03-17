@@ -313,3 +313,30 @@ class TestVideoInfoTranslatorTranslate:
             translator.translate("原标题", "原简介", [], uploader="主播")
 
         assert attempts["count"] == 1
+
+    def test_translate_allows_empty_uploader_and_still_returns_result(self, monkeypatch):
+        translator = VideoInfoTranslator(model="test-model")
+
+        class _FakeClient:
+            class chat:
+                class completions:
+                    @staticmethod
+                    def create(**kwargs):
+                        return SimpleNamespace(
+                            choices=[SimpleNamespace(message=SimpleNamespace(content=json.dumps({
+                                "title_translated": "翻译标题",
+                                "description_summary": "摘要",
+                                "description_translated": "翻译简介",
+                                "tags_translated": [],
+                                "tags_generated": [],
+                                "recommended_tid": 21,
+                                "recommended_tid_name": "日常",
+                                "tid_reason": "reason",
+                            }, ensure_ascii=False)))]
+                        )
+
+        monkeypatch.setattr(translator, "_get_client", lambda: _FakeClient())
+
+        result = translator.translate("原标题", "原简介", [], uploader="")
+
+        assert result.title_translated == "翻译标题"

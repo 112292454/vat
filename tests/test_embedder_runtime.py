@@ -1,6 +1,7 @@
 """embedder runtime 契约测试。"""
 
 import json
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -116,6 +117,38 @@ class TestFFmpegWrapperSoftEmbedContracts:
         wrapper = FFmpegWrapper()
 
         assert wrapper.extract_audio(tmp_path / "missing.mp4", tmp_path / "audio.wav") is False
+
+    def test_extract_audio_returns_true_when_ffmpeg_creates_output(self, monkeypatch, tmp_path):
+        monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/ffmpeg")
+        wrapper = FFmpegWrapper()
+        video = tmp_path / "video.mp4"
+        audio = tmp_path / "audio.wav"
+        video.write_bytes(b"00")
+
+        def fake_run(cmd, capture_output, text, check):
+            audio.write_bytes(b"11")
+            return SimpleNamespace(returncode=0)
+
+        monkeypatch.setattr("subprocess.run", fake_run)
+
+        assert wrapper.extract_audio(video, audio) is True
+
+    def test_extract_audio_returns_false_on_ffmpeg_failure(self, monkeypatch, tmp_path):
+        monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/ffmpeg")
+        wrapper = FFmpegWrapper()
+        video = tmp_path / "video.mp4"
+        audio = tmp_path / "audio.wav"
+        video.write_bytes(b"00")
+
+        class _CalledProcessError(Exception):
+            stderr = "failed"
+
+        def fake_run(cmd, capture_output, text, check):
+            raise subprocess.CalledProcessError(returncode=1, cmd=cmd, stderr="failed")
+
+        monkeypatch.setattr("subprocess.run", fake_run)
+
+        assert wrapper.extract_audio(video, audio) is False
 
 
 class TestFFmpegWrapperHardEmbedContracts:

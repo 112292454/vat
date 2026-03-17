@@ -102,3 +102,15 @@ class TestUploadConfigManager:
         ok = manager.update_bilibili({"default_tid": "not-an-int"})
 
         assert ok is False
+
+    def test_save_returns_false_on_write_exception(self, tmp_path, monkeypatch):
+        path = tmp_path / "upload.yaml"
+        manager = UploadConfigManager(config_path=path)
+        config = manager.load()
+
+        monkeypatch.setattr(
+            "builtins.open",
+            lambda *args, **kwargs: (_ for _ in ()).throw(OSError("disk full")),
+        )
+
+        assert manager.save(config) is False

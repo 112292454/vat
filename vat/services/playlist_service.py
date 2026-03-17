@@ -285,10 +285,12 @@ class PlaylistService:
         if fetch_upload_dates and existing_videos:
             for vid in existing_videos:
                 video = self.db.get_video(vid)
-                if video and video.metadata:
-                    upload_date = video.metadata.get('upload_date', '')
-                    if not upload_date:
-                        videos_missing_date.append(vid)
+                if video is None:
+                    continue
+                metadata = video.metadata or {}
+                upload_date = metadata.get('upload_date', '')
+                if not upload_date:
+                    videos_missing_date.append(vid)
             if videos_missing_date:
                 callback(f"发现 {len(videos_missing_date)} 个已存在视频缺少日期，将一并获取")
         

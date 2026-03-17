@@ -700,6 +700,137 @@ class TestExecuteStepDispatch:
             vp._execute_step(fake_step)
 
 
+class TestDownloadStageContracts:
+    def test_run_download_fails_when_guaranteed_field_missing(self, tmp_path, monkeypatch):
+        from vat.pipeline.exceptions import DownloadError
+
+        processor, _, _ = _make_real_vp(tmp_path)
+        video_file = processor.output_dir / "video.mp4"
+        video_file.write_bytes(b"00")
+
+        class _FakeDownloader:
+            guaranteed_fields = {"title"}
+
+            def download(self, source_url, output_dir, **kwargs):
+                return {
+                    "video_path": str(video_file),
+                    "title": "",
+                    "metadata": {"duration": 120},
+                    "subtitles": {},
+                }
+
+        processor._downloader = _FakeDownloader()
+        monkeypatch.setattr(processor, "_download_thumbnail", lambda *_args, **_kwargs: None)
+
+        with pytest.raises(DownloadError, match="数据契约违反"):
+            processor._run_download()
+
+    def test_run_download_sets_manual_subtitle_source_when_manual_target_sub_exists(self, tmp_path, monkeypatch):
+        processor, db, _ = _make_real_vp(tmp_path)
+        video_file = processor.output_dir / "video.mp4"
+        sub_file = processor.output_dir / "ja.vtt"
+        video_file.write_bytes(b"00")
+        sub_file.write_text("WEBVTT", encoding="utf-8")
+
+        class _FakeDownloader:
+            guaranteed_fields = {"title", "duration"}
+
+            def download(self, source_url, output_dir, **kwargs):
+                return {
+                    "video_path": str(video_file),
+                    "title": "视频标题",
+                    "metadata": {
+                        "duration": 120,
+                        "available_subtitles": ["ja"],
+                        "available_auto_subtitles": [],
+                        "uploader": "频道",
+                    },
+                    "subtitles": {"ja": sub_file},
+                }
+
+        monkeypatch.setattr(processor, "_download_thumbnail", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr("vat.llm.scene_identifier.SceneIdentifier", lambda *args, **kwargs: MagicMock(detect_scene=lambda title, description: {
+            "scene_id": "chatting", "scene_name": "闲聊", "auto_detected": True,
+        }))
+        monkeypatch.setattr("vat.llm.video_info_translator.VideoInfoTranslator", lambda *args, **kwargs: MagicMock(translate=lambda **_kw: SimpleNamespace(
+            to_dict=lambda: {"title_translated": "翻译标题"},
+            recommended_tid_name="日常",
+        )))
+        processor._downloader = _FakeDownloader()
+
+        assert processor._run_download() is True
+        video = db.get_video("test_vid")
+        assert video.metadata["subtitle_source"] == "manual"
+        assert video.metadata["manual_subtitle_path"] == str(sub_file)
+
+    def test_run_download_sets_auto_subtitle_source_when_only_auto_sub_available(self, tmp_path, monkeypatch):
+        processor, db, _ = _make_real_vp(tmp_path)
+        video_file = processor.output_dir / "video.mp4"
+        video_file.write_bytes(b"00")
+
+        class _FakeDownloader:
+            guaranteed_fields = {"title", "duration"}
+
+            def download(self, source_url, output_dir, **kwargs):
+                return {
+                    "video_path": str(video_file),
+                    "title": "视频标题",
+                    "metadata": {
+                        "duration": 120,
+                        "available_subtitles": [],
+                        "available_auto_subtitles": ["ja"],
+                        "uploader": "频道",
+                    },
+                    "subtitles": {},
+                }
+
+        monkeypatch.setattr(processor, "_download_thumbnail", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr("vat.llm.scene_identifier.SceneIdentifier", lambda *args, **kwargs: MagicMock(detect_scene=lambda title, description: {
+            "scene_id": "chatting", "scene_name": "闲聊", "auto_detected": True,
+        }))
+        monkeypatch.setattr("vat.llm.video_info_translator.VideoInfoTranslator", lambda *args, **kwargs: MagicMock(translate=lambda **_kw: SimpleNamespace(
+            to_dict=lambda: {"title_translated": "翻译标题"},
+            recommended_tid_name="日常",
+        )))
+        processor._downloader = _FakeDownloader()
+
+        assert processor._run_download() is True
+        video = db.get_video("test_vid")
+        assert video.metadata["subtitle_source"] == "auto"
+
+    def test_run_download_reuses_existing_translated_video_info_when_not_forced(self, tmp_path, monkeypatch):
+        processor, db, _ = _make_real_vp(tmp_path)
+        db.update_video("test_vid", metadata={"translated": {"title_translated": "旧翻译"}})
+        processor.video = db.get_video("test_vid")
+        video_file = processor.output_dir / "video.mp4"
+        video_file.write_bytes(b"00")
+
+        class _FakeDownloader:
+            guaranteed_fields = {"title", "duration"}
+
+            def download(self, source_url, output_dir, **kwargs):
+                return {
+                    "video_path": str(video_file),
+                    "title": "视频标题",
+                    "metadata": {"duration": 120, "uploader": "频道"},
+                    "subtitles": {},
+                }
+
+        monkeypatch.setattr(processor, "_download_thumbnail", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr("vat.llm.scene_identifier.SceneIdentifier", lambda *args, **kwargs: MagicMock(detect_scene=lambda title, description: {
+            "scene_id": "chatting", "scene_name": "闲聊", "auto_detected": True,
+        }))
+        monkeypatch.setattr(
+            "vat.llm.video_info_translator.VideoInfoTranslator",
+            lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should not create translator")),
+        )
+        processor._downloader = _FakeDownloader()
+
+        assert processor._run_download() is True
+        video = db.get_video("test_vid")
+        assert video.metadata["translated"] == {"title_translated": "旧翻译"}
+
+
 # ==================== Scheduler download_delay mock 测试 ====================
 
 class TestSchedulerDownloadDelay:

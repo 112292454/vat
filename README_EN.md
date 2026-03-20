@@ -524,6 +524,7 @@ See [GPU Allocation Spec](docs/archive/gpu_allocation_spec.md) for multi-GPU tas
 |----------|---------|
 | [ASR Evaluation Report](docs/ASR_EVALUATION_REPORT.md) | Whisper parameter evaluation across 350 VTuber videos |
 | [Translation & ASR Evaluation](docs/TRANSLATION_AND_ASR_EVALUATION.md) | Domestic/overseas LLM translation comparison, ASR enhancement experiments |
+| [Qwen3-Omni Captioner Evaluation](docs/qwen3_omni_caption.md) | Reproduction, expanded testing, conclusions, and future usage guidance for the audio summary model |
 | [Prompt Optimization Guide](docs/prompt_optimization_guide.md) | Translation/optimization prompt writing |
 | [GPU Allocation Spec](docs/archive/gpu_allocation_spec.md) | Multi-GPU scheduling strategy |
 | [WebUI Manual](docs/webui_manual.md) | Web UI operation guide |

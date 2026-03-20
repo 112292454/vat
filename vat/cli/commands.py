@@ -657,7 +657,10 @@ def process(ctx, video_id, process_all, playlist, stages, gpu, force, dry_run, c
     # 去重
     video_ids = list(dict.fromkeys(video_ids))
 
-    if force and target_steps:
+    def _invalidate_requested_downstream_tasks():
+        if not force or not target_steps:
+            return
+
         first_step = min(
             target_steps,
             key=lambda step: DEFAULT_STAGE_SEQUENCE.index(step),
@@ -699,6 +702,8 @@ def process(ctx, video_id, process_all, playlist, stages, gpu, force, dry_run, c
             return
         
         # 进入定时上传流程
+        if not dry_run:
+            _invalidate_requested_downstream_tasks()
         if upload_mode == 'dtime':
             _run_dtime_uploads(config, db, logger, video_ids, upload_cron, force, dry_run, playlist_id=playlist, batch_size=upload_batch_size)
         else:
@@ -730,6 +735,8 @@ def process(ctx, video_id, process_all, playlist, stages, gpu, force, dry_run, c
         cli_cmd = _generate_process_cli(video_ids, stages, gpu, force)
         logger.info(f"等价 CLI 命令: {cli_cmd}")
         return
+
+    _invalidate_requested_downstream_tasks()
     
     # 设置 GPU
     config.gpu.device = gpu

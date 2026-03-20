@@ -273,7 +273,7 @@ concurrency:
 # 日志配置
 # =============================================================================
 logging:
-  level: "INFO"                             # 日志级别： DEBUG/INFO/WARNING/ERROR
+  level: "DEBUG"                             # 日志级别： DEBUG/INFO/WARNING/ERROR
   file: "vat.log"                          # 日志文件
   format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 
@@ -295,12 +295,12 @@ llm:
 # =============================================================================
 proxy:
   http_proxy: "http://localhost:7890"       # 全局默认代理（用于下载器、HuggingFace 模型加载、LLM API 等）
-                                            # 留空字符串 "" 表示不使用代理
+                                            # 留空字符串 "" 表示不使用代理 # yiyuan 2000g
   # 各环节代理覆盖（留空或不设置 = 使用全局 http_proxy）
   # 解析优先级：环节专属 → llm（LLM环节共用） → http_proxy
-  downloader: "http://localhost:7790"                          # 下载器（YouTube 访问）
+  downloader: "http://localhost:7790"                          # 下载器（YouTube 访问） zqm inf
   # llm: ""                                 # 所有 LLM API 调用的默认代理
-  translate: "http://localhost:7990"                           # 翻译 LLM（如 Google API 需特定地区代理）
+  translate: "http://localhost:7990"                           # 翻译 LLM（如 Google API 需特定地区代理） # glados
   optimize: ""                              # 优化 LLM（火山引擎国内服务，不需要代理）
   # split: ""                               # 断句 LLM
   # scene_identify: ""                      # 场景识别 LLM

@@ -1,7 +1,7 @@
 import pytest
 from unittest.mock import MagicMock
 
-from vat.llm.client import call_llm
+from vat.llm.client import _get_vertex_access_token, call_llm
 
 
 class TestVertexNativeClient:
@@ -93,7 +93,7 @@ class TestVertexNativeClient:
 
         monkeypatch.setattr(
             "vat.llm.client._get_vertex_access_token",
-            lambda credentials_path="": "test-access-token",
+            lambda credentials_path="", proxy="": "test-access-token",
             raising=False,
         )
 
@@ -133,3 +133,72 @@ class TestVertexNativeClient:
         )
         assert captured["headers"]["Authorization"] == "Bearer test-access-token"
         assert "key=" not in captured["url"]
+
+    def test_call_llm_vertex_native_adc_passes_proxy_to_access_token_refresh(self, monkeypatch):
+        monkeypatch.setenv("VAT_LLM_PROVIDER", "vertex_native")
+        monkeypatch.setenv("VAT_VERTEX_AUTH_MODE", "adc")
+        monkeypatch.setenv("VAT_VERTEX_LOCATION", "global")
+        monkeypatch.setenv("VAT_VERTEX_PROJECT_ID", "vertex-490203")
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+
+        captured = {}
+
+        def fake_get_vertex_access_token(credentials_path="", proxy=""):
+            captured["credentials_path"] = credentials_path
+            captured["proxy"] = proxy
+            return "test-access-token"
+
+        def fake_post(url, json, headers, timeout, proxy=None):
+            response = MagicMock()
+            response.json.return_value = {
+                "candidates": [{"content": {"parts": [{"text": "vertex adc response"}]}}]
+            }
+            response.raise_for_status.return_value = None
+            return response
+
+        monkeypatch.setattr("vat.llm.client._get_vertex_access_token", fake_get_vertex_access_token)
+        monkeypatch.setattr("vat.llm.client.httpx.post", fake_post)
+
+        response = call_llm(
+            messages=[{"role": "user", "content": "Hello from adc"}],
+            model="gemini-2.5-flash",
+            proxy="http://translate-proxy:7890",
+        )
+
+        assert response.choices[0].message.content == "vertex adc response"
+        assert captured["proxy"] == "http://translate-proxy:7890"
+
+
+class TestVertexAccessTokenProxyContracts:
+    def test_get_vertex_access_token_uses_proxy_session_for_refresh(self, monkeypatch):
+        captured = {}
+
+        class FakeCredentials:
+            token = "refreshed-token"
+
+            def refresh(self, request):
+                captured["request"] = request
+
+        def fake_from_service_account_file(path, scopes):
+            captured["path"] = path
+            captured["scopes"] = scopes
+            return FakeCredentials()
+
+        def fake_request(session=None):
+            captured["session"] = session
+            return "request-object"
+
+        monkeypatch.setattr("vat.llm.client._resolve_vertex_credentials_path", lambda _path="": "/tmp/fake.json")
+        monkeypatch.setattr(
+            "vat.llm.client.service_account.Credentials.from_service_account_file",
+            fake_from_service_account_file,
+        )
+        monkeypatch.setattr("vat.llm.client.GoogleAuthRequest", fake_request)
+
+        token = _get_vertex_access_token("/tmp/fake.json", proxy="http://translate-proxy:7890")
+
+        assert token == "refreshed-token"
+        assert captured["path"] == "/tmp/fake.json"
+        assert captured["session"].proxies["http"] == "http://translate-proxy:7890"
+        assert captured["session"].proxies["https"] == "http://translate-proxy:7890"

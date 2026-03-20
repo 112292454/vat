@@ -6,8 +6,12 @@ web/jobs.py 单元测试
 """
 import os
 import tempfile
-import pytest
+from contextlib import contextmanager
 from pathlib import Path
+from unittest.mock import MagicMock
+
+import pytest
+
 from vat.web.jobs import JobManager, JobStatus, WebJob
 
 
@@ -143,6 +147,38 @@ class TestProgressLogParsing:
         jm, tmpdir = self._make_jm()
         assert jm._parse_progress_from_log(None) == 0.0
         import shutil; shutil.rmtree(tmpdir)
+
+
+class TestJobProcessStartupCleanup:
+
+    def test_start_job_process_kills_spawned_process_when_db_update_fails(self, job_env, monkeypatch):
+        jm, _, _ = job_env
+        fake_process = MagicMock(pid=43210)
+        kill_calls = []
+
+        monkeypatch.setattr(jm, "_build_process_command", lambda *args, **kwargs: ["python", "-m", "vat", "process"])
+        monkeypatch.setattr("vat.web.jobs.subprocess.Popen", lambda *args, **kwargs: fake_process)
+        monkeypatch.setattr("vat.web.jobs.os.getpgid", lambda pid: 98765)
+        monkeypatch.setattr("vat.web.jobs.os.killpg", lambda pgid, sig: kill_calls.append((pgid, sig)))
+
+        @contextmanager
+        def _failing_connection():
+            raise RuntimeError("db update failed")
+            yield
+
+        monkeypatch.setattr(jm, "_get_connection", _failing_connection)
+
+        with pytest.raises(RuntimeError, match="db update failed"):
+            jm._start_job_process(
+                job_id="job1",
+                video_ids=["v1"],
+                steps=["download"],
+                gpu_device="auto",
+                force=False,
+                log_file=os.path.join(jm.log_dir, "job1.log"),
+            )
+
+        assert kill_calls, "启动后的子进程应在 DB 更新失败时被终止"
 
 
 class TestVideoDeduplication:

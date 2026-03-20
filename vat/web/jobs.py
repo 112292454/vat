@@ -285,30 +285,46 @@ class JobManager:
         
         # 打开日志文件
         log_fd = open(log_file, "w", buffering=1)  # 行缓冲
-        
-        # 启动子进程（PYTHONUNBUFFERED=1 确保日志实时写入文件，不被缓冲）
-        env = os.environ.copy()
-        env["PYTHONUNBUFFERED"] = "1"
-        
-        process = subprocess.Popen(
-            cmd,
-            stdout=log_fd,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,  # 独立进程组，不受父进程影响
-            cwd=str(Path(__file__).parent.parent.parent),  # VAT 项目根目录
-            env=env,
-        )
-        
-        # 更新数据库
-        with self._get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("""
-                UPDATE web_jobs 
-                SET status = ?, pid = ?, started_at = ?
-                WHERE job_id = ?
-            """, (JobStatus.RUNNING.value, process.pid, datetime.now(), job_id))
+        process = None
+        try:
+            # 启动子进程（PYTHONUNBUFFERED=1 确保日志实时写入文件，不被缓冲）
+            env = os.environ.copy()
+            env["PYTHONUNBUFFERED"] = "1"
+            
+            process = subprocess.Popen(
+                cmd,
+                stdout=log_fd,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,  # 独立进程组，不受父进程影响
+                cwd=str(Path(__file__).parent.parent.parent),  # VAT 项目根目录
+                env=env,
+            )
+            
+            # 更新数据库
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    UPDATE web_jobs 
+                    SET status = ?, pid = ?, started_at = ?
+                    WHERE job_id = ?
+                """, (JobStatus.RUNNING.value, process.pid, datetime.now(), job_id))
+        except Exception:
+            if process is not None:
+                self._terminate_process_group(process.pid)
+            raise
+        finally:
+            log_fd.close()
         
         logger.info(f"任务进程已启动: {job_id}, PID: {process.pid}")
+
+    def _terminate_process_group(self, pid: int) -> None:
+        """终止任务进程组；用于启动失败后的兜底清理。"""
+        try:
+            pgid = os.getpgid(pid)
+            os.killpg(pgid, signal.SIGTERM)
+            logger.warning(f"任务启动未完成，已终止遗留子进程组: pid={pid}, pgid={pgid}")
+        except ProcessLookupError:
+            logger.warning(f"任务启动清理时未找到进程: pid={pid}")
     
     @staticmethod
     def _build_process_command(

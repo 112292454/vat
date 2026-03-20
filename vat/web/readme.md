@@ -67,7 +67,7 @@ FastAPI (app.py)
 | `playlists.py` | `/api/playlists` | Playlist CRUD、同步、刷新、重翻译 |
 | `tasks.py` | `/api/tasks` | 任务创建、状态查询、取消、日志查看 |
 | `files.py` | `/api/files` | 字幕文件查看/编辑、视频文件服务 |
-| `bilibili.py` | `/bilibili` | B 站合集管理、违规修复、元信息同步 |
+| `bilibili.py` | `/bilibili` | B 站合集管理、违规修复、单视频/整合集元信息同步 |
 | `prompts.py` | `/api/prompts` | 提示词查看/编辑（热重载） |
 | `watch.py` | `/api/watch` | Watch 会话管理（启动/停止/删除/轮次查询） |
 | `database.py` | `/api/database` | 数据库只读浏览（表列表/分页查询/行详情） |
@@ -116,7 +116,7 @@ JobManager 通过轮询子进程 stdout 解析标准化标记：
 | `tasks.html` | 任务列表（状态、进度、日志） |
 | `task_new.html` | 新建任务（选择视频/阶段/GPU） |
 | `task_detail.html` | 任务详情（实时日志） |
-| `bilibili.html` | B 站管理（合集、违规修复） |
+| `bilibili.html` | B 站管理（合集、批量同步、违规修复） |
 | `prompts.html` | 提示词编辑器 |
 | `watch.html` | Watch 模式管理（会话列表、轮次详情、新建/停止/删除） |
 | `database.html` | 数据库浏览（表列表、分页查询、行详情弹窗） |

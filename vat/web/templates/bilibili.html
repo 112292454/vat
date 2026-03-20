@@ -72,6 +72,9 @@
                             <button onclick="syncSeasonTitles({{ s.season_id }})" class="text-purple-600 hover:text-purple-800">
                                 同步标题
                             </button>
+                            <button onclick="resyncSeasonInfo({{ s.season_id }})" class="text-orange-600 hover:text-orange-800" id="resync-season-btn-{{ s.season_id }}">
+                                同步信息
+                            </button>
                             <button onclick="copySeasonId({{ s.season_id }})" class="text-gray-500 hover:text-gray-700">
                                 复制ID
                             </button>
@@ -540,6 +543,54 @@ async function syncSeasonTitles(seasonId) {
         }
     } catch (e) {
         alert('标题同步异常: ' + e);
+    }
+}
+
+// 按合集批量同步视频元信息
+async function resyncSeasonInfo(seasonId) {
+    const btn = document.getElementById(`resync-season-btn-${seasonId}`);
+    const originalText = btn ? btn.textContent : '同步信息';
+    const confirmed = confirm(
+        `确认同步合集 ${seasonId} 中所有视频的元信息？\n` +
+        `将逐个刷新标题、简介、标签、分区，并在每个视频之间等待约 1 秒。`
+    );
+    if (!confirmed) return;
+
+    if (btn) {
+        btn.disabled = true;
+        btn.textContent = '同步中...';
+    }
+
+    try {
+        const resp = await fetch(`/bilibili/season/${seasonId}/resync-info`, { method: 'POST' });
+        const data = await resp.json();
+
+        if (!data.success) {
+            alert(`信息同步失败: ${data.error}`);
+            return;
+        }
+
+        if (Array.isArray(data.details)) {
+            data.details.forEach((item) => {
+                if (!item.success || !item.aid || !item.title) return;
+                const titleEl = document.getElementById(`ep-title-${item.aid}`);
+                if (titleEl) titleEl.textContent = item.title;
+            });
+        }
+
+        alert(
+            `${data.message}\n` +
+            `成功: ${data.refreshed} 个\n` +
+            `失败: ${data.failed} 个\n` +
+            `跳过: ${data.skipped} 个`
+        );
+    } catch (e) {
+        alert(`信息同步异常: ${e}`);
+    } finally {
+        if (btn) {
+            btn.disabled = false;
+            btn.textContent = originalText;
+        }
     }
 }
 

@@ -10,6 +10,7 @@ from urllib.parse import urlparse, urlunparse
 import google.auth
 import httpx
 import openai
+import requests
 from google.auth.transport.requests import Request as GoogleAuthRequest
 from google.oauth2 import service_account
 from openai import OpenAI
@@ -153,7 +154,7 @@ def _resolve_vertex_credentials_path(credentials_path: str = "") -> str:
     raise ValueError(f"Vertex ADC 凭据路径不存在: {raw_path}")
 
 
-def _get_vertex_access_token(credentials_path: str = "") -> str:
+def _get_vertex_access_token(credentials_path: str = "", proxy: str = "") -> str:
     scopes = ["https://www.googleapis.com/auth/cloud-platform"]
     resolved_path = _resolve_vertex_credentials_path(credentials_path)
 
@@ -165,7 +166,12 @@ def _get_vertex_access_token(credentials_path: str = "") -> str:
             )
         else:
             credentials, _ = google.auth.default(scopes=scopes)
-        credentials.refresh(GoogleAuthRequest())
+        request_kwargs = {}
+        if proxy:
+            session = requests.Session()
+            session.proxies.update({"http": proxy, "https": proxy})
+            request_kwargs["session"] = session
+        credentials.refresh(GoogleAuthRequest(**request_kwargs))
     except Exception as exc:
         raise RuntimeError(f"Vertex ADC 认证失败: {exc}") from exc
 
@@ -196,7 +202,7 @@ def _call_vertex_native(
             raise ValueError("Vertex LLM 配置不完整: project_id=缺失")
         if not location:
             raise ValueError("Vertex LLM 配置不完整: location=缺失")
-        headers["Authorization"] = f"Bearer {_get_vertex_access_token()}"
+        headers["Authorization"] = f"Bearer {_get_vertex_access_token(proxy=proxy)}"
         endpoint = (
             "https://aiplatform.googleapis.com/v1/projects/"
             f"{project_id}/locations/{location}/publishers/google/models/{model}:generateContent"

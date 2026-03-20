@@ -17,6 +17,7 @@ B站的"合集"分为两种类型：
 | 获取合集视频列表 | ✅ 可用 | `get_season_episodes(season_id)` |
 | 获取合集列表 | ✅ 可用 | `list_seasons()` |
 | 合集内视频排序 | ✅ 可用 | `sort_season_episodes(season_id, aids_in_order)` |
+| 按合集批量刷新元信息 | ✅ 可用 | `resync_season_video_infos(db, uploader, config, season_id)` |
 | 创建合集 | ⚠ 未验证 | `create_season()` — 代码已实现但未实测 |
 
 ## 配置方式
@@ -135,3 +136,14 @@ Content-Type: application/json
 - **添加后合集数量没变**：检查是否使用了正确的 `season_id`（不是 `section_id`）
 - **bvid_to_aid 返回 None**：新上传的视频可能需要几秒到几分钟才能被 B站索引，executor 已内置重试
 - **Cookie 过期**：重新运行 `scripts/bilibili_login.py` 获取新 cookie
+
+## WebUI 批量同步元信息
+
+`/bilibili` 页面中的合集管理支持两类刷新操作：
+
+- **同步标题**：调用 `sync_season_episode_titles(season_id)`，通过删后重加的方式刷新合集内显示标题
+- **同步信息**：调用 `resync_season_video_infos(...)`，逐个复用 `resync_video_info(...) -> edit_video_info(...)` 链路，刷新稿件标题、简介、标签、分区
+
+其中“同步信息”不会修改合集内 episode title；如果需要让合集中的显示标题也和最新稿件标题一致，仍需再执行一次“同步标题”。
+
+批量同步信息时默认在相邻视频之间等待 `1` 秒，和 CLI `vat tools update-info` 的节奏保持一致，用于降低短时间连续编辑触发限流的概率。

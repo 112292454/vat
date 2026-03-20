@@ -2247,6 +2247,109 @@ def resync_video_info(
     return result
 
 
+def resync_season_video_infos(
+    db: Any,
+    uploader: BilibiliUploader,
+    config: Any,
+    season_id: int,
+    delay_seconds: float = 1.0,
+    callback: Optional[callable] = None,
+) -> Dict[str, Any]:
+    """
+    按合集批量刷新视频元信息。
+
+    复用 ``resync_video_info`` 的 DB 模板渲染与 ``edit_video_info`` 调用链，
+    顺序处理合集中的每个视频，并在请求之间加入短暂等待，避免频繁编辑触发限流。
+
+    Args:
+        db: Database 实例
+        uploader: BilibiliUploader 实例
+        config: 配置对象
+        season_id: B站合集 ID
+        delay_seconds: 相邻视频之间的等待秒数
+        callback: 日志回调（可选）
+
+    Returns:
+        {
+            'success': bool,         # 批处理是否成功执行到结束；单条失败会体现在 failed 中
+            'season_id': int,
+            'refreshed': int,        # 成功同步数量
+            'failed': int,           # 同步失败数量
+            'skipped': int,          # 缺少 aid 等被跳过数量
+            'details': list,         # 每个条目的结果
+            'message': str,
+        }
+    """
+    _cb = callback or (lambda msg: None)
+    result = {
+        'success': False,
+        'season_id': season_id,
+        'refreshed': 0,
+        'failed': 0,
+        'skipped': 0,
+        'details': [],
+        'message': '',
+    }
+
+    season_info = uploader.get_season_episodes(season_id)
+    if not season_info:
+        result['message'] = '无法获取合集信息'
+        _cb(result['message'])
+        return result
+
+    episodes = season_info.get('episodes', [])
+    if not episodes:
+        result['success'] = True
+        result['message'] = f'合集 {season_id} 中暂无视频'
+        _cb(result['message'])
+        return result
+
+    total = len(episodes)
+    _cb(f"开始同步合集 {season_id} 元信息，共 {total} 个视频")
+
+    for idx, ep in enumerate(episodes):
+        aid = ep.get('aid')
+        if not aid:
+            result['skipped'] += 1
+            result['details'].append({
+                'aid': None,
+                'success': False,
+                'title': '',
+                'message': '合集条目缺少 aid，已跳过',
+            })
+            _cb(f"[{idx + 1}/{total}] 缺少 aid，跳过")
+        else:
+            _cb(f"[{idx + 1}/{total}] 开始同步 av{aid}")
+            try:
+                item = resync_video_info(db, uploader, config, int(aid), callback=_cb)
+            except Exception as e:
+                logger.error(f"批量同步合集 {season_id} 的 av{aid} 异常: {e}", exc_info=True)
+                item = {'success': False, 'title': '', 'message': str(e)}
+
+            if item.get('success'):
+                result['refreshed'] += 1
+            else:
+                result['failed'] += 1
+
+            result['details'].append({
+                'aid': int(aid),
+                'success': bool(item.get('success')),
+                'title': item.get('title', ''),
+                'message': item.get('message', ''),
+            })
+
+        if idx < total - 1 and delay_seconds > 0:
+            time.sleep(delay_seconds)
+
+    result['success'] = True
+    result['message'] = (
+        f"合集 {season_id} 元信息同步完成：成功 {result['refreshed']}，"
+        f"失败 {result['failed']}，跳过 {result['skipped']}"
+    )
+    _cb(result['message'])
+    return result
+
+
 def create_bilibili_uploader(config: Any) -> BilibiliUploader:
     """
     从配置创建B站上传器

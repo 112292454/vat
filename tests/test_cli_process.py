@@ -320,6 +320,44 @@ class TestProcessStageContracts:
         assert result.exit_code == 0
         fake_db.invalidate_downstream_tasks.assert_called_once_with("v1", TaskStep.TRANSLATE)
 
+    def test_process_force_dry_run_does_not_invalidate_downstream_tasks(self, monkeypatch):
+        config = _minimal_config()
+        fake_db = MagicMock()
+        fake_db.get_video.return_value = SimpleNamespace(id="v1", title="title-v1")
+
+        monkeypatch.setattr("vat.cli.commands.get_config", lambda path: config)
+        monkeypatch.setattr("vat.cli.commands.get_logger", lambda: MagicMock())
+        monkeypatch.setattr("vat.cli.commands.Database", lambda *args, **kwargs: fake_db)
+
+        result = CliRunner().invoke(
+            process_cmd,
+            ["-v", "v1", "-s", "translate", "--force", "--dry-run"],
+            obj={"config_path": "unused.yaml"},
+            catch_exceptions=False,
+        )
+
+        assert result.exit_code == 0
+        fake_db.invalidate_downstream_tasks.assert_not_called()
+
+    def test_process_force_invalid_upload_cron_does_not_invalidate_downstream_tasks(self, monkeypatch):
+        config = _minimal_config()
+        fake_db = MagicMock()
+
+        monkeypatch.setattr("vat.cli.commands.get_config", lambda path: config)
+        monkeypatch.setattr("vat.cli.commands.get_logger", lambda: MagicMock())
+        monkeypatch.setattr("vat.cli.commands.Database", lambda *args, **kwargs: fake_db)
+
+        result = CliRunner().invoke(
+            process_cmd,
+            ["-v", "v1", "-s", "upload", "--force", "--upload-cron", "invalid"],
+            obj={"config_path": "unused.yaml"},
+            catch_exceptions=False,
+        )
+
+        assert result.exit_code == 0
+        assert "无效的 cron 表达式" in result.output
+        fake_db.invalidate_downstream_tasks.assert_not_called()
+
     def test_process_rejects_invalid_stage_name(self, monkeypatch):
         config = _minimal_config()
         fake_db = MagicMock()

@@ -7,12 +7,13 @@ from pathlib import Path
 from typing import Optional, Dict, Any, List
 
 from fastapi import APIRouter, Request, Form, HTTPException
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from ...config import load_config
 from ...database import Database
-from ...uploaders.bilibili import BilibiliUploader
+from ...uploaders.bilibili import BilibiliUploader, resync_season_video_infos
 from ...uploaders.upload_config import get_upload_config_manager, UploadConfigManager
 from ...embedder.ffmpeg_wrapper import FFmpegWrapper
 from ...utils.logger import setup_logger
@@ -688,6 +689,48 @@ async def resync_video_info_route(aid: int):
             })
     except Exception as e:
         logger.error(f"resync-info 失败 av{aid}: {e}", exc_info=True)
+        return JSONResponse({"success": False, "error": str(e)})
+
+
+@router.post("/season/{season_id}/resync-info")
+async def resync_season_info_route(season_id: int):
+    """按合集批量刷新视频元信息（标题/简介/标签/分区）"""
+    try:
+        config = load_config()
+        db = Database(config.storage.database_path, output_base_dir=config.storage.output_dir)
+        uploader = _get_uploader(with_upload_params=False)
+
+        result = await run_in_threadpool(
+            resync_season_video_infos,
+            db=db,
+            uploader=uploader,
+            config=config,
+            season_id=season_id,
+            delay_seconds=1.0,
+        )
+
+        if result['success']:
+            return JSONResponse({
+                "success": True,
+                "season_id": season_id,
+                "refreshed": result['refreshed'],
+                "failed": result['failed'],
+                "skipped": result['skipped'],
+                "details": result['details'],
+                "message": result['message'],
+            })
+
+        return JSONResponse({
+            "success": False,
+            "season_id": season_id,
+            "error": result['message'],
+            "refreshed": result['refreshed'],
+            "failed": result['failed'],
+            "skipped": result['skipped'],
+            "details": result['details'],
+        })
+    except Exception as e:
+        logger.error(f"合集批量同步信息失败 season={season_id}: {e}", exc_info=True)
         return JSONResponse({"success": False, "error": str(e)})
 
 

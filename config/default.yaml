@@ -169,15 +169,15 @@ translator:
   
   # LLM 翻译器配置 (在线)
   llm:
-    model: "gemini-3-flash-preview"              # 翻译模型（使用全局 Google API）
-    # api_key: ""                             # 留空 = 使用全局 llm 配置（Google API）
-    # base_url: ""                            # 留空 = 使用全局 llm 配置（Google API）
+    model: "gemini-3-flash-preview"              # 翻译模型（默认继承全局 llm；当前默认走 Vertex ADC）
+    # api_key: ""                             # 留空 = 使用全局 llm 配置
+    # base_url: ""                            # 留空 = 使用全局 llm 配置
     # model: "kimi-k2.5"                          # 优化模型
     # api_key: "${VAT_VOLC_APIKEY}"               # 火山引擎 API Key
     # base_url: "https://ark.cn-beijing.volces.com/api/coding/v3"  # 火山引擎方舟 API
     enable_reflect: true                    # 反思翻译（启用后质量更高，但消耗更多 token）
     batch_size: 100                          # 每批处理的字幕数量
-    thread_num: 10                           # 并发线程数
+    thread_num: 3                            # 并发线程数（Vertex Gemini 共享容量下 10 容易触发 429；默认保守设为 3）
     custom_prompt: "fubuki"                       # 自定义提示词文件名（相对于 vat/llm/prompts/custom/），如 "translate/example.md"，空字符串表示不使用
     enable_context: true                    # 是否启用前文上下文
     enable_fallback: false                  # 批量翻译失败时是否回退到逐条翻译（关闭=直接报错重跑，推荐）
@@ -281,14 +281,14 @@ logging:
 # LLM配置（统一管理，用于断句、翻译、视频信息翻译等所有LLM调用）
 # =============================================================================
 llm:
-  provider: "openai_compatible"                # openai_compatible / vertex_native
-  auth_mode: "api_key"                         # Vertex Native 认证方式：api_key / adc
-  api_key: "${VAT_GOOGLE_APIKEY}"            # Google API Key（全局默认）
-  base_url: "https://generativelanguage.googleapis.com/v1beta/openai"  # Google API Base URL
+  provider: "vertex_native"                  # openai_compatible / vertex_native
+  auth_mode: "adc"                           # Vertex Native 认证方式：api_key / adc；当前项目默认使用 adc
+  api_key: ""                                # Vertex ADC 不使用 API key；若未来切回 openai_compatible/Vertex API key，再填对应 key
+  base_url: ""                               # Vertex Native 留空；若未来切回 openai_compatible，再填兼容端点
   model: "gemini-3-flash-preview"            # 全局默认模型（各阶段未指定 model 时的 fallback）
   location: "global"                         # Vertex Native 使用的区域
-  project_id: ""                             # Vertex ADC 使用的 GCP project_id
-  credentials_path: ""                       # Vertex ADC 的 service account JSON 路径，建议填绝对路径
+  project_id: "vertex-490203"                # Vertex ADC 使用的 GCP project_id
+  credentials_path: "/home/gzy/.ssh/vat_vertex.json"  # Vertex ADC service account JSON 绝对路径
 
 # =============================================================================
 # 代理配置（全局默认 + 各环节独立覆盖）
@@ -298,7 +298,7 @@ proxy:
                                             # 留空字符串 "" 表示不使用代理 # yiyuan 2000g
   # 各环节代理覆盖（留空或不设置 = 使用全局 http_proxy）
   # 解析优先级：环节专属 → llm（LLM环节共用） → http_proxy
-  downloader: "http://localhost:11420"                          # 下载器（YouTube 访问） zqm inf
+  # downloader: "http://localhost:11420"                          # 下载器（YouTube 访问） zqm inf
   # llm: ""                                 # 所有 LLM API 调用的默认代理
   translate: "http://localhost:11400"                           # 翻译 LLM（如 Google API 需特定地区代理） # glados
   optimize: ""                              # 优化 LLM（火山引擎国内服务，不需要代理）

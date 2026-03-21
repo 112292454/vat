@@ -44,7 +44,7 @@
 
 ### 3.1 方式 A：Vertex Native + API key
 
-这是当前项目最适合的迁移方式，也是已经在本次会话中验证通过的一条路径。
+这是最简单的一条 Vertex Native 配置方式，但**不是当前项目的正式可用方案**。
 
 典型 endpoint：
 
@@ -60,11 +60,16 @@ https://aiplatform.googleapis.com/v1/publishers/google/models/{model}:streamGene
 - 与 Vertex 原生 REST 语义一致
 - 适合单人开发、快速迁移、尽量少改代码的场景
 
-当前仓库里的 `vertex_native` client 就是按这一路径实现的。
+当前仓库里的 `vertex_native` client 仍保留对这一路径的支持；
+但在当前项目里，针对 `gemini-3-flash-preview` 的真实实测结果是：
+
+- `vertex_native + api_key`
+- 返回 `401 Unauthorized`
+- 错误信息：`API keys are not supported by this API`
 
 ### 3.2 方式 B：Vertex Native + ADC / Bearer token
 
-这是 Google 官方示例中的标准 GCP 认证方式。
+这是 Google 官方示例中的标准 GCP 认证方式，也是**当前项目真实可用的正式方案**。
 
 典型 endpoint：
 

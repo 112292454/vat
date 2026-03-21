@@ -7,8 +7,11 @@ from vat.llm.client import _get_vertex_access_token, call_llm
 class TestVertexNativeClient:
     def test_call_llm_vertex_native_adapts_response(self, monkeypatch):
         monkeypatch.setenv("VAT_LLM_PROVIDER", "vertex_native")
+        monkeypatch.setenv("VAT_VERTEX_AUTH_MODE", "api_key")
         monkeypatch.setenv("OPENAI_API_KEY", "test-vertex-key")
         monkeypatch.setenv("VAT_VERTEX_LOCATION", "global")
+        monkeypatch.delenv("VAT_VERTEX_PROJECT_ID", raising=False)
+        monkeypatch.delenv("VAT_VERTEX_CREDENTIALS", raising=False)
         monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
 
         captured = {}

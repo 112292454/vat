@@ -40,9 +40,28 @@
 - API key 可以继续用于快速验证
 - ADC 可以作为长期和正式部署方案
 
-## 3. 现在支持的 Vertex 接入方式
+## 3. 现在支持的接入方式
 
-### 3.1 API key
+### 3.1 OpenAI-compatible
+
+配置示例：
+
+```yaml
+llm:
+  provider: "openai_compatible"
+  auth_mode: "api_key"
+  api_key: "${VAT_GOOGLE_APIKEY}"
+  base_url: "https://generativelanguage.googleapis.com/v1beta/openai"
+  model: "gemini-3-flash-preview"
+```
+
+特点：
+
+- 兼容 OpenAI SDK 语义
+- 适合未来切换到其他 OpenAI-style 站点或中转服务
+- 也是项目早期使用 AI Studio 时的主要方式
+
+### 3.2 Vertex Native + API key
 
 配置示例：
 
@@ -51,7 +70,7 @@ llm:
   provider: "vertex_native"
   auth_mode: "api_key"
   api_key: "${VAT_VERTEX_APIKEY}"
-  model: "gemini-2.5-flash"
+  model: "gemini-3-flash-preview"
   location: "global"
 ```
 
@@ -63,10 +82,25 @@ https://aiplatform.googleapis.com/v1/publishers/google/models/{model}:generateCo
 
 特点：
 
-- 配置最简单
-- 最适合当前 VAT 的快速迁移与开发验证
+- 理论上配置最简单
+- 适合某些 Vertex 项目或临时验证
 
-### 3.2 ADC
+但对**当前这套项目和账号**，实测结果是：
+
+- `gemini-3-flash-preview`
+- `provider=vertex_native`
+- `auth_mode=api_key`
+
+会返回：
+
+```text
+401 Unauthorized
+API keys are not supported by this API.
+```
+
+所以它在**当前项目里不是可用的正式方案**。
+
+### 3.3 Vertex Native + ADC
 
 配置示例：
 
@@ -74,7 +108,7 @@ https://aiplatform.googleapis.com/v1/publishers/google/models/{model}:generateCo
 llm:
   provider: "vertex_native"
   auth_mode: "adc"
-  model: "gemini-2.5-flash"
+  model: "gemini-3-flash-preview"
   location: "global"
   project_id: "vertex-490203"
   credentials_path: "/home/gzy/.ssh/vat_vertex.json"
@@ -90,6 +124,7 @@ https://aiplatform.googleapis.com/v1/projects/{project}/locations/{location}/pub
 
 - 更符合 Google 官方推荐的正式认证方式
 - 更适合长期部署
+- 是**当前项目实测可用**的正式方案
 
 注意：
 
@@ -112,36 +147,41 @@ https://aiplatform.googleapis.com/v1/projects/{project}/locations/{location}/pub
 
 ## 5. 当前推荐方案
 
-### 开发和现阶段使用
+### 当前实际默认方案
 
 默认推荐：
 
 ```yaml
 llm:
   provider: "vertex_native"
-  auth_mode: "api_key"
+  auth_mode: "adc"
+  api_key: ""
+  base_url: ""
+  model: "gemini-3-flash-preview"
+  location: "global"
+  project_id: "vertex-490203"
+  credentials_path: "/home/gzy/.ssh/vat_vertex.json"
 ```
 
 原因：
 
-- 实现最简单
-- 真实联调已经验证可用
-- 最符合“少改代码、快速切换”的目标
+- 真实最小调用已验证可用
+- `LLMTranslator.translate_subtitle()` 已验证可写出 `translated.srt`
+- 同一套配置也能从 CLI `vat process -s translate` 进入真实翻译阶段
+- 相比 Vertex API key，更符合当前项目的实际认证要求
 
-### 长期部署
+### 备用方案：保留 OpenAI-compatible
 
-长期推荐：
+如果后续找到别的 OpenAI-style 站点、模型中转服务，或重新回到某个兼容端点，可切回：
 
 ```yaml
 llm:
-  provider: "vertex_native"
-  auth_mode: "adc"
+  provider: "openai_compatible"
+  auth_mode: "api_key"
+  api_key: "${YOUR_API_KEY}"
+  base_url: "https://your-openai-style-endpoint/v1"
+  model: "gemini-3-flash-preview"
 ```
-
-原因：
-
-- 更符合官方建议
-- 认证模型更规范
 
 ## 6. 本次验证
 
@@ -172,6 +212,21 @@ HOME=/tmp pytest tests/test_llm_client_vertex.py tests/test_config.py tests/test
 
 这说明当前改动已经能从 VAT 配置与翻译器调用链一路走到真实字幕文件产出。
 
+### 真实 Vertex ADC 补充验证
+
+后续追加的真实环境验证结果：
+
+- 当前仓库默认配置当时仍是 `openai_compatible`，并未真正切到 Vertex
+- 最小真实调用：
+  - `vertex_native + api_key`：失败，`401 Unauthorized`
+  - `vertex_native + adc`：成功
+- 真实翻译器调用：
+  - `LLMTranslator.translate_subtitle()` 在 `vertex_native + adc + gemini-3-flash-preview` 下成功
+- 贴近真实 pipeline 的 CLI canary：
+  - `python -m vat -c /tmp/vat-vertex-adc-test.yaml process -v e11fsGDFB-E -s translate`
+  - 能进入真实 `translate` 阶段并调用 Vertex
+  - 但长视频翻译过程中出现 `429`、空响应、TLS 握手超时，说明**链路已打通，但稳定性仍需收敛**
+
 ## 7. Benchmark 说明
 
 现有的 `scripts/translation_benchmark.py` 现在已经支持：
@@ -190,6 +245,54 @@ HOME=/tmp pytest tests/test_llm_client_vertex.py tests/test_config.py tests/test
 
 ## 8. 后续建议
 
-- 给 Vertex 增加 thinking 控制，降低 `thoughtsTokenCount`
+### 8.1 当前并发建议
+
+AI Studio / OpenAI-compatible 路线下，`thread_num=10` 曾经可以稳定使用；  
+但 Vertex ADC 的 `gemini-3-flash-preview` 在当前项目里并不适合直接沿用这个值。
+
+本地最小压测结果：
+
+- 并发 `1/3/5`：稳定成功
+- 并发 `10`：仍能最终成功，但会出现大量 `429` 重试，尾请求耗时显著拉长
+
+而真实长视频翻译时，`thread_num=10` + 多批次会进一步放大：
+
+- `429 Rate Limit Error`
+- `Invalid OpenAI API response: empty choices or content`
+- `Vertex API 网络请求失败: _ssl.c:980: The handshake operation timed out`
+
+因此当前默认建议：
+
+- `translator.llm.thread_num: 3`
+
+### 8.2 Vertex 是否支持多少并发
+
+Google 官方文档并没有给出 Gemini 3 Flash 这种共享容量模式下的“固定支持 N 并发请求”数字。  
+官方更强调的是：
+
+- `429` 代表 quota / shared capacity 被打满
+- 若需要更稳定、可预测的吞吐，应使用 **Provisioned Throughput**
+
+也就是说：
+
+- 默认 pay-as-you-go / shared capacity 模式下，没有一个可以直接写死到仓库里的官方“支持 10 并发”数字
+- 对当前项目而言，应以实测和保守配置为准，而不是沿用 AI Studio 的经验值
+
+### 8.3 官方更推荐的方式
+
+如果只是当前仓库继续用 Gemini 3 Flash：
+
+- 认证：`vertex_native + adc`
+- 区域：`global`
+- 并发：保守控制在 `3`
+
+如果未来对高吞吐有硬要求：
+
+- 官方更推荐考虑 **Provisioned Throughput**
+- 它比共享容量模式更适合稳定的大批量调用
+
+### 8.4 其他代码层建议
+
+- 给 Vertex 增加更细的空响应日志：把 `promptFeedback` / `finishReason` 记录出来
 - 如果后续 Web UI 有流式显示需求，再单独评估 `streamGenerateContent`
 - 若后续需要统计成本或调试 token 消耗，再考虑把 `usageMetadata` 暴露出来

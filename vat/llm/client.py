@@ -1,7 +1,9 @@
 """Unified LLM client for the application."""
 
 import os
+import time
 import threading
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -31,6 +33,12 @@ _client_lock = threading.Lock()
 # Per-config client registry: (normalized_base_url, api_key) -> OpenAI
 _client_registry: Dict[Tuple[str, str], OpenAI] = {}
 _registry_lock = threading.Lock()
+
+# Vertex ADC access token cache: cache_key -> (token, expiry_ts)
+_vertex_token_cache: Dict[str, Tuple[str, Optional[float]]] = {}
+_vertex_token_lock = threading.Lock()
+_VERTEX_TOKEN_REFRESH_SKEW_SEC = 120
+_VERTEX_TOKEN_REFRESH_RETRY_DELAYS_SEC = [1, 2]
 
 logger = setup_logger("llm_client")
 
@@ -177,31 +185,92 @@ def _resolve_vertex_credentials_path(credentials_path: str = "") -> str:
     raise ValueError(f"Vertex ADC 凭据路径不存在: {raw_path}")
 
 
+def _get_vertex_token_cache_key(resolved_path: str) -> str:
+    return resolved_path or "__adc_default__"
+
+
+def _vertex_token_is_fresh(expiry_ts: Optional[float]) -> bool:
+    if expiry_ts is None:
+        return False
+    now_ts = datetime.now(timezone.utc).timestamp()
+    return expiry_ts - now_ts > _VERTEX_TOKEN_REFRESH_SKEW_SEC
+
+
 def _get_vertex_access_token(credentials_path: str = "", proxy: str = "") -> str:
     scopes = ["https://www.googleapis.com/auth/cloud-platform"]
     resolved_path = _resolve_vertex_credentials_path(credentials_path)
+    cache_key = _get_vertex_token_cache_key(resolved_path)
 
-    try:
-        if resolved_path:
-            credentials = service_account.Credentials.from_service_account_file(
-                resolved_path,
-                scopes=scopes,
-            )
-        else:
+    with _vertex_token_lock:
+        cached = _vertex_token_cache.get(cache_key)
+        if cached:
+            cached_token, cached_expiry_ts = cached
+            if cached_token and _vertex_token_is_fresh(cached_expiry_ts):
+                return cached_token
+
+        def _load_credentials():
+            if resolved_path:
+                return service_account.Credentials.from_service_account_file(
+                    resolved_path,
+                    scopes=scopes,
+                )
             credentials, _ = google.auth.default(scopes=scopes)
-        request_kwargs = {}
-        if proxy:
-            session = requests.Session()
-            session.proxies.update({"http": proxy, "https": proxy})
-            request_kwargs["session"] = session
-        credentials.refresh(GoogleAuthRequest(**request_kwargs))
-    except Exception as exc:
-        raise RuntimeError(f"Vertex ADC 认证失败: {exc}") from exc
+            return credentials
 
-    token = getattr(credentials, "token", "")
-    if not token:
-        raise RuntimeError("Vertex ADC 认证失败: 未获取到 access token")
-    return token
+        def _refresh_with_proxy(refresh_proxy: Optional[str]):
+            credentials = _load_credentials()
+            request_kwargs = {}
+            if refresh_proxy is None:
+                session = requests.Session()
+                session.trust_env = False
+                request_kwargs["session"] = session
+            elif refresh_proxy:
+                session = requests.Session()
+                session.proxies.update({"http": refresh_proxy, "https": refresh_proxy})
+                request_kwargs["session"] = session
+            credentials.refresh(GoogleAuthRequest(**request_kwargs))
+            return credentials
+
+        last_exc: Optional[Exception] = None
+        refresh_proxies: List[Optional[str]] = [proxy] if proxy else [""]
+        if proxy:
+            refresh_proxies.append(None)
+
+        for refresh_proxy in refresh_proxies:
+            for attempt in range(len(_VERTEX_TOKEN_REFRESH_RETRY_DELAYS_SEC) + 1):
+                try:
+                    if proxy and not refresh_proxy:
+                        logger.warning(
+                            f"Vertex ADC token refresh via proxy failed, retry without proxy: {last_exc}"
+                        )
+                    credentials = _refresh_with_proxy(refresh_proxy)
+                    last_exc = None
+                    break
+                except Exception as exc:
+                    last_exc = exc
+                    if attempt >= len(_VERTEX_TOKEN_REFRESH_RETRY_DELAYS_SEC):
+                        continue
+                    time.sleep(_VERTEX_TOKEN_REFRESH_RETRY_DELAYS_SEC[attempt])
+            if last_exc is None:
+                break
+
+        if last_exc is not None:
+            raise RuntimeError(f"Vertex ADC 认证失败: {last_exc}") from last_exc
+
+        token = getattr(credentials, "token", "")
+        if not token:
+            raise RuntimeError("Vertex ADC 认证失败: 未获取到 access token")
+
+        expiry = getattr(credentials, "expiry", None)
+        expiry_ts: Optional[float] = None
+        if expiry is not None:
+            try:
+                expiry_ts = expiry.timestamp()
+            except Exception:
+                expiry_ts = None
+
+        _vertex_token_cache[cache_key] = (token, expiry_ts)
+        return token
 
 
 def _call_vertex_native(

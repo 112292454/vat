@@ -1,3 +1,4 @@
+from datetime import datetime, timedelta, timezone
 import pytest
 from unittest.mock import MagicMock
 
@@ -246,3 +247,134 @@ class TestVertexAccessTokenProxyContracts:
         assert captured["path"] == "/tmp/fake.json"
         assert captured["session"].proxies["http"] == "http://translate-proxy:7890"
         assert captured["session"].proxies["https"] == "http://translate-proxy:7890"
+
+    def test_get_vertex_access_token_caches_token_until_expiry_buffer(self, monkeypatch):
+        calls = []
+
+        class FakeCredentials:
+            def __init__(self):
+                self.token = ""
+                self.expiry = None
+
+            def refresh(self, request):
+                calls.append(request)
+                self.token = "cached-token"
+                self.expiry = datetime.now(timezone.utc) + timedelta(minutes=10)
+
+        monkeypatch.setattr("vat.llm.client._vertex_token_cache", {}, raising=False)
+        monkeypatch.setattr("vat.llm.client._resolve_vertex_credentials_path", lambda _path="": "/tmp/fake-cache.json")
+        monkeypatch.setattr(
+            "vat.llm.client.service_account.Credentials.from_service_account_file",
+            lambda path, scopes: FakeCredentials(),
+        )
+        monkeypatch.setattr("vat.llm.client.GoogleAuthRequest", lambda session=None: "request")
+
+        token1 = _get_vertex_access_token("/tmp/fake-cache.json", proxy="http://translate-proxy:7890")
+        token2 = _get_vertex_access_token("/tmp/fake-cache.json", proxy="http://translate-proxy:7890")
+
+        assert token1 == "cached-token"
+        assert token2 == "cached-token"
+        assert len(calls) == 1
+
+    def test_get_vertex_access_token_refreshes_again_when_expiry_too_close(self, monkeypatch):
+        calls = []
+
+        class FakeCredentials:
+            def __init__(self):
+                self.token = ""
+                self.expiry = None
+
+            def refresh(self, request):
+                calls.append(request)
+                self.token = f"token-{len(calls)}"
+                if len(calls) == 1:
+                    self.expiry = datetime.now(timezone.utc) + timedelta(seconds=30)
+                else:
+                    self.expiry = datetime.now(timezone.utc) + timedelta(minutes=10)
+
+        monkeypatch.setattr("vat.llm.client._vertex_token_cache", {}, raising=False)
+        monkeypatch.setattr("vat.llm.client._resolve_vertex_credentials_path", lambda _path="": "/tmp/fake-expiring.json")
+        monkeypatch.setattr(
+            "vat.llm.client.service_account.Credentials.from_service_account_file",
+            lambda path, scopes: FakeCredentials(),
+        )
+        monkeypatch.setattr("vat.llm.client.GoogleAuthRequest", lambda session=None: "request")
+
+        token1 = _get_vertex_access_token("/tmp/fake-expiring.json")
+        token2 = _get_vertex_access_token("/tmp/fake-expiring.json")
+
+        assert token1 == "token-1"
+        assert token2 == "token-2"
+        assert len(calls) == 2
+
+    def test_get_vertex_access_token_retries_without_proxy_when_proxy_refresh_fails(self, monkeypatch):
+        calls = []
+        warnings = []
+        sleeps = []
+
+        class FakeCredentials:
+            def __init__(self):
+                self.token = ""
+                self.expiry = None
+
+            def refresh(self, request):
+                calls.append(request)
+                if getattr(request, "_session_proxy", None) == "http://translate-proxy:7890":
+                    raise RuntimeError("proxy refresh failed")
+                self.token = "fallback-token"
+                self.expiry = datetime.now(timezone.utc) + timedelta(minutes=10)
+
+        class FakeRequest:
+            def __init__(self, session=None):
+                self._session_present = session is not None
+                self._session_proxy = session.proxies.get("http") if session is not None else None
+                self._trust_env = getattr(session, "trust_env", None) if session is not None else None
+
+        monkeypatch.setattr("vat.llm.client._vertex_token_cache", {}, raising=False)
+        monkeypatch.setattr("vat.llm.client._resolve_vertex_credentials_path", lambda _path="": "/tmp/fake-fallback.json")
+        monkeypatch.setattr(
+            "vat.llm.client.service_account.Credentials.from_service_account_file",
+            lambda path, scopes: FakeCredentials(),
+        )
+        monkeypatch.setattr("vat.llm.client.GoogleAuthRequest", FakeRequest)
+        monkeypatch.setattr("vat.llm.client.logger.warning", lambda msg: warnings.append(msg))
+        monkeypatch.setattr("vat.llm.client.time.sleep", lambda seconds: sleeps.append(seconds))
+
+        token = _get_vertex_access_token("/tmp/fake-fallback.json", proxy="http://translate-proxy:7890")
+
+        assert token == "fallback-token"
+        assert len(calls) == 4
+        assert sleeps == [1, 2]
+        assert calls[-1]._trust_env is False
+        assert any("retry without proxy" in msg for msg in warnings)
+
+    def test_get_vertex_access_token_retries_transient_refresh_failures(self, monkeypatch):
+        calls = []
+        sleeps = []
+
+        class FakeCredentials:
+            def __init__(self):
+                self.token = ""
+                self.expiry = None
+
+            def refresh(self, request):
+                calls.append(request)
+                if len(calls) < 3:
+                    raise RuntimeError("temporary ssl eof")
+                self.token = "recovered-token"
+                self.expiry = datetime.now(timezone.utc) + timedelta(minutes=10)
+
+        monkeypatch.setattr("vat.llm.client._vertex_token_cache", {}, raising=False)
+        monkeypatch.setattr("vat.llm.client._resolve_vertex_credentials_path", lambda _path="": "/tmp/fake-retry.json")
+        monkeypatch.setattr(
+            "vat.llm.client.service_account.Credentials.from_service_account_file",
+            lambda path, scopes: FakeCredentials(),
+        )
+        monkeypatch.setattr("vat.llm.client.GoogleAuthRequest", lambda session=None: "request")
+        monkeypatch.setattr("vat.llm.client.time.sleep", lambda seconds: sleeps.append(seconds))
+
+        token = _get_vertex_access_token("/tmp/fake-retry.json")
+
+        assert token == "recovered-token"
+        assert len(calls) == 3
+        assert sleeps == [1, 2]

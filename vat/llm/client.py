@@ -104,12 +104,35 @@ def _adapt_vertex_response(response_json: Dict[str, Any]) -> Any:
         texts = [part.get("text", "") for part in parts if isinstance(part, dict)]
         content = "".join(texts)
 
+    prompt_feedback = response_json.get("promptFeedback") or {}
+    diagnostics = {
+        "candidate_count": len(candidates),
+        "finish_reasons": [
+            candidate.get("finishReason", "")
+            for candidate in candidates
+            if isinstance(candidate, dict)
+        ],
+        "text_part_counts": [
+            len(
+                [
+                    part for part in (((candidate or {}).get("content") or {}).get("parts") or [])
+                    if isinstance(part, dict) and part.get("text")
+                ]
+            )
+            for candidate in candidates
+            if isinstance(candidate, dict)
+        ],
+        "block_reason": prompt_feedback.get("blockReason", ""),
+        "block_reason_message": prompt_feedback.get("blockReasonMessage", ""),
+    }
+
     return SimpleNamespace(
         choices=[
             SimpleNamespace(
                 message=SimpleNamespace(content=content)
             )
-        ]
+        ],
+        _vertex_diagnostics=diagnostics,
     )
 
 
@@ -446,6 +469,29 @@ def call_llm(
         and hasattr(response.choices[0], "message")
         and response.choices[0].message.content
     ):
+        if provider == "vertex_native":
+            diagnostics = getattr(response, "_vertex_diagnostics", {}) or {}
+            diagnostic_parts = []
+            block_reason = diagnostics.get("block_reason", "")
+            if block_reason:
+                diagnostic_parts.append(f"promptFeedback.blockReason={block_reason}")
+            block_reason_message = diagnostics.get("block_reason_message", "")
+            if block_reason_message:
+                diagnostic_parts.append(f"promptFeedback.blockReasonMessage={block_reason_message}")
+            finish_reasons = [reason for reason in diagnostics.get("finish_reasons", []) if reason]
+            if finish_reasons:
+                diagnostic_parts.append(f"finishReason={finish_reasons}")
+            candidate_count = diagnostics.get("candidate_count")
+            if candidate_count is not None:
+                diagnostic_parts.append(f"candidate_count={candidate_count}")
+            text_part_counts = diagnostics.get("text_part_counts", [])
+            if text_part_counts:
+                diagnostic_parts.append(f"text_part_counts={text_part_counts}")
+
+            diagnostic_msg = ", ".join(diagnostic_parts) if diagnostic_parts else "no diagnostics"
+            logger.warning(f"Vertex 空响应诊断: {diagnostic_msg}")
+            raise ValueError(f"Invalid Vertex API response: empty choices or content ({diagnostic_msg})")
+
         raise ValueError("Invalid OpenAI API response: empty choices or content")
 
     return response

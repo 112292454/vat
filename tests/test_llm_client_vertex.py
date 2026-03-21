@@ -172,6 +172,47 @@ class TestVertexNativeClient:
         assert response.choices[0].message.content == "vertex adc response"
         assert captured["proxy"] == "http://translate-proxy:7890"
 
+    def test_call_llm_vertex_native_reports_diagnostics_on_empty_response(self, monkeypatch):
+        monkeypatch.setenv("VAT_LLM_PROVIDER", "vertex_native")
+        monkeypatch.setenv("VAT_VERTEX_AUTH_MODE", "api_key")
+        monkeypatch.setenv("OPENAI_API_KEY", "test-vertex-key")
+        monkeypatch.setenv("VAT_VERTEX_LOCATION", "global")
+        monkeypatch.delenv("VAT_VERTEX_PROJECT_ID", raising=False)
+        monkeypatch.delenv("VAT_VERTEX_CREDENTIALS", raising=False)
+        monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+
+        warnings = []
+
+        def fake_post(url, json, headers, timeout, proxy=None):
+            response = MagicMock()
+            response.json.return_value = {
+                "promptFeedback": {
+                    "blockReason": "PROHIBITED_CONTENT",
+                    "blockReasonMessage": "blocked by safety",
+                },
+                "candidates": [
+                    {
+                        "finishReason": "SAFETY",
+                        "content": {"parts": []},
+                    }
+                ],
+            }
+            response.raise_for_status.return_value = None
+            return response
+
+        monkeypatch.setattr("vat.llm.client.httpx.post", fake_post)
+        monkeypatch.setattr("vat.llm.client.logger.warning", lambda msg: warnings.append(msg))
+
+        with pytest.raises(ValueError, match="Invalid Vertex API response"):
+            call_llm(
+                messages=[{"role": "user", "content": "Hello from vertex"}],
+                model="gemini-2.5-flash",
+                temperature=0.1,
+            )
+
+        assert any("PROHIBITED_CONTENT" in msg for msg in warnings)
+        assert any("SAFETY" in msg for msg in warnings)
+
 
 class TestVertexAccessTokenProxyContracts:
     def test_get_vertex_access_token_uses_proxy_session_for_refresh(self, monkeypatch):

@@ -23,16 +23,21 @@ playlist_url (YouTube)
     ├─ 1. downloader.get_playlist_info() → 获取 playlist 元数据 + entries
     │
     ├─ 2. 增量比对：识别新增视频 vs 已存在视频
-    │      └─ 新视频：创建 DB 记录 + 关联 playlist
-    │      └─ 已存在：更新 playlist_index
+    │      ├─ 新视频：先仅在内存中暂存，不立即写库
+    │      └─ 已存在：记录待更新的 playlist_index / 待补抓的元信息
     │
-    ├─ 3. 并行获取 upload_date（10 并发）
+    ├─ 3. 并行获取 upload_date / 可用性判定（10 并发）
     │      ├─ 成功：更新 metadata + 异步提交 LLM 翻译
     │      └─ 失败：日期插值 + 标记状态
-    │          ├─ unavailable：永久不可用（视频已删除/私有化）
+    │          ├─ unavailable：永久不可用
+    │          │   ├─ 已存在视频：保留视频本体，按现有语义标记 unavailable
+    │          │   ├─ 本次新发现视频：直接从当前 playlist / DB 结果集中剔除，不分配索引
+    │          │   └─ 历史中断残留且 `upload_order_index=0`：直接清理残留记录
     │          └─ error：临时失败（下次 sync 可重试）
     │
-    ├─ 4. 分配 upload_order_index（增量式，1=最旧）
+    ├─ 4. 统一写入 DB（只写允许保留的视频）
+    │
+    ├─ 5. 分配 upload_order_index（增量式，1=最旧）
     │
     └─ 返回 SyncResult(new_videos, existing_videos, total)
 ```

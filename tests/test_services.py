@@ -404,13 +404,87 @@ class TestSyncPlaylistContracts:
         assert "upload_date_interpolated" not in video.metadata
         assert translate_calls and translate_calls[0][0] == "vid_existing"
 
+    def test_sync_playlist_refetches_existing_video_with_interpolated_date_and_upcoming_status(self, db, monkeypatch):
+        _setup_playlist(db, "PL_REFETCH")
+        _add_pl_video(db, "vid_existing", playlist_id="PL_REFETCH", index=1)
+        db.update_video("vid_existing", metadata={
+            "upload_date": "20250109",
+            "upload_date_interpolated": True,
+            "thumbnail": "",
+            "live_status": "is_upcoming",
+        })
+
+        service = PlaylistService(db)
+        service._downloader = type(
+            "FakeDownloader",
+            (),
+            {
+                "get_playlist_info": lambda _self, _url: {
+                    "id": "PL_REFETCH",
+                    "title": "Refetch Playlist",
+                    "uploader": "Uploader",
+                    "uploader_id": "channel-1",
+                    "entries": [{"id": "vid_existing", "title": "Existing"}],
+                },
+                "get_video_info": lambda _self, _url: VideoInfoResult(
+                    status="ok",
+                    info={
+                        "id": "vid_existing",
+                        "title": "Fetched Title",
+                        "uploader": "Fetched Uploader",
+                        "upload_date": "20250110",
+                        "duration": 120,
+                        "thumbnail": "thumb.jpg",
+                        "view_count": 10,
+                        "like_count": 2,
+                        "live_status": "was_live",
+                    },
+                ),
+            },
+        )()
+
+        translate_calls = []
+        monkeypatch.setattr(service, "_submit_translate_task", lambda vid, info, force=False: translate_calls.append((vid, info, force)))
+
+        class _ImmediateFuture:
+            def __init__(self, value):
+                self._value = value
+
+            def result(self, timeout=None):
+                return self._value
+
+        class _ImmediateExecutor:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def submit(self, fn, vid):
+                return _ImmediateFuture(fn(vid))
+
+        monkeypatch.setattr("vat.services.playlist_service.ThreadPoolExecutor", _ImmediateExecutor)
+
+        result = service.sync_playlist("https://youtube.com/playlist?list=PL_REFETCH", fetch_upload_dates=True)
+
+        assert result.existing_videos == ["vid_existing"]
+        video = db.get_video("vid_existing")
+        assert video.metadata["upload_date"] == "20250110"
+        assert video.metadata["thumbnail"] == "thumb.jpg"
+        assert video.metadata["live_status"] == "was_live"
+        assert "upload_date_interpolated" not in video.metadata
+        assert translate_calls and translate_calls[0][0] == "vid_existing"
+
     def test_sync_playlist_fetch_upload_dates_timeout_falls_back_to_interpolated_error_result(self, db, monkeypatch):
         _setup_playlist(db, "PL_TIMEOUT")
         _add_pl_video(db, "vid_newer", playlist_id="PL_TIMEOUT", index=1)
         _add_pl_video(db, "vid_target", playlist_id="PL_TIMEOUT", index=2)
         _add_pl_video(db, "vid_older", playlist_id="PL_TIMEOUT", index=3)
-        db.update_video("vid_newer", metadata={"upload_date": "20250110"})
-        db.update_video("vid_older", metadata={"upload_date": "20250106"})
+        db.update_video("vid_newer", metadata={"upload_date": "20250110", "thumbnail": "thumb-newer"})
+        db.update_video("vid_older", metadata={"upload_date": "20250106", "thumbnail": "thumb-older"})
 
         service = PlaylistService(db)
         service._downloader = type(
@@ -470,6 +544,202 @@ class TestSyncPlaylistContracts:
         target = db.get_video("vid_target")
         assert target.metadata["upload_date"] == "20250108"
         assert target.metadata["upload_date_interpolated"] is True
+
+    def test_sync_playlist_excludes_new_members_only_videos_from_db_and_indices(self, db, monkeypatch):
+        _setup_playlist(db, "PL_MEMBER")
+        _add_pl_video(db, "vid_old", playlist_id="PL_MEMBER", index=3)
+        db.update_video("vid_old", metadata={"upload_date": "20240101"})
+        db.update_playlist_video_order_index("PL_MEMBER", "vid_old", 1)
+
+        service = PlaylistService(db)
+        service._downloader = type(
+            "FakeDownloader",
+            (),
+            {
+                "get_playlist_info": lambda _self, _url: {
+                    "id": "PL_MEMBER",
+                    "title": "Members Playlist",
+                    "uploader": "Uploader",
+                    "uploader_id": "channel-member",
+                    "entries": [
+                        {"id": "vid_ok", "title": "OK Video"},
+                        {"id": "vid_member", "title": "Members Only"},
+                        {"id": "vid_old", "title": "Old Video"},
+                    ],
+                },
+                "get_video_info": lambda _self, _url: (
+                    VideoInfoResult(
+                        status="unavailable",
+                        error_message="Join this channel to get access to members-only content",
+                    )
+                    if _url.endswith("vid_member")
+                    else VideoInfoResult(
+                        status="ok",
+                        info={
+                            "id": "vid_ok",
+                            "title": "OK Video",
+                            "uploader": "Uploader",
+                            "upload_date": "20250101",
+                            "duration": 120,
+                            "thumbnail": "thumb.jpg",
+                            "view_count": 10,
+                            "like_count": 2,
+                        },
+                    )
+                ),
+            },
+        )()
+        monkeypatch.setattr(service, "_submit_translate_task", lambda *args, **kwargs: None)
+
+        class _ImmediateFuture:
+            def __init__(self, value):
+                self._value = value
+
+            def result(self, timeout=None):
+                return self._value
+
+        class _ImmediateExecutor:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def submit(self, fn, vid):
+                return _ImmediateFuture(fn(vid))
+
+        monkeypatch.setattr("vat.services.playlist_service.ThreadPoolExecutor", _ImmediateExecutor)
+
+        result = service.sync_playlist("https://youtube.com/playlist?list=PL_MEMBER", fetch_upload_dates=True)
+
+        assert result.new_videos == ["vid_ok"]
+        assert result.existing_videos == ["vid_old"]
+        assert db.get_video("vid_member") is None
+        assert db.get_playlist_video_info("PL_MEMBER", "vid_member") is None
+        assert db.get_playlist_video_ids("PL_MEMBER") == {"vid_old", "vid_ok"}
+        assert db.get_playlist("PL_MEMBER").video_count == 2
+        ok_info = db.get_playlist_video_info("PL_MEMBER", "vid_ok")
+        assert ok_info["upload_order_index"] == 2
+
+    def test_sync_playlist_removes_unavailable_new_playlist_link_but_keeps_preexisting_video(self, db, monkeypatch):
+        _setup_playlist(db, "PL_TARGET")
+        _setup_playlist(db, "PL_OTHER")
+        _add_pl_video(db, "vid_shared", playlist_id="PL_OTHER", index=1)
+        db.update_video("vid_shared", metadata={"upload_date": "20240101", "note": "keep"})
+        db.update_playlist_video_order_index("PL_OTHER", "vid_shared", 1)
+
+        service = PlaylistService(db)
+        service._downloader = type(
+            "FakeDownloader",
+            (),
+            {
+                "get_playlist_info": lambda _self, _url: {
+                    "id": "PL_TARGET",
+                    "title": "Target Playlist",
+                    "uploader": "Uploader",
+                    "uploader_id": "channel-target",
+                    "entries": [
+                        {"id": "vid_shared", "title": "Shared Video"},
+                    ],
+                },
+                "get_video_info": lambda _self, _url: VideoInfoResult(
+                    status="unavailable",
+                    error_message="Join this channel to get access to members-only content",
+                ),
+            },
+        )()
+        monkeypatch.setattr(service, "_submit_translate_task", lambda *args, **kwargs: None)
+
+        class _ImmediateFuture:
+            def __init__(self, value):
+                self._value = value
+
+            def result(self, timeout=None):
+                return self._value
+
+        class _ImmediateExecutor:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def submit(self, fn, vid):
+                return _ImmediateFuture(fn(vid))
+
+        monkeypatch.setattr("vat.services.playlist_service.ThreadPoolExecutor", _ImmediateExecutor)
+
+        result = service.sync_playlist("https://youtube.com/playlist?list=PL_TARGET", fetch_upload_dates=True)
+
+        assert result.new_videos == []
+        assert db.get_playlist_video_info("PL_TARGET", "vid_shared") is None
+        assert db.get_video("vid_shared") is not None
+        assert db.get_video_playlists("vid_shared") == ["PL_OTHER"]
+        assert db.get_video("vid_shared").metadata == {"upload_date": "20240101", "note": "keep"}
+
+    def test_sync_playlist_removes_stale_unavailable_zero_index_video_left_from_interrupted_sync(self, db, monkeypatch):
+        _setup_playlist(db, "PL_STALE")
+        _add_pl_video(db, "vid_stale_member", playlist_id="PL_STALE", index=1)
+        # 模拟上一次 sync 被中断：视频已写入 playlist，但没有 upload_date / upload_order_index
+        db.update_video("vid_stale_member", metadata={})
+
+        service = PlaylistService(db)
+        service._downloader = type(
+            "FakeDownloader",
+            (),
+            {
+                "get_playlist_info": lambda _self, _url: {
+                    "id": "PL_STALE",
+                    "title": "Stale Playlist",
+                    "uploader": "Uploader",
+                    "uploader_id": "channel-stale",
+                    "entries": [
+                        {"id": "vid_stale_member", "title": "Stale Members Only"},
+                    ],
+                },
+                "get_video_info": lambda _self, _url: VideoInfoResult(
+                    status="unavailable",
+                    error_message="Join this channel to get access to members-only content",
+                ),
+            },
+        )()
+        monkeypatch.setattr(service, "_submit_translate_task", lambda *args, **kwargs: None)
+
+        class _ImmediateFuture:
+            def __init__(self, value):
+                self._value = value
+
+            def result(self, timeout=None):
+                return self._value
+
+        class _ImmediateExecutor:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def submit(self, fn, vid):
+                return _ImmediateFuture(fn(vid))
+
+        monkeypatch.setattr("vat.services.playlist_service.ThreadPoolExecutor", _ImmediateExecutor)
+
+        result = service.sync_playlist("https://youtube.com/playlist?list=PL_STALE", fetch_upload_dates=True)
+
+        assert result.new_videos == []
+        assert result.existing_videos == []
+        assert db.get_video("vid_stale_member") is None
+        assert db.get_playlist_video_info("PL_STALE", "vid_stale_member") is None
+        assert db.get_playlist("PL_STALE").video_count == 0
 
 
 class TestPlaylistRecoveryHelpers:

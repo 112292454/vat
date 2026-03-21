@@ -113,12 +113,12 @@ asr:
   split:
     enable: true                            # 是否启用智能断句（将零碎文本重组为完整句子）
     mode: "sentence"                        # 断句模式：sentence（句子级）| semantic（语义级）
-    max_words_cjk: 40                       # 中文/日文每句最大字符数（硬性限制）
-    max_words_english: 24                   # 英文每句最大单词数（硬性限制）
-    min_words_cjk: 6                        # 中文/日文每句最小字符数（软性建议）
+    max_words_cjk: 24                       # 中文/日文每句最大字符数（硬性限制）
+    max_words_english: 18                   # 英文每句最大单词数（硬性限制）
+    min_words_cjk: 3                        # 中文/日文每句最小字符数（软性建议）
     min_words_english: 1                    # 英文每句最小单词数（软性建议）
-    recommend_words_cjk: 20                 # 中文/日文每句推荐字符数（软性建议，理想长度）
-    recommend_words_english: 10             # 英文每句推荐单词数（软性建议，理想长度）
+    recommend_words_cjk: 12                 # 中文/日文每句推荐字符数（软性建议，理想长度）
+    recommend_words_english: 8              # 英文每句推荐单词数（软性建议，理想长度）
     model: "gpt-4o-mini"                      # 断句使用的 LLM 模型（断句对模型要求低，用便宜模型即可）
     api_key: "${VAT_RESELLER_APIKEY}"         # 中转站 API Key
     base_url: "https://api.videocaptioner.cn" # 中转站 Base URL
@@ -273,7 +273,7 @@ concurrency:
 # 日志配置
 # =============================================================================
 logging:
-  level: "DEBUG"                             # 日志级别： DEBUG/INFO/WARNING/ERROR
+  level: "INFO"                             # 日志级别： DEBUG/INFO/WARNING/ERROR
   file: "vat.log"                          # 日志文件
   format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 
@@ -294,17 +294,17 @@ llm:
 # 代理配置（全局默认 + 各环节独立覆盖）
 # =============================================================================
 proxy:
-  http_proxy: "http://localhost:7890"       # 全局默认代理（用于下载器、HuggingFace 模型加载、LLM API 等）
+  http_proxy: "http://localhost:11410"       # 全局默认代理（用于下载器、HuggingFace 模型加载、LLM API 等）
                                             # 留空字符串 "" 表示不使用代理 # yiyuan 2000g
   # 各环节代理覆盖（留空或不设置 = 使用全局 http_proxy）
   # 解析优先级：环节专属 → llm（LLM环节共用） → http_proxy
-  downloader: "http://localhost:7790"                          # 下载器（YouTube 访问） zqm inf
+  downloader: "http://localhost:11420"                          # 下载器（YouTube 访问） zqm inf
   # llm: ""                                 # 所有 LLM API 调用的默认代理
-  translate: "http://localhost:7990"                           # 翻译 LLM（如 Google API 需特定地区代理） # glados
+  translate: "http://localhost:11400"                           # 翻译 LLM（如 Google API 需特定地区代理） # glados
   optimize: ""                              # 优化 LLM（火山引擎国内服务，不需要代理）
   # split: ""                               # 断句 LLM
   # scene_identify: ""                      # 场景识别 LLM
-  video_info_translate: "http://localhost:7990"                # 视频信息翻译 LLM
+  video_info_translate: "http://localhost:11400"                # 视频信息翻译 LLM
 
 # =============================================================================
 # Web UI 配置

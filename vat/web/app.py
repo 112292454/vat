@@ -4,6 +4,7 @@ VAT Web UI - FastAPI 应用
 简单的视频管理界面，用于查看视频列表和任务状态
 """
 import json
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 from datetime import datetime
@@ -23,7 +24,25 @@ from vat.web.jobs import JobStatus
 # 导入路由
 from vat.web.routes import videos_router, playlists_router, tasks_router, files_router, prompts_router, bilibili_router, watch_router, database_router
 
-app = FastAPI(title="VAT Manager", description="视频处理任务管理界面")
+
+def _start_auto_sync_thread() -> None:
+    """启动应用启动后的后台 Playlist 自动同步检查线程"""
+    import threading
+    threading.Thread(target=_auto_sync_stale_playlists, daemon=True, name="auto-sync-check").start()
+
+
+@asynccontextmanager
+async def app_lifespan(_app: FastAPI):
+    """FastAPI lifespan 钩子：替代已弃用的 on_event('startup')"""
+    _start_auto_sync_thread()
+    yield
+
+
+app = FastAPI(
+    title="VAT Manager",
+    description="视频处理任务管理界面",
+    lifespan=app_lifespan,
+)
 
 
 @app.exception_handler(Exception)
@@ -865,15 +884,6 @@ def _auto_sync_stale_playlists():
     for pl in stale_playlists:
         t = threading.Thread(target=sync_one, args=(pl,), daemon=True, name=f"auto-sync-{pl.id}")
         t.start()
-
-
-@app.on_event("startup")
-async def on_startup():
-    """应用启动时执行的任务"""
-    import threading
-    # 在后台线程中执行，不阻塞启动
-    threading.Thread(target=_auto_sync_stale_playlists, daemon=True, name="auto-sync-check").start()
-
 
 # ==================== 启动入口 ====================
 

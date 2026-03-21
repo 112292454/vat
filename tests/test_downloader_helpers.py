@@ -7,7 +7,12 @@ from types import SimpleNamespace
 from vat.downloaders.base import BaseDownloader
 from vat.downloaders.direct_url import DirectURLDownloader
 from vat.downloaders.local import LocalImporter, generate_content_based_id
-from vat.downloaders.youtube import VideoInfoResult, is_upcoming_event_error, is_video_permanently_unavailable
+from vat.downloaders.youtube import (
+    VideoInfoResult,
+    YtDlpLogger,
+    is_upcoming_event_error,
+    is_video_permanently_unavailable,
+)
 
 
 class TestLocalImporterHelpers:
@@ -67,6 +72,33 @@ class TestYoutubeHelperContracts:
     def test_is_video_permanently_unavailable_detects_private_removed(self):
         assert is_video_permanently_unavailable("This video is private") is True
         assert is_video_permanently_unavailable("Connection reset by peer") is False
+
+    def test_ytdlp_logger_downgrades_permanent_unavailable_errors_to_debug(self, monkeypatch):
+        from vat.downloaders import youtube as youtube_module
+
+        calls = []
+        monkeypatch.setattr(youtube_module.logger, "debug", lambda msg: calls.append(("debug", msg)))
+        monkeypatch.setattr(youtube_module.logger, "error", lambda msg: calls.append(("error", msg)))
+
+        YtDlpLogger().error(
+            "ERROR: [youtube] demo123: Join this channel to get access to members-only content"
+        )
+
+        assert calls == [(
+            "debug",
+            "ERROR: [youtube] demo123: Join this channel to get access to members-only content",
+        )]
+
+    def test_ytdlp_logger_keeps_non_unavailable_errors_at_error_level(self, monkeypatch):
+        from vat.downloaders import youtube as youtube_module
+
+        calls = []
+        monkeypatch.setattr(youtube_module.logger, "debug", lambda msg: calls.append(("debug", msg)))
+        monkeypatch.setattr(youtube_module.logger, "error", lambda msg: calls.append(("error", msg)))
+
+        YtDlpLogger().error("ERROR: [youtube] demo123: HTTP Error 429: Too Many Requests")
+
+        assert calls == [("error", "ERROR: [youtube] demo123: HTTP Error 429: Too Many Requests")]
 
 
 class TestBaseDownloaderProbeVideoMetadata:

@@ -204,6 +204,8 @@ class PlaylistService:
         
         new_videos = []
         existing_videos = []
+        new_video_candidates: Dict[str, Dict[str, Any]] = {}
+        existing_playlist_updates: List[tuple[str, int]] = []
         
         for index, entry in enumerate(entries, start=1):
             if entry is None:
@@ -215,87 +217,39 @@ class PlaylistService:
             
             if video_id in existing_video_ids:
                 existing_videos.append(video_id)
-                # 更新索引（可能顺序变化）- 使用关联表
-                self.db.update_video_playlist_info(video_id, playlist_id, index)
+                # 延迟到写入阶段再更新，避免 sync 中途被打断留下半状态
+                existing_playlist_updates.append((video_id, index))
             else:
                 new_videos.append(video_id)
-                
-                if auto_add_videos:
-                    # 检查视频是否已存在（可能在其他 playlist 中）
-                    existing_video = self.db.get_video(video_id)
-                    if existing_video:
-                        # 视频已存在，只添加 playlist 关联
-                        self.db.add_video_to_playlist(video_id, playlist_id, index)
-                        callback(f"[{index}/{total_videos}] 关联已有视频: {existing_video.title[:40]}...")
-                    else:
-                        # 创建新视频记录
-                        # thumbnail: flat extract 返回 thumbnails（复数列表），
-                        # 而非 thumbnail（单数），需要兼容两种格式
-                        thumb = entry.get('thumbnail') or ''
-                        if not thumb:
-                            thumbs_list = entry.get('thumbnails')
-                            if thumbs_list and isinstance(thumbs_list, list):
-                                thumb = thumbs_list[-1].get('url', '') if thumbs_list[-1] else ''
-                        
-                        entry_meta = {
-                            'duration': entry.get('duration') or 0,
-                            # flat extract 的 entry 中 uploader key 存在但值为 None，
-                            # dict.get('uploader', channel) 不会 fallback，必须用 or
-                            'uploader': entry.get('uploader') or channel,
-                            'thumbnail': thumb,
-                            'upload_date': entry.get('upload_date') or '',
-                        }
-                        # 保留 entry 中的额外有用字段
-                        if entry.get('description'):
-                            entry_meta['description'] = entry['description']
-                        if entry.get('live_status'):
-                            entry_meta['live_status'] = entry['live_status']
-                        if entry.get('release_timestamp'):
-                            entry_meta['release_timestamp'] = entry['release_timestamp']
-                        
-                        video = Video(
-                            id=video_id,
-                            source_type=SourceType.YOUTUBE,
-                            source_url=f"https://www.youtube.com/watch?v={video_id}",
-                            title=entry.get('title', ''),
-                            playlist_id=playlist_id,
-                            playlist_index=index,
-                            metadata=entry_meta,
-                        )
-                        self.db.add_video(video)
-                        # 添加到关联表
-                        self.db.add_video_to_playlist(video_id, playlist_id, index)
-                        callback(f"[{index}/{total_videos}] 新增: {video.title[:50]}...")
+                new_video_candidates[video_id] = {
+                    'entry': entry,
+                    'playlist_index': index,
+                    'existing_video': self.db.get_video(video_id) if auto_add_videos else None,
+                }
         
-        # 更新 Playlist 信息
-        # video_count 使用关联表实际数量，而非 yt-dlp 本次返回的 entries 数量
-        # （增量同步时 entries 只包含本次获取到的视频，不代表全量）
-        actual_video_count = len(self.db.get_playlist_video_ids(playlist_id))
-        self.db.update_playlist(
-            playlist_id,
-            title=playlist_title,
-            video_count=actual_video_count,
-            last_synced_at=datetime.now()
-        )
-        
-        callback(f"同步完成: 新增 {len(new_videos)} 个, 已存在 {len(existing_videos)} 个")
-        
-        # 收集缺少日期的已存在视频（可能是之前同步被中断或删除playlist后重建）
-        videos_missing_date = []
+        # 收集需要补抓 metadata 的已存在视频：
+        # - upload_date 缺失
+        # - upload_date 仍为插值值
+        # - thumbnail 缺失
+        # - live_status 仍停留在 is_upcoming / is_live，说明视频状态尚未稳定
+        videos_needing_refresh = []
+        stale_zero_index_existing_videos: Set[str] = set()
         if fetch_upload_dates and existing_videos:
             for vid in existing_videos:
                 video = self.db.get_video(vid)
                 if video is None:
                     continue
-                metadata = video.metadata or {}
-                upload_date = metadata.get('upload_date', '')
-                if not upload_date:
-                    videos_missing_date.append(vid)
-            if videos_missing_date:
-                callback(f"发现 {len(videos_missing_date)} 个已存在视频缺少日期，将一并获取")
+                if self._should_refresh_existing_video_info(video):
+                    videos_needing_refresh.append(vid)
+                    pv_info = self.db.get_playlist_video_info(playlist_id, vid)
+                    current_index = (pv_info.get('upload_order_index') or 0) if pv_info else 0
+                    if current_index == 0:
+                        stale_zero_index_existing_videos.add(vid)
+            if videos_needing_refresh:
+                callback(f"发现 {len(videos_needing_refresh)} 个已存在视频需要补抓元信息，将一并获取")
         
-        # 合并需要获取日期的视频：新视频 + 缺少日期的已存在视频
-        videos_to_fetch = new_videos + videos_missing_date
+        # 合并需要获取信息的视频：新视频 + 需补抓元信息的已存在视频
+        videos_to_fetch = new_videos + videos_needing_refresh
         
         # 如果需要获取 upload_date，并行获取详细信息
         if fetch_upload_dates and videos_to_fetch:
@@ -312,31 +266,6 @@ class PlaylistService:
                 nonlocal completed_count
                 
                 result = self.downloader.get_video_info(f"https://www.youtube.com/watch?v={vid}")
-                
-                if result.ok and result.upload_date:
-                    # 成功获取：立即更新 metadata
-                    video = self.db.get_video(vid)
-                    if video:
-                        info = result.info
-                        metadata = video.metadata or {}
-                        
-                        metadata['upload_date'] = result.upload_date
-                        metadata['duration'] = info.get('duration') or 0
-                        metadata['thumbnail'] = info.get('thumbnail') or ''
-                        # uploader: 仅在新值非空时覆盖（保护 sync 时从 channel 设置的 fallback）
-                        new_uploader = info.get('uploader') or ''
-                        if new_uploader:
-                            metadata['uploader'] = new_uploader
-                        metadata['view_count'] = info.get('view_count') or 0
-                        metadata['like_count'] = info.get('like_count') or 0
-                        # 成功获取时，清除可能存在的错误 unavailable 标记
-                        metadata.pop('unavailable', None)
-                        metadata.pop('unavailable_reason', None)
-                        metadata.pop('upload_date_interpolated', None)
-                        self.db.update_video(vid, metadata=metadata)
-                    
-                    # 异步发起 LLM 翻译
-                    self._submit_translate_task(vid, result.info)
                 
                 with results_lock:
                     completed_count += 1
@@ -359,6 +288,66 @@ class PlaylistService:
                             status='error', error_message=str(e)
                         )))
             
+            pruned_new_videos, pruned_stale_existing_videos = self._classify_pruned_unavailable_videos(
+                new_video_ids=set(new_videos),
+                stale_zero_index_existing_videos=stale_zero_index_existing_videos,
+                fetch_results=fetch_results,
+                callback=callback,
+            )
+            pruned_videos = pruned_new_videos | pruned_stale_existing_videos
+            if pruned_videos:
+                new_videos = [vid for vid in new_videos if vid not in pruned_new_videos]
+                existing_videos = [vid for vid in existing_videos if vid not in pruned_stale_existing_videos]
+                fetch_results = [
+                    (vid, result)
+                    for vid, result in fetch_results
+                    if vid not in pruned_videos
+                ]
+                existing_playlist_updates = [
+                    (vid, index)
+                    for vid, index in existing_playlist_updates
+                    if vid not in pruned_stale_existing_videos
+                ]
+                for vid in pruned_new_videos:
+                    new_video_candidates.pop(vid, None)
+
+        # 到这里才真正落库：先判定可用性，再写入新增视频，避免中断留下半成品
+        for vid, index in existing_playlist_updates:
+            self.db.update_video_playlist_info(vid, playlist_id, index)
+
+        if auto_add_videos:
+            for vid in new_videos:
+                candidate = new_video_candidates[vid]
+                existing_video = candidate['existing_video']
+                entry = candidate['entry']
+                index = candidate['playlist_index']
+
+                if existing_video:
+                    self.db.add_video_to_playlist(vid, playlist_id, index)
+                    callback(f"[{index}/{total_videos}] 关联已有视频: {existing_video.title[:40]}...")
+                else:
+                    video = Video(
+                        id=vid,
+                        source_type=SourceType.YOUTUBE,
+                        source_url=f"https://www.youtube.com/watch?v={vid}",
+                        title=entry.get('title', ''),
+                        playlist_id=playlist_id,
+                        playlist_index=index,
+                        metadata=self._build_entry_metadata(entry, channel),
+                    )
+                    self.db.add_video(video)
+                    self.db.add_video_to_playlist(vid, playlist_id, index)
+                    callback(f"[{index}/{total_videos}] 新增: {video.title[:50]}...")
+
+        if fetch_upload_dates and videos_to_fetch:
+            for vid in pruned_stale_existing_videos:
+                self._remove_stale_unavailable_video(playlist_id, vid, callback)
+
+            for vid, result in fetch_results:
+                if result.ok and result.upload_date:
+                    self._apply_video_info_to_db(vid, result.info)
+                    self._submit_translate_task(vid, result.info)
+            
             # 对未成功获取日期的视频进行插值 + 标记永久不可用
             callback("处理无法获取日期的视频...")
             self._process_failed_fetches(playlist_id, fetch_results, callback)
@@ -369,6 +358,19 @@ class PlaylistService:
         # 只处理 index=0 的新视频，从 max(existing)+1 开始
         callback("分配时间顺序索引...")
         self._assign_indices_to_new_videos(playlist_id, callback)
+
+        # 更新 Playlist 信息
+        # video_count 使用关联表实际数量，而非 yt-dlp 本次返回的 entries 数量
+        # （增量同步时 entries 只包含本次获取到的视频，不代表全量）
+        actual_video_count = len(self.db.get_playlist_video_ids(playlist_id))
+        self.db.update_playlist(
+            playlist_id,
+            title=playlist_title,
+            video_count=actual_video_count,
+            last_synced_at=datetime.now()
+        )
+
+        callback(f"同步完成: 新增 {len(new_videos)} 个, 已存在 {len(existing_videos)} 个")
         
         return SyncResult(
             playlist_id=playlist_id,
@@ -376,6 +378,118 @@ class PlaylistService:
             existing_videos=existing_videos,
             total_videos=total_videos
         )
+
+    def _build_entry_metadata(self, entry: Dict[str, Any], channel: str) -> Dict[str, Any]:
+        """将 playlist flat entry 转为视频初始 metadata"""
+        thumb = entry.get('thumbnail') or ''
+        if not thumb:
+            thumbs_list = entry.get('thumbnails')
+            if thumbs_list and isinstance(thumbs_list, list):
+                thumb = thumbs_list[-1].get('url', '') if thumbs_list[-1] else ''
+
+        entry_meta = {
+            'duration': entry.get('duration') or 0,
+            # flat extract 的 entry 中 uploader key 存在但值为 None，
+            # dict.get('uploader', channel) 不会 fallback，必须用 or
+            'uploader': entry.get('uploader') or channel,
+            'thumbnail': thumb,
+            'upload_date': entry.get('upload_date') or '',
+        }
+        if entry.get('description'):
+            entry_meta['description'] = entry['description']
+        if entry.get('live_status'):
+            entry_meta['live_status'] = entry['live_status']
+        if entry.get('release_timestamp'):
+            entry_meta['release_timestamp'] = entry['release_timestamp']
+        return entry_meta
+
+    @staticmethod
+    def _should_refresh_existing_video_info(video: Video) -> bool:
+        """判断已存在视频是否需要在 sync 阶段重新补抓元信息。
+
+        关键点：第一次失败后会写入插值日期，因此不能只看 upload_date 是否为空。
+        """
+        metadata = video.metadata or {}
+        if not metadata.get('upload_date'):
+            return True
+        if metadata.get('upload_date_interpolated'):
+            return True
+        if not metadata.get('thumbnail'):
+            return True
+        if metadata.get('live_status') in {'is_upcoming', 'is_live'}:
+            return True
+        return False
+
+    def _apply_video_info_to_db(self, video_id: str, info: Dict[str, Any]) -> None:
+        """将 get_video_info 的成功结果回写到数据库"""
+        video = self.db.get_video(video_id)
+        if not video:
+            return
+
+        metadata = video.metadata or {}
+        metadata['upload_date'] = info.get('upload_date') or ''
+        metadata['duration'] = info.get('duration') or 0
+        metadata['thumbnail'] = info.get('thumbnail') or ''
+        new_uploader = info.get('uploader') or ''
+        if new_uploader:
+            metadata['uploader'] = new_uploader
+        new_live_status = info.get('live_status')
+        if new_live_status:
+            metadata['live_status'] = new_live_status
+        metadata['view_count'] = info.get('view_count') or 0
+        metadata['like_count'] = info.get('like_count') or 0
+        metadata.pop('unavailable', None)
+        metadata.pop('unavailable_reason', None)
+        metadata.pop('upload_date_interpolated', None)
+        self.db.update_video(video_id, metadata=metadata)
+
+    def _classify_pruned_unavailable_videos(
+        self,
+        new_video_ids: Set[str],
+        stale_zero_index_existing_videos: Set[str],
+        fetch_results: List[tuple],
+        callback: Callable[[str], None],
+    ) -> tuple[Set[str], Set[str]]:
+        """识别本轮 sync 里应剔除的永久不可用视频
+
+        返回两类集合：
+        - pruned_new_videos: 本轮新发现，但已判定永久不可用，禁止入库
+        - pruned_stale_existing_videos: 上轮中断残留的 zero-index 旧记录，本轮应清理
+        """
+        pruned_new_videos: Set[str] = set()
+        pruned_stale_existing_videos: Set[str] = set()
+
+        for vid, result in fetch_results:
+            if not result.is_unavailable:
+                continue
+
+            if vid in new_video_ids:
+                pruned_new_videos.add(vid)
+            if vid in stale_zero_index_existing_videos:
+                pruned_stale_existing_videos.add(vid)
+
+        if pruned_new_videos:
+            callback(f"  过滤永久不可用的新视频: {len(pruned_new_videos)} 个")
+        if pruned_stale_existing_videos:
+            callback(f"  清理上次中断遗留的永久不可用零索引视频: {len(pruned_stale_existing_videos)} 个")
+
+        return pruned_new_videos, pruned_stale_existing_videos
+
+    def _remove_stale_unavailable_video(
+        self,
+        playlist_id: str,
+        video_id: str,
+        callback: Callable[[str], None],
+    ) -> None:
+        """清理上次同步中断遗留的永久不可用零索引视频"""
+        self.db.remove_video_from_playlist(video_id, playlist_id)
+        remaining_playlists = self.db.get_video_playlists(video_id)
+        if remaining_playlists:
+            callback(f"  视频 {video_id}: 清理当前 playlist 残留关联，保留其他 playlist 关联")
+            return
+
+        self.db.delete_video(video_id)
+        callback(f"  视频 {video_id}: 清理上次中断遗留的无效记录")
     
     def _process_failed_fetches(
         self,

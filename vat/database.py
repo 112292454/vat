@@ -1365,6 +1365,57 @@ class Database:
                 UPDATE videos SET playlist_id = ?, playlist_index = ?, updated_at = ?
                 WHERE id = ? AND (playlist_id IS NULL OR playlist_id = ?)
             """, (playlist_id, playlist_index, datetime.now(), video_id, playlist_id))
+
+    def remove_video_from_playlist(self, video_id: str, playlist_id: str) -> None:
+        """移除视频与指定 Playlist 的关联
+        
+        仅删除关联表中的一条记录，不删除视频本身。
+        同时维护 videos 表中的向后兼容字段 playlist_id / playlist_index：
+        - 若当前 legacy 指针不是被移除的 playlist，则无需改动
+        - 若当前 legacy 指针正好指向被移除的 playlist，则切到剩余任一关联
+          （按创建顺序取第一条），若无剩余关联则清空
+        """
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "DELETE FROM playlist_videos WHERE playlist_id = ? AND video_id = ?",
+                (playlist_id, video_id),
+            )
+
+            cursor.execute(
+                "SELECT playlist_id FROM videos WHERE id = ?",
+                (video_id,),
+            )
+            video_row = cursor.fetchone()
+            if not video_row or video_row["playlist_id"] != playlist_id:
+                return
+
+            cursor.execute("""
+                SELECT playlist_id, playlist_index
+                FROM playlist_videos
+                WHERE video_id = ?
+                ORDER BY created_at ASC, playlist_id ASC
+                LIMIT 1
+            """, (video_id,))
+            next_row = cursor.fetchone()
+
+            if next_row:
+                cursor.execute("""
+                    UPDATE videos
+                    SET playlist_id = ?, playlist_index = ?, updated_at = ?
+                    WHERE id = ?
+                """, (
+                    next_row["playlist_id"],
+                    next_row["playlist_index"],
+                    datetime.now(),
+                    video_id,
+                ))
+            else:
+                cursor.execute("""
+                    UPDATE videos
+                    SET playlist_id = NULL, playlist_index = NULL, updated_at = ?
+                    WHERE id = ?
+                """, (datetime.now(), video_id))
     
     def update_video_playlist_info(
         self,

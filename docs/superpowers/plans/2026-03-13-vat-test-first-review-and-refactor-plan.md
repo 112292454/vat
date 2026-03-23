@@ -949,7 +949,13 @@ Run: `pytest tests -q`
     - `HOME=/tmp pytest tests/test_bilibili_upload_api.py -q`
     - `HOME=/tmp pytest tests/test_bilibili_upload_api.py tests/test_bilibili_misc_api.py tests/test_bilibili_season_api.py tests/test_bilibili_editing_api.py tests/test_bilibili_replace_video.py tests/test_bilibili_violation.py tests/test_tools_job.py tests/test_scheduled_upload.py tests/test_season_sync.py tests/test_season_title_sync.py tests/test_season_sorting.py -q`
     - `HOME=/tmp pytest tests/test_services.py -q`
-- `下一步`: 继续自底向上补剩余高风险模块测试，优先是阶段语义漂移、playlist/upload/season 的原子性，以及翻译零容忍契约
+  - `2026-03-24 进度核对（master@afe6e67）`:
+    - 已确认 `refactor/test-first-hardening` 已通过合并提交 `615dc5a` 进入 `master`，阶段拆分、运行时配置隔离、Web Job 生命周期收敛和大批契约测试都在主线上。
+    - 本次复核再次执行 `pytest -q tests/test_pipeline.py tests/test_cli_process.py tests/test_tasks_api.py tests/test_web_jobs.py tests/test_watch_api.py`，结果为 `140 passed in 50.27s`。
+    - 当前更准确的进度判断是：功能性修复和契约硬化主线基本完成，但“高争议结构重构”仍未真正开始；`vat/pipeline/executor.py` 仍为 `2379` 行，God class 拆分仍处于待实施状态。
+    - Web 共享依赖已在主 API 路由层引入 `vat/web/deps.py`，但尚未覆盖全部入口；`vat/web/routes/bilibili.py` 与 `vat/web/app.py` 的部分路径仍直接构造 `Database(...)`。
+    - Web 进度口径也未完全收口；页面主线多数已转向 `batch_get_video_progress()` / `batch_get_playlist_progress()`，但 `vat/web/routes/videos.py` 仍使用 `COMPLETED / 7` 的旧算法。
+- `下一步`: 若继续当前重构主线，优先顺序应调整为“先收口剩余 Web 一致性问题（进度口径、Database 依赖注入覆盖面），再决定是否进入 `executor.py` 的 stage handler 拆分”；补测试重点继续围绕 playlist/upload/season 原子性与翻译零容忍契约。
 
 补充说明：
 

@@ -15,7 +15,6 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi.middleware.cors import CORSMiddleware
 
-from vat.database import Database
 from vat.config import load_config
 from vat.models import TaskStep, TaskStatus, DEFAULT_STAGE_SEQUENCE
 from vat.web.deps import get_db
@@ -24,13 +23,6 @@ from vat.web.jobs import JobStatus
 # 导入路由
 from vat.web.routes import videos_router, playlists_router, tasks_router, files_router, prompts_router, bilibili_router, watch_router, database_router
 from vat.web.routes.tasks import get_job_manager
-
-
-def _start_auto_sync_thread() -> None:
-    """启动应用启动后的后台 Playlist 自动同步检查线程"""
-    import threading
-    threading.Thread(target=_auto_sync_stale_playlists, daemon=True, name="auto-sync-check").start()
-
 
 @asynccontextmanager
 async def app_lifespan(_app: FastAPI):
@@ -778,55 +770,6 @@ async def watch_page(request: Request):
         "playlists": playlist_list,
         "watch_defaults": watch_defaults,
     })
-
-
-# ==================== 启动自动同步 ====================
-
-def _auto_sync_stale_playlists():
-    """检查并自动同步超过 7 天未更新的 playlist（后台线程）"""
-    import threading
-    from datetime import timedelta
-    from vat.services import PlaylistService
-    
-    config = load_config()
-    db = Database(config.storage.database_path, output_base_dir=config.storage.output_dir)
-    playlists = db.list_playlists()
-    
-    if not playlists:
-        return
-    
-    now = datetime.now()
-    stale_threshold = timedelta(days=7)
-    stale_playlists = []
-    
-    for pl in playlists:
-        if not pl.last_synced_at or (now - pl.last_synced_at) > stale_threshold:
-            stale_playlists.append(pl)
-    
-    if not stale_playlists:
-        return
-    
-    import logging
-    logger = logging.getLogger("vat.web.auto_sync")
-    logger.info(f"发现 {len(stale_playlists)} 个超过 7 天未同步的 Playlist，启动后台同步...")
-    
-    def sync_one(pl):
-        try:
-            sync_db = Database(config.storage.database_path, output_base_dir=config.storage.output_dir)
-            service = PlaylistService(sync_db, config)
-            result = service.sync_playlist(
-                pl.source_url,
-                auto_add_videos=True,
-                fetch_upload_dates=True,
-                progress_callback=lambda msg: logger.info(f"[{pl.title}] {msg}")
-            )
-            logger.info(f"[{pl.title}] 同步完成: 新增 {result.new_count}, 已存在 {result.existing_count}")
-        except Exception as e:
-            logger.error(f"[{pl.title}] 自动同步失败: {e}")
-    
-    for pl in stale_playlists:
-        t = threading.Thread(target=sync_one, args=(pl,), daemon=True, name=f"auto-sync-{pl.id}")
-        t.start()
 
 # ==================== 启动入口 ====================
 

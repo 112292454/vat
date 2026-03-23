@@ -173,7 +173,7 @@ Expected:
 - Modify: `vat/web/routes/bilibili.py`
 - Modify: `vat/web/deps.py`
 
-- [ ] **Step 1: 先做最小替换，不引入新行为**
+- [x] **Step 1: 先做最小替换，不引入新行为**
 
 将能直接替换的 `Database(...)` 改为：
 - 页面层：优先 `get_db()`
@@ -181,7 +181,7 @@ Expected:
 
 本阶段先处理最直接的旁路，不强行把所有复杂路径一次性收完。
 
-- [ ] **Step 2: 运行已有 Web 相关回归**
+- [x] **Step 2: 运行已有 Web 相关回归**
 
 Run:
 ```bash
@@ -251,7 +251,7 @@ Expected:
 - Modify: `vat/web/jobs.py`
 - Test: `tests/test_bilibili_web_api.py`
 
-- [ ] **Step 1: 先补测试，确认哪些状态查询仍依赖 `_fix_tasks/_sync_tasks`**
+- [x] **Step 1: 先补测试，确认哪些状态查询仍依赖 `_fix_tasks/_sync_tasks`**
 
 Run:
 ```bash
@@ -261,14 +261,14 @@ pytest tests/test_bilibili_web_api.py -q
 Expected:
 - 若缺测试，先补；若已有测试不足以覆盖状态真值来源，先补后再改
 
-- [ ] **Step 2: 只处理最直接的 job 状态查询旁路**
+- [x] **Step 2: 只处理最直接的 job 状态查询旁路**
 
 注意：
 - 本任务允许保守推进
 - 如果某些 B 站接口已经明显进入“业务 workflow 归位”范围，可在代码注释或文档中标记为“留待 Phase D”
 - 不强求本阶段把整个 `bilibili.py` 清干净
 
-- [ ] **Step 3: 运行回归**
+- [x] **Step 3: 运行回归**
 
 Run:
 ```bash
@@ -339,10 +339,29 @@ pytest tests/test_database_api.py -q
 
 - [x] 清理 `app.py` 中重复的旧 JSON API
 - [x] 移除 Web 启动自动同步线程
+- [x] 删除 `app.py` 中已失效的自动同步死代码
 - [x] 页面层统一复用 `get_job_manager()`
 - [x] `playlists.py` 的同步/刷新状态查询已优先走 `web_jobs`
 - [x] `watch.py` 的 `JobManager` 构造逻辑已统一入口
-- [ ] `bilibili.py` 的内存状态真值仍待收口
-- [ ] `Database(...)` 直接构造路径仍未全部收口
+- [x] `bilibili.py` 的修复任务 / season sync 状态查询已优先走 `web_jobs`
+- [x] route 级别最直接的 `Database(...)` 旁路已做最小替换
+- [ ] `bilibili.py` 内部 helper 仍有 `Database(...)` 直连，留待后续业务 workflow 收口时处理
+- [ ] `bilibili.py` 中 `_fix_tasks/_sync_tasks` 仍保留为兼容回退映射，后续可继续移除
+
+## 当前结论
+
+`Phase A` 的最小目标已经达成：
+
+- Web 不再在启动时直接执行真实业务同步
+- `app.py` 的重复 JSON API 已移除
+- 页面层与部分 route 的 `JobManager` / `Database` 获取入口已收口
+- `playlists` / `bilibili` 的关键状态查询已优先基于持久化 `web_jobs`
+
+仍然没有在本阶段解决的问题，明确留给后续阶段：
+
+- `watch_sessions/watch_rounds` 与 `web_jobs` 的最终统一模型
+- `bilibili.py` 的整体 route/workflow 混杂
+- `WatchService -> web.jobs` 反向依赖
+- 更深层的状态语义统一（`SKIPPED / unavailable / partial_completed`）
 
 Plan saved to `docs/superpowers/plans/2026-03-24-phase-a-web-boundary-implementation-plan.md` and partially executed.

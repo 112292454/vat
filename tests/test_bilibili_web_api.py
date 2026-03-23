@@ -3,6 +3,7 @@
 import os
 import tempfile
 from types import SimpleNamespace
+from datetime import datetime
 
 import httpx
 import pytest
@@ -11,6 +12,7 @@ from fastapi import FastAPI
 os.environ["HOME"] = os.path.join(tempfile.gettempdir(), "vat-test-home")
 
 from vat.web.routes.bilibili import router
+from vat.web.jobs import JobStatus, WebJob
 
 
 @pytest.fixture(params=["asyncio"])
@@ -33,6 +35,56 @@ class _FakeDatabase:
     def __init__(self, db_path, output_base_dir=None):
         self.db_path = db_path
         self.output_base_dir = output_base_dir
+
+
+class _FakeJobManager:
+    def __init__(self):
+        self.jobs = {}
+        self.update_calls = []
+        self.log_lines = {}
+
+    def update_job_status(self, job_id):
+        self.update_calls.append(job_id)
+
+    def get_job(self, job_id):
+        return self.jobs.get(job_id)
+
+    def get_log_content(self, job_id, tail_lines=3):
+        return self.log_lines.get(job_id, [])
+
+    def find_latest_job(self, task_type, task_params_subset=None, statuses=None, limit=200):
+        expected = task_params_subset or {}
+        allowed = set(statuses or [])
+        for job in self.jobs.values():
+            if job.task_type != task_type:
+                continue
+            if allowed and job.status not in allowed:
+                continue
+            params = job.task_params or {}
+            if all(params.get(key) == value for key, value in expected.items()):
+                return job
+        return None
+
+
+def _make_job(job_id, *, task_type, task_params, status=JobStatus.RUNNING, error=None):
+    return WebJob(
+        job_id=job_id,
+        video_ids=[],
+        steps=[task_type],
+        gpu_device="auto",
+        force=False,
+        status=status,
+        pid=4321 if status == JobStatus.RUNNING else None,
+        log_file=None,
+        progress=0.5,
+        error=error,
+        created_at=datetime(2026, 3, 24, 12, 0, 0),
+        started_at=None,
+        finished_at=None,
+        task_type=task_type,
+        task_params=task_params,
+        cancel_requested=False,
+    )
 
 
 class TestResyncSeasonInfoRoute:
@@ -166,3 +218,51 @@ class TestResyncSeasonInfoRoute:
             "skipped": 0,
             "details": [],
         }
+
+
+class TestBilibiliJobStatusRoutes:
+    @pytest.mark.anyio
+    async def test_fix_status_can_resolve_job_without_legacy_memory_state(self, app, client, monkeypatch):
+        job_manager = _FakeJobManager()
+        job_manager.jobs["job-fix"] = _make_job(
+            "job-fix",
+            task_type="fix-violation",
+            task_params={"aid": 123},
+            status=JobStatus.RUNNING,
+        )
+
+        app.include_router(router)
+        monkeypatch.setattr("vat.web.routes.bilibili._get_job_manager", lambda: job_manager)
+        monkeypatch.setattr("vat.web.routes.bilibili._fix_tasks", {})
+
+        async with client as ac:
+            response = await ac.get("/bilibili/fix/123/status")
+
+        assert response.status_code == 200
+        assert response.json()["status"] == "masking"
+        assert response.json()["job_id"] == "job-fix"
+        assert job_manager.update_calls == ["job-fix"]
+
+    @pytest.mark.anyio
+    async def test_season_sync_status_can_resolve_job_without_legacy_memory_state(self, app, client, monkeypatch):
+        job_manager = _FakeJobManager()
+        job_manager.jobs["job-sync"] = _make_job(
+            "job-sync",
+            task_type="season-sync",
+            task_params={"playlist_id": "PL1"},
+            status=JobStatus.FAILED,
+            error="sync failed",
+        )
+
+        app.include_router(router)
+        monkeypatch.setattr("vat.web.routes.bilibili._get_job_manager", lambda: job_manager)
+        monkeypatch.setattr("vat.web.routes.bilibili._sync_tasks", {})
+
+        async with client as ac:
+            response = await ac.get("/bilibili/season-sync/PL1/status")
+
+        assert response.status_code == 200
+        assert response.json()["status"] == "failed"
+        assert response.json()["job_id"] == "job-sync"
+        assert response.json()["message"] == "sync failed"
+        assert job_manager.update_calls == ["job-sync"]

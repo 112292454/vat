@@ -6,11 +6,10 @@ from fastapi.testclient import TestClient
 def test_app_lifespan_does_not_start_auto_sync_thread(monkeypatch):
     from vat.web import app as web_app_module
 
-    calls = []
-    monkeypatch.setattr(web_app_module, "_start_auto_sync_thread", lambda: calls.append("started"))
+    assert not hasattr(web_app_module, "_start_auto_sync_thread")
 
     with TestClient(web_app_module.app):
-        assert calls == []
+        pass
 
 
 def test_app_does_not_register_legacy_json_api_routes():

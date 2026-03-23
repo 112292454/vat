@@ -17,10 +17,13 @@ from ...uploaders.bilibili import BilibiliUploader, resync_season_video_infos
 from ...uploaders.upload_config import get_upload_config_manager, UploadConfigManager
 from ...embedder.ffmpeg_wrapper import FFmpegWrapper
 from ...utils.logger import setup_logger
+from ..deps import get_db
 
 logger = setup_logger("web.bilibili")
 
 # 审核修复任务状态（内存存储，key=aid）
+# 兼容保留：历史上用内存字典记录最近 job_id。
+# 当前路由已优先通过 web_jobs 反查任务，后续可彻底删除。
 _fix_tasks: Dict[int, Dict[str, Any]] = {}
 
 router = APIRouter(prefix="/bilibili", tags=["bilibili"])
@@ -28,6 +31,37 @@ router = APIRouter(prefix="/bilibili", tags=["bilibili"])
 # 模板目录
 templates_dir = Path(__file__).parent.parent / "templates"
 templates = Jinja2Templates(directory=str(templates_dir))
+
+
+def _get_job_manager():
+    """获取统一的 JobManager 实例。"""
+    from .tasks import get_job_manager
+    return get_job_manager()
+
+
+def _find_latest_bilibili_job(task_type: str, task_params_subset: Dict[str, Any]):
+    """按 task_type + task_params 子集反查最近的 B站后台任务。"""
+    jm = _get_job_manager()
+    job = jm.find_latest_job(
+        task_type=task_type,
+        task_params_subset=task_params_subset,
+    )
+    if job:
+        return job
+
+    # 兼容旧的进程内状态字典（过渡期保留）
+    if task_type == "fix-violation":
+        aid = task_params_subset.get("aid")
+        entry = _fix_tasks.get(aid)
+        if entry and "job_id" in entry:
+            return jm.get_job(entry["job_id"])
+    elif task_type == "season-sync":
+        playlist_id = task_params_subset.get("playlist_id")
+        entry = _sync_tasks.get(playlist_id)
+        if entry and "job_id" in entry:
+            return jm.get_job(entry["job_id"])
+
+    return None
 
 
 def _get_project_root() -> Path:
@@ -526,18 +560,17 @@ async def fix_rejected_video(aid: int, request: Request):
     - 优先本地文件，降级从 B站下载
     """
     try:
-        from .tasks import get_job_manager
-        jm = get_job_manager()
+        jm = _get_job_manager()
         
         # 检查是否已有任务在运行
-        existing_job_id = _fix_tasks.get(aid, {}).get('job_id')
-        if existing_job_id:
-            jm.update_job_status(existing_job_id)
-            existing_job = jm.get_job(existing_job_id)
+        existing_job = _find_latest_bilibili_job("fix-violation", {"aid": aid})
+        if existing_job:
+            jm.update_job_status(existing_job.job_id)
+            existing_job = jm.get_job(existing_job.job_id)
             if existing_job and existing_job.status.value == 'running':
                 return JSONResponse({
                     "success": False,
-                    "error": f"aid={aid} 已有修复任务在运行 (job={existing_job_id})"
+                    "error": f"aid={aid} 已有修复任务在运行 (job={existing_job.job_id})"
                 })
         
         body = await request.json()
@@ -588,13 +621,12 @@ async def fix_rejected_video(aid: int, request: Request):
 @router.get("/fix/{aid}/status")
 async def get_fix_status(aid: int):
     """获取修复任务状态（通过 JobManager 查询）"""
-    entry = _fix_tasks.get(aid)
-    if not entry or 'job_id' not in entry:
+    jm = _get_job_manager()
+    job = _find_latest_bilibili_job("fix-violation", {"aid": aid})
+    if not job:
         return JSONResponse({"status": "none", "message": "无任务记录"})
-    
-    from .tasks import get_job_manager
-    jm = get_job_manager()
-    job_id = entry['job_id']
+
+    job_id = job.job_id
     jm.update_job_status(job_id)
     job = jm.get_job(job_id)
     
@@ -671,7 +703,7 @@ async def resync_video_info_route(aid: int):
         from ...uploaders.bilibili import resync_video_info
         
         config = load_config()
-        db = Database(config.storage.database_path, output_base_dir=config.storage.output_dir)
+        db = get_db()
         uploader = _get_uploader(with_upload_params=False)
         
         result = resync_video_info(db, uploader, config, aid)
@@ -697,7 +729,7 @@ async def resync_season_info_route(season_id: int):
     """按合集批量刷新视频元信息（标题/简介/标签/分区）"""
     try:
         config = load_config()
-        db = Database(config.storage.database_path, output_base_dir=config.storage.output_dir)
+        db = get_db()
         uploader = _get_uploader(with_upload_params=False)
 
         result = await run_in_threadpool(
@@ -745,8 +777,7 @@ async def get_sync_playlists():
     - 已同步视频数
     """
     try:
-        config = load_config()
-        db = Database(config.storage.database_path, output_base_dir=config.storage.output_dir)
+        db = get_db()
         from ...services.playlist_service import PlaylistService
         playlist_service = PlaylistService(db)
         
@@ -790,8 +821,8 @@ async def get_sync_playlists():
                         # 视为待同步候选
                         pending_count += 1
             
-            # 检查是否有正在运行的同步任务
-            sync_task = _sync_tasks.get(pl.id, {})
+            # 检查是否有正在运行的同步任务（优先反查 web_jobs）
+            sync_job = _find_latest_bilibili_job("season-sync", {"playlist_id": pl.id})
             
             result.append({
                 'playlist_id': pl.id,
@@ -801,8 +832,8 @@ async def get_sync_playlists():
                 'total_uploaded': total_uploaded,
                 'pending_count': pending_count,
                 'synced_count': synced_count,
-                'sync_status': sync_task.get('status'),
-                'sync_message': sync_task.get('message'),
+                'sync_status': sync_job.status.value if sync_job else None,
+                'sync_message': sync_job.error if sync_job else None,
             })
         
         return JSONResponse({"success": True, "playlists": result})
@@ -819,16 +850,19 @@ async def do_season_sync(playlist_id: str):
     在后台线程中执行，避免阻塞。
     """
     # 检查是否有正在运行的任务
-    existing = _sync_tasks.get(playlist_id, {})
-    if existing.get('status') == 'running':
+    jm = _get_job_manager()
+    existing_job = _find_latest_bilibili_job("season-sync", {"playlist_id": playlist_id})
+    if existing_job:
+        jm.update_job_status(existing_job.job_id)
+        existing_job = jm.get_job(existing_job.job_id)
+    if existing_job and existing_job.status.value == 'running':
         return JSONResponse({
             "success": False,
             "error": f"Playlist {playlist_id} 已有同步任务在运行"
         })
     
     try:
-        config = load_config()
-        db = Database(config.storage.database_path, output_base_dir=config.storage.output_dir)
+        db = get_db()
         from ...services.playlist_service import PlaylistService
         playlist_service = PlaylistService(db)
         
@@ -863,9 +897,6 @@ async def do_season_sync(playlist_id: str):
             logger.info(f"为 {patched} 个视频补充了 bilibili_target_season_id={season_id}")
         
         # 通过 JobManager 提交 season-sync 任务
-        from .tasks import get_job_manager
-        jm = get_job_manager()
-        
         job_id = jm.submit_job(
             video_ids=[],
             steps=['season-sync'],
@@ -892,13 +923,17 @@ async def do_season_sync(playlist_id: str):
 @router.get("/season-sync/{playlist_id}/status")
 async def get_season_sync_status(playlist_id: str):
     """获取 season sync 任务状态（通过 JobManager 查询）"""
-    entry = _sync_tasks.get(playlist_id)
-    if not entry or 'job_id' not in entry:
+    jm = _get_job_manager()
+    job = _find_latest_bilibili_job("season-sync", {"playlist_id": playlist_id})
+    if not job:
         return JSONResponse({"status": "none", "message": "无同步任务"})
-    
-    from .tasks import get_job_manager
-    jm = get_job_manager()
-    job_id = entry['job_id']
+
+    season_id = None
+    legacy_entry = _sync_tasks.get(playlist_id, {})
+    if legacy_entry:
+        season_id = legacy_entry.get("season_id")
+
+    job_id = job.job_id
     jm.update_job_status(job_id)
     job = jm.get_job(job_id)
     
@@ -919,7 +954,7 @@ async def get_season_sync_status(playlist_id: str):
     return JSONResponse({
         "status": status_map.get(job.status.value, job.status.value),
         "message": job.error or last_msg,
-        "season_id": entry.get('season_id'),
+        "season_id": season_id,
         "job_id": job_id,
     })
 

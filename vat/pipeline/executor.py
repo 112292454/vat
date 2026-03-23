@@ -411,13 +411,13 @@ class VideoProcessor:
             # 规则：视频只属于 1 个 playlist 时自动应用；属于多个时警告并保持当前配置
             self._auto_apply_playlist_prompts()
 
-            # 检查视频是否为不可用（如会员限定），若是则直接标记所有阶段完成并跳过
+            # 检查视频是否为不可用（如会员限定），若是则直接标记所有阶段跳过并终止
             video_metadata = self.video.metadata or {}
             if video_metadata.get('unavailable', False):
-                self.progress_callback("视频不可用（会员限定等），跳过处理，标记所有阶段为完成")
+                self.progress_callback("视频不可用（会员限定等），跳过处理，标记所有阶段为 skipped")
                 for step in DEFAULT_STAGE_SEQUENCE:
-                    if not self.db.is_step_completed(self.video_id, step):
-                        self.db.update_task_status(self.video_id, step, TaskStatus.COMPLETED)
+                    if not self.db.is_step_satisfied(self.video_id, step):
+                        self.db.update_task_status(self.video_id, step, TaskStatus.SKIPPED)
                 return True
 
             # 重新处理时清空之前的 processing_notes（避免累积旧警告）
@@ -468,7 +468,7 @@ class VideoProcessor:
                     is_passthrough = step_name in self._passthrough_stages
                     
                     # 检查是否已完成（force=True 时跳过检查，直通阶段总是执行）
-                    if not self.force and not is_passthrough and self.db.is_step_completed(self.video_id, step):
+                    if not self.force and not is_passthrough and self.db.is_step_satisfied(self.video_id, step):
                         self.progress_callback(f"跳过已完成步骤: {step.value}")
                         # 标记为已完成（用于进度计算）
                         self._progress_tracker.complete_stage(step.value)
@@ -480,7 +480,7 @@ class VideoProcessor:
                     # 日志提示
                     if is_passthrough:
                         self._progress_with_tracker(f"直通模式执行步骤: {step.value}")
-                    elif self.force and self.db.is_step_completed(self.video_id, step):
+                    elif self.force and self.db.is_step_satisfied(self.video_id, step):
                         self._progress_with_tracker(f"强制重新执行步骤: {step.value}")
                     else:
                         self._progress_with_tracker(f"开始执行步骤: {step.value}")

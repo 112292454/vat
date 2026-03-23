@@ -777,6 +777,23 @@
 - 把阶段跳跃/直通从“改配置”逐步转向更显式的执行语义
 - 统一 `SKIPPED / unavailable / partial_completed` 的状态解释
 
+### 9.2.1 2026-03-24 进展更新
+
+`Phase B` 已实际完成以下收口：
+
+- `SKIPPED` 已被正式纳入“阶段语义已满足（satisfied）”语义
+- `Database.get_pending_steps()` 现在基于最新任务记录，并接受 `completed/skipped`
+- 视频级 / playlist 级聚合与统计已统一按 satisfied 计数
+- `unavailable` 视频在 pipeline 中不再伪装成“全部 completed”，而是写为 `SKIPPED`，并在聚合层单独计数
+- `web_jobs` 对请求步骤完成度的判定已接受 `skipped`
+- `videos` API 的进度口径已切换到统一的 `batch_get_video_progress()` 聚合
+
+仍然留待后续阶段的点：
+
+- `watch_sessions/watch_rounds` 与 `web_jobs` 的最终统一模型
+- UI 层状态文案与视觉语义的最终收口
+- `playlist_service.py` / `bilibili.py` 中更深层的 workflow 边界整理
+
 ### 9.3 第三阶段：业务工作流归位
 
 - 把 `BilibiliUploader` 中的高层业务流程迁出

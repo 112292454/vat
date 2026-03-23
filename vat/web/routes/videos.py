@@ -6,7 +6,7 @@ from fastapi import APIRouter, HTTPException, Query, Depends
 from pydantic import BaseModel
 
 from vat.database import Database
-from vat.models import Video, SourceType, TaskStep, TaskStatus
+from vat.models import Video, SourceType
 from vat.web.deps import get_db
 
 router = APIRouter(prefix="/api/videos", tags=["videos"])
@@ -53,6 +53,7 @@ async def list_videos(
 ):
     """列出所有视频（支持分页、过滤）"""
     videos = db.list_videos(playlist_id=playlist_id)
+    progress_map = db.batch_get_video_progress([video.id for video in videos]) if videos else {}
     
     # 构建响应
     video_list = []
@@ -69,10 +70,9 @@ async def list_videos(
             for t in tasks
         ]
         
-        # 计算进度
-        completed = sum(1 for t in tasks if t.status == TaskStatus.COMPLETED)
-        total_steps = 7  # 7 个细粒度阶段
-        progress = completed / total_steps if total_steps > 0 else 0
+        # 统一复用 database 的批量进度聚合，保持与页面主链口径一致
+        progress_info = progress_map.get(video.id, {"progress": 0})
+        progress = (progress_info["progress"] or 0) / 100.0
         
         video_list.append(VideoResponse(
             id=video.id,

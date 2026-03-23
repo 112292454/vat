@@ -249,6 +249,17 @@ class TestVideoDeduplication:
         assert "v1" not in result
         assert result == {"v2", "v3"}
 
+    def test_skipped_step_unblocks_video(self, env):
+        """requested step 为 skipped 也视为该 job 已满足。"""
+        jm, db_path = env
+        self._insert_running_job(jm, "job1", ["v1", "v2"], ["download", "whisper"])
+        self._insert_task(db_path, "v1", "download", "completed")
+        self._insert_task(db_path, "v1", "whisper", "skipped")
+
+        result = jm.get_running_video_ids()
+        assert "v1" not in result
+        assert result == {"v2"}
+
     def test_partially_completed_still_blocked(self, env):
         """v1 只完成 download 未完成 whisper → 仍阻塞"""
         jm, db_path = env

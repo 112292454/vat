@@ -146,6 +146,24 @@ class TaskStatus(Enum):
     SKIPPED = "skipped"  # 跳过（依赖未满足或显式跳过）
 
 
+SATISFIED_TASK_STATUSES = (
+    TaskStatus.COMPLETED,
+    TaskStatus.SKIPPED,
+)
+
+SATISFIED_TASK_STATUS_VALUES = tuple(status.value for status in SATISFIED_TASK_STATUSES)
+
+
+def is_task_status_satisfied(status: "TaskStatus | str") -> bool:
+    """判断任务状态是否表示该阶段语义已满足。"""
+    if isinstance(status, str):
+        try:
+            status = TaskStatus(status)
+        except ValueError:
+            return False
+    return status in SATISFIED_TASK_STATUSES
+
+
 @dataclass
 class Video:
     """视频信息"""

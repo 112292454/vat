@@ -23,7 +23,8 @@ from contextlib import contextmanager
 
 from .models import (
     Video, Task, Playlist, SourceType, TaskStep, TaskStatus,
-    DEFAULT_STAGE_SEQUENCE, STAGE_DEPENDENCIES
+    DEFAULT_STAGE_SEQUENCE, STAGE_DEPENDENCIES,
+    SATISFIED_TASK_STATUS_VALUES, is_task_status_satisfied,
 )
 from .utils.logger import setup_logger
 
@@ -688,6 +689,7 @@ class Database:
             if status:
                 # unavailable 视频的排除条件（unavailable 只在 status='unavailable' 时显示）
                 unavailable_exclude = "COALESCE(JSON_EXTRACT(v.metadata, '$.unavailable'), 0) != 1"
+                satisfied_status_sql = "', '".join(SATISFIED_TASK_STATUS_VALUES)
                 
                 # 子查询：计算每个视频的状态
                 status_subquery = f"""
@@ -695,7 +697,7 @@ class Database:
                         SELECT vs.video_id FROM (
                             SELECT 
                                 lt.video_id,
-                                SUM(CASE WHEN lt.status = 'completed' THEN 1 ELSE 0 END) as completed_count,
+                                SUM(CASE WHEN lt.status IN ('{satisfied_status_sql}') THEN 1 ELSE 0 END) as satisfied_count,
                                 SUM(CASE WHEN lt.status = 'failed' THEN 1 ELSE 0 END) as failed_count,
                                 SUM(CASE WHEN lt.status = 'running' THEN 1 ELSE 0 END) as running_count
                             FROM (
@@ -707,11 +709,11 @@ class Database:
                             GROUP BY lt.video_id
                         ) vs
                         WHERE {
-                            f"vs.completed_count >= {total_steps}" if status == 'completed' else
+                            f"vs.satisfied_count >= {total_steps}" if status == 'completed' else
                             "vs.failed_count > 0" if status == 'failed' else
                             "vs.running_count > 0" if status == 'running' else
-                            f"vs.completed_count > 0 AND vs.completed_count < {total_steps} AND vs.failed_count = 0 AND vs.running_count = 0" if status == 'partial_completed' else
-                            f"vs.completed_count < {total_steps} AND vs.failed_count = 0 AND vs.running_count = 0" if status == 'pending' else "1=1"
+                            f"vs.satisfied_count > 0 AND vs.satisfied_count < {total_steps} AND vs.failed_count = 0 AND vs.running_count = 0" if status == 'partial_completed' else
+                            f"vs.satisfied_count < {total_steps} AND vs.failed_count = 0 AND vs.running_count = 0" if status == 'pending' else "1=1"
                         }
                     )
                 """
@@ -733,14 +735,14 @@ class Database:
             if stage_filters:
                 for step_name, step_status in stage_filters.items():
                     if step_status == 'completed':
-                        # 该阶段最新任务为 completed
+                        # 该阶段最新任务为 satisfied（completed/skipped）
                         where_clauses.append("""
                             v.id IN (
                                 SELECT t_sf.video_id FROM (
                                     SELECT video_id, status,
                                            ROW_NUMBER() OVER (PARTITION BY video_id ORDER BY id DESC) as rn
                                     FROM tasks WHERE step = ?
-                                ) t_sf WHERE t_sf.rn = 1 AND t_sf.status = 'completed'
+                                ) t_sf WHERE t_sf.rn = 1 AND t_sf.status IN ('completed', 'skipped')
                             )
                         """)
                         where_params.append(step_name)
@@ -766,7 +768,7 @@ class Database:
                                            ROW_NUMBER() OVER (PARTITION BY video_id ORDER BY id DESC) as rn
                                     FROM tasks WHERE step = ?
                                 ) t_sf WHERE t_sf.rn = 1
-                                    AND t_sf.status IN ('completed', 'failed', 'running')
+                                    AND t_sf.status IN ('completed', 'skipped', 'failed', 'running')
                             )
                         """)
                         where_params.append(step_name)
@@ -782,7 +784,7 @@ class Database:
                                                    ROW_NUMBER() OVER (PARTITION BY video_id ORDER BY id DESC) as rn
                                             FROM tasks WHERE step = ?
                                         ) t_sf WHERE t_sf.rn = 1
-                                            AND t_sf.status = 'completed'
+                                            AND t_sf.status IN ('completed', 'skipped')
                                     )
                                 """)
                                 where_params.append(prereq.value)
@@ -979,26 +981,36 @@ class Database:
     
     def get_pending_steps(self, video_id: str) -> List[TaskStep]:
         """获取视频的待处理步骤（细粒度阶段）"""
-        completed_steps = set()
+        satisfied_steps = set()
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
-                SELECT step FROM tasks 
-                WHERE video_id = ? AND status = ?
-            """, (video_id, TaskStatus.COMPLETED.value))
+                SELECT step, status FROM (
+                    SELECT step, status,
+                           ROW_NUMBER() OVER (PARTITION BY step ORDER BY id DESC) as rn
+                    FROM tasks
+                    WHERE video_id = ?
+                ) WHERE rn = 1
+            """, (video_id,))
             
             for row in cursor.fetchall():
                 try:
-                    completed_steps.add(TaskStep(row['step']))
+                    if is_task_status_satisfied(row['status']):
+                        satisfied_steps.add(TaskStep(row['step']))
                 except ValueError:
                     pass  # 忽略无效的阶段名
         
-        return [step for step in DEFAULT_STAGE_SEQUENCE if step not in completed_steps]
+        return [step for step in DEFAULT_STAGE_SEQUENCE if step not in satisfied_steps]
     
     def is_step_completed(self, video_id: str, step: TaskStep) -> bool:
         """检查步骤是否已完成"""
         task = self.get_task(video_id, step)
         return task is not None and task.status == TaskStatus.COMPLETED
+
+    def is_step_satisfied(self, video_id: str, step: TaskStep) -> bool:
+        """检查步骤是否已满足（COMPLETED 或 SKIPPED）。"""
+        task = self.get_task(video_id, step)
+        return task is not None and is_task_status_satisfied(task.status)
     
     def delete_tasks_for_video(self, video_id: str) -> int:
         """
@@ -1046,12 +1058,12 @@ class Database:
         
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            # 将后续已完成的任务重置为待处理
+            # 将后续已满足的任务重置为待处理
             placeholders = ','.join('?' * len(step_values))
             cursor.execute(f"""
                 UPDATE tasks 
                 SET status = 'pending', started_at = NULL, completed_at = NULL, error_message = NULL
-                WHERE video_id = ? AND step IN ({placeholders}) AND status = 'completed'
+                WHERE video_id = ? AND step IN ({placeholders}) AND status IN ('completed', 'skipped')
             """, [video_id] + step_values)
             
             return cursor.rowcount
@@ -1132,7 +1144,7 @@ class Database:
                     if step_val in tasks:
                         t = tasks[step_val]
                         task_status[step_val] = t
-                        if t["status"] == "completed":
+                        if is_task_status_satisfied(t["status"]):
                             completed_count += 1
                         if t["status"] == "failed":
                             has_failed = True
@@ -1187,7 +1199,7 @@ class Database:
                 video_stats AS (
                     SELECT 
                         video_id,
-                        SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed_count,
+                        SUM(CASE WHEN status IN ('completed', 'skipped') THEN 1 ELSE 0 END) as satisfied_count,
                         SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed_count,
                         SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END) as running_count
                     FROM latest_tasks
@@ -1195,10 +1207,10 @@ class Database:
                     GROUP BY video_id
                 )
                 SELECT 
-                    SUM(CASE WHEN completed_count >= {total_steps} THEN 1 ELSE 0 END) as completed_videos,
+                    SUM(CASE WHEN satisfied_count >= {total_steps} THEN 1 ELSE 0 END) as completed_videos,
                     SUM(CASE WHEN failed_count > 0 THEN 1 ELSE 0 END) as failed_videos,
                     SUM(CASE WHEN running_count > 0 THEN 1 ELSE 0 END) as running_videos,
-                    SUM(CASE WHEN completed_count > 0 AND completed_count < {total_steps}
+                    SUM(CASE WHEN satisfied_count > 0 AND satisfied_count < {total_steps}
                                   AND failed_count = 0 AND running_count = 0
                          THEN 1 ELSE 0 END) as partial_completed_videos
                 FROM video_stats vs
@@ -1505,7 +1517,7 @@ class Database:
                 video_task_summary AS (
                     SELECT 
                         video_id,
-                        SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed_steps,
+                        SUM(CASE WHEN status IN ('completed', 'skipped') THEN 1 ELSE 0 END) as satisfied_steps,
                         SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed_steps
                     FROM latest_tasks
                     WHERE rn = 1
@@ -1516,12 +1528,12 @@ class Database:
                     COUNT(*) as total,
                     SUM(CASE WHEN JSON_EXTRACT(v.metadata, '$.unavailable') = 1 THEN 1 ELSE 0 END) as unavailable,
                     SUM(CASE WHEN COALESCE(JSON_EXTRACT(v.metadata, '$.unavailable'), 0) != 1
-                                  AND COALESCE(vts.completed_steps, 0) >= {total_steps} THEN 1 ELSE 0 END) as completed,
+                                  AND COALESCE(vts.satisfied_steps, 0) >= {total_steps} THEN 1 ELSE 0 END) as completed,
                     SUM(CASE WHEN COALESCE(JSON_EXTRACT(v.metadata, '$.unavailable'), 0) != 1
                                   AND COALESCE(vts.failed_steps, 0) > 0 THEN 1 ELSE 0 END) as failed,
                     SUM(CASE WHEN COALESCE(JSON_EXTRACT(v.metadata, '$.unavailable'), 0) != 1
-                                  AND COALESCE(vts.completed_steps, 0) > 0
-                                  AND COALESCE(vts.completed_steps, 0) < {total_steps}
+                                  AND COALESCE(vts.satisfied_steps, 0) > 0
+                                  AND COALESCE(vts.satisfied_steps, 0) < {total_steps}
                                   AND COALESCE(vts.failed_steps, 0) = 0
                          THEN 1 ELSE 0 END) as partial_completed
                 FROM playlist_videos pv

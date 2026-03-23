@@ -137,6 +137,27 @@ class TestPlaylistProgress:
         assert wh['completed'] == 2
         assert wh['failed'] == 1
 
+    def test_skipped_step_counts_as_completed_in_by_step_and_partial(self, db):
+        _setup_playlist(db, "PL_SKIP")
+        _add_pl_video(db, "v_skip", playlist_id="PL_SKIP", index=1)
+        db.add_task(Task(video_id="v_skip", step=TaskStep.DOWNLOAD, status=TaskStatus.COMPLETED))
+        db.add_task(Task(video_id="v_skip", step=TaskStep.WHISPER, status=TaskStatus.SKIPPED))
+
+        p = PlaylistService(db).get_playlist_progress("PL_SKIP")
+        assert p["completed"] == 0
+        assert p["partial_completed"] == 1
+        assert p["by_step"]["download"]["completed"] == 1
+        assert p["by_step"]["whisper"]["completed"] == 1
+
+    def test_get_completed_videos_excludes_unavailable_even_if_no_pending_steps(self, db):
+        _setup_playlist(db, "PL_UNAVAIL")
+        _add_pl_video(db, "v_unavail_done", playlist_id="PL_UNAVAIL", index=1, unavailable=True)
+        for step in DEFAULT_STAGE_SEQUENCE:
+            db.add_task(Task(video_id="v_unavail_done", step=step, status=TaskStatus.SKIPPED))
+
+        completed = PlaylistService(db).get_completed_videos("PL_UNAVAIL")
+        assert completed == []
+
 
 class TestGetPendingVideos:
 

@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 from typing import List, Optional, Dict, Any, Set, Callable
 from dataclasses import dataclass, field
 
-from vat.models import Video, Playlist, SourceType
+from vat.models import Video, Playlist, SourceType, TaskStatus, DEFAULT_STAGE_SEQUENCE, is_task_status_satisfied
 from vat.database import Database
 from vat.downloaders import YouTubeDownloader, VideoInfoResult
 from vat.utils.logger import setup_logger
@@ -797,12 +797,14 @@ class PlaylistService:
         Returns:
             待处理视频列表（按 playlist_index 排序）
         """
-        from vat.models import TaskStep, TaskStatus
+        from vat.models import TaskStep
         
         videos = self.get_playlist_videos(playlist_id)
         pending_videos = []
         
         for video in videos:
+            if (video.metadata or {}).get('unavailable', False):
+                continue
             pending_steps = self.db.get_pending_steps(video.id)
             
             if target_step:
@@ -834,6 +836,8 @@ class PlaylistService:
         completed_videos = []
         
         for video in videos:
+            if (video.metadata or {}).get('unavailable', False):
+                continue
             pending_steps = self.db.get_pending_steps(video.id)
             if not pending_steps:
                 completed_videos.append(video)
@@ -1186,14 +1190,20 @@ class PlaylistService:
                 'by_step': {step: {'completed': N, 'pending': N, 'failed': N}}
             }
         """
-        from vat.models import TaskStep, TaskStatus, DEFAULT_STAGE_SEQUENCE
-        
         videos = self.get_playlist_videos(playlist_id)
         total = len(videos)
-        completed = 0
-        partial_completed = 0
-        failed = 0
-        unavailable = 0
+        aggregate = self.db.batch_get_playlist_progress().get(playlist_id, {
+            'total': total,
+            'completed': 0,
+            'partial_completed': 0,
+            'pending': total,
+            'failed': 0,
+            'unavailable': 0,
+        })
+        completed = aggregate['completed']
+        partial_completed = aggregate['partial_completed']
+        failed = aggregate['failed']
+        unavailable = aggregate['unavailable']
         by_step = {}
         
         # 初始化每个阶段的统计
@@ -1205,29 +1215,16 @@ class PlaylistService:
             
             # 检查是否为不可用视频
             if metadata.get('unavailable', False):
-                unavailable += 1
                 continue  # 不可用视频不计入阶段统计
             
             tasks = self.db.get_tasks(video.id)
             task_by_step = {t.step: t for t in tasks}
             
-            # 检查是否全部完成
-            pending_steps = self.db.get_pending_steps(video.id)
-            has_completed_step = any(t.status == TaskStatus.COMPLETED for t in tasks)
-            has_failed_step = any(t.status == TaskStatus.FAILED for t in tasks)
-            
-            if not pending_steps:
-                completed += 1
-            elif has_failed_step:
-                failed += 1
-            elif has_completed_step:
-                partial_completed += 1
-            
             # 统计每个阶段
             for step in DEFAULT_STAGE_SEQUENCE:
                 task = task_by_step.get(step)
                 if task:
-                    if task.status == TaskStatus.COMPLETED:
+                    if is_task_status_satisfied(task.status):
                         by_step[step.value]['completed'] += 1
                     elif task.status == TaskStatus.FAILED:
                         by_step[step.value]['failed'] += 1
@@ -1236,14 +1233,11 @@ class PlaylistService:
                 else:
                     by_step[step.value]['pending'] += 1
         
-        # 可处理视频数 = 总数 - 不可用
-        processable = total - unavailable
-        
         return {
             'total': total,
             'completed': completed,
             'partial_completed': partial_completed,
-            'pending': processable - completed - partial_completed - failed,
+            'pending': aggregate['pending'],
             'failed': failed,
             'unavailable': unavailable,
             'by_step': by_step

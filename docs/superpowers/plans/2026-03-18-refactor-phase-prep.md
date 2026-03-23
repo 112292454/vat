@@ -1,0 +1,230 @@
+# VAT Refactor Phase Prep
+
+## 1. 目的
+
+这份文档不是再重复“测试优先”的总原则，而是作为下一阶段真正进入重构前的执行准备文档。
+
+它回答 4 个问题：
+
+1. 当前测试补强是否已经足够支撑进入重构。
+2. 哪些模块已经具备“先改实现、再用测试兜底”的条件。
+3. 哪些模块仍然不适合直接重构，因为问题已经进入设计层。
+4. 后续重构应按什么顺序推进，避免互相污染。
+
+## 2. 当前判断
+
+当前测试补强工作已经达到“可以进入重构准备”的程度。
+
+更准确地说：
+
+- 大部分高风险模块已经有直接的 contract / unit / regression 护栏。
+- 全局 `tests --collect-only` 已成功，说明当前没有新的导入级断裂。
+- 多组大子集回归已经稳定通过，足以说明当前补强并非碎片化成功。
+- 剩余空白大多是长尾异常分支，或者已经进入“需要明确补偿/原子性设计”的区域。
+
+因此，后续的主线应从“继续大面积补测试”切到“在现有测试护栏上进入重构”。
+
+## 3. 已具备重构条件的模块
+
+这些模块已经有足够的直接测试，可以开始针对实现结构做整理：
+
+- `vat/services/playlist_service.py`
+  - 已覆盖 sync / refresh / retranslate / recovery helpers / selection helpers。
+- `vat/uploaders/bilibili.py`
+  - 已覆盖 upload / season api / edit / replace / sorting / sync / wrappers 的大部分直接契约。
+- `vat/translator/base.py`
+  - 已覆盖零容忍段映射和 cache fallback。
+- `vat/translator/llm_translator.py`
+  - 已覆盖 cache key / input context / response validation / optimization loop / realign helpers。
+- `vat/llm/video_info_translator.py`
+  - 已覆盖 roundtrip / helper / retry / failure / fallback。
+- `vat/llm/scene_identifier.py`
+  - 已覆盖 config load / prompt build / default scene / detect fallback。
+- `vat/uploaders/template.py`
+  - 已覆盖 render / context / default template / duration formatting。
+- `vat/uploaders/upload_config.py`
+  - 已覆盖 load / save / update / convenience wrappers。
+- `vat/embedder/ffmpeg_wrapper.py`
+  - 已补 wrapper 层第一批运行时契约，足以支持下一阶段继续内聚整理。
+
+## 4. 仍不宜直接大改的区域
+
+这些区域虽然已有测试，但问题已经明显进入设计层，需要先写明目标行为再重构：
+
+- `vat/uploaders/bilibili.py` 的远端补偿语义
+  - 尤其是 `replace_video()`、`sync_season_episode_titles()`、`season_sync()`。
+  - 当前很多测试只是把“失败后返回 False”钉住了，还没有正式的补偿策略。
+- `vat/web/jobs.py` / `vat/web/routes/tasks.py`
+  - 生命周期和状态机现在已经保守化，但如果继续做结构整理，必须先明确“取消请求”“终态收敛”“孤儿进程恢复”的正式模型。
+- `vat/pipeline/executor.py`
+  - 当前已经有较强调度护栏，但阶段间原子性、下载契约、上传前 metadata 真值来源仍需小心收敛。
+
+## 5. 进入重构的推荐顺序
+
+推荐按“由低耦合到高耦合、由本地纯逻辑到远端副作用”的顺序推进：
+
+1. `vat/uploaders/template.py`
+2. `vat/uploaders/upload_config.py`
+3. `vat/llm/video_info_translator.py`
+4. `vat/llm/scene_identifier.py`
+5. `vat/translator/base.py`
+6. `vat/translator/llm_translator.py`
+7. `vat/services/playlist_service.py`
+8. `vat/embedder/ffmpeg_wrapper.py`
+9. `vat/uploaders/bilibili.py`
+10. `vat/pipeline/executor.py`
+11. `vat/web/jobs.py`
+12. `vat/web/routes/tasks.py`
+
+原因：
+
+- 前 1 到 4 项主要是本地 helper / render / prompt / parsing，最适合先做收敛和简化。
+- 第 5 到 8 项会影响 pipeline 的中段行为，但副作用仍以本地文件和缓存为主。
+- 第 9 项开始进入 B 站远端副作用，必须带着更明确的补偿设计前进。
+- 第 10 到 12 项是控制面，不应在底层 still moving 时过早整理。
+
+## 6. 每个模块重构时的固定检查项
+
+进入具体模块重构时，先逐项确认：
+
+1. 模块对外契约是否已经有直接测试。
+2. 模块内部 helper 是否还存在明显重复逻辑。
+3. 是否存在多处兜底、静默 fallback、下游补洞。
+4. 是否存在共享状态污染。
+5. 是否存在“远端副作用已发生，但本地无法恢复”的路径。
+
+如果第 5 项成立，优先先写补偿设计说明，再动实现。
+
+## 7. 推荐的第一批重构目标
+
+### 7.1 模板与配置收敛
+
+目标：
+
+- 收敛上传模板上下文的真值来源。
+- 收敛 upload config 的默认值与覆盖行为。
+- 减少 `render_upload_metadata()` 调用点周围的重复组装逻辑。
+
+建议文件：
+
+- `vat/uploaders/template.py`
+- `vat/uploaders/upload_config.py`
+- `vat/cli/commands.py`
+- `vat/pipeline/executor.py`
+- `vat/uploaders/bilibili.py`
+
+### 7.2 翻译链路收敛
+
+目标：
+
+- 把“零容忍”和“缓存语义”进一步固定成实现结构，而不是依赖零散 helper。
+- 明确 `reflect`、`context`、`prompt` 三者对输出和缓存的边界。
+
+建议文件：
+
+- `vat/translator/base.py`
+- `vat/translator/llm_translator.py`
+
+### 7.3 Playlist 恢复路径收敛
+
+目标：
+
+- 收敛 `sync / refresh / retranslate` 里的重复视频元信息处理逻辑。
+- 统一“缺失日期补抓 / 插值回退 / translated 更新”的状态推进点。
+
+建议文件：
+
+- `vat/services/playlist_service.py`
+
+## 8. 当前不建议做的事
+
+- 不建议现在就大改 `web/jobs.py` 的整体模型。
+- 不建议在没有补偿设计前重写 `replace_video()` 或 `sync_season_episode_titles()`。
+- 不建议现在做大规模跨模块抽象提炼。
+- 不建议把“长尾测试继续做到 100% 完美”作为进入重构的前置条件。
+
+## 9. 进入下一阶段的工作方式
+
+推荐采用下面的节奏：
+
+1. 先选一个模块。
+2. 写一个该模块的“小型重构准备笔记”。
+3. 先跑该模块直接测试和关联回归。
+4. 做最小重构。
+5. 重新跑同一组测试。
+6. 再决定是否扩大范围。
+
+不要多模块并行重构。
+
+## 10. 当前结论
+
+当前已经不再需要继续以“测试补空白”为主线。
+
+后续主线应切到：
+
+`在现有测试护栏上，按模块逐步进入重构`
+
+同时保留两个原则：
+
+- 继续补测试，但只补“重构过程中新增暴露出来的缺口”。
+- 遇到真正的设计问题时，先写设计说明，再改代码。
+
+## 11. 2026-03-24 补充结论
+
+在进入具体模块重构前，已完成一轮更偏架构层的全仓深审。结论与本文件的“逐模块进入重构”判断并不冲突，但对重构顺序做了明显修正。
+
+当前更准确的判断是：
+
+- 仓库不是“缺少模块化”，而是“控制面过肥、状态解释分散、边界没有真正收口”。
+- 现在最不应该做的事，是直接按行数去拆大文件，尤其是先拆 `executor.py`。
+- 当前最该优先收口的是：
+  1. Web 控制边界
+  2. 状态语义与状态聚合
+  3. 主控制链唯一化
+  4. 业务 workflow 归位
+  5. 技术子域边界收稳
+
+这意味着本文件第 5 节给出的“模块重构顺序”只能视为旧的局部视角顺序，不再适合作为当前主线顺序。
+
+新的推荐主线顺序应当是：
+
+1. Web 控制边界收口
+2. 状态语义收口
+3. `cli process` / `scheduler` 主控制链收口
+4. `Playlist / Watch / Upload` 业务 workflow 归位
+5. 技术子域收口
+6. 最后才沿稳定边界拆大文件
+
+补充说明：
+
+- 当前最详细的全仓审查与目标架构草案已写入本地审查文档：
+  - `docs/superpowers/plans/2026-03-24-repo-architecture-audit-plan.md`
+- 该文件位于 `docs/superpowers/` 下，当前被 `.gitignore` 忽略，因此它是本地活文档，不是仓库跟踪文档。
+- 如果后续需要把其中稳定结论正式沉淀到仓库，应再择机将其摘要整理回本文件或新的受跟踪设计文档。
+
+## 12. 2026-03-24 Phase B 完成记录
+
+`Phase B` 已完成，核心是“状态语义收口”，而不是新的结构拆分。
+
+已落地的点：
+
+- `SKIPPED` 现在被正式纳入“阶段语义已满足（satisfied）”语义。
+- `Database.get_pending_steps()` 改为基于最新任务记录，并接受 `completed/skipped`。
+- 视频级 / playlist 级聚合与统计已统一按 satisfied 计数。
+- `unavailable` 视频在 pipeline 中不再伪装成“全部 completed”，而是写为 `SKIPPED`，并在聚合层单独统计。
+- `web_jobs` 对请求步骤完成度的判定已接受 `skipped`。
+- `vat/web/routes/videos.py` 的进度口径已切换到统一的 database 聚合逻辑。
+
+当前判断：
+
+- `Phase A + Phase B` 完成后，Web 入口边界和核心状态语义已经明显比主线 `master` 收敛。
+- 后续优先级应当切到：
+  1. 主控制链收口（`cli process` vs `scheduler`）
+  2. 业务 workflow 归位（尤其 `playlist/watch/upload`）
+  3. 技术子域收口（LLM facade / 字幕子域 / 媒体基础操作）
+
+仍需后续阶段处理的点：
+
+- `watch_sessions/watch_rounds` 与 `web_jobs` 的最终统一关系
+- `playlist_service.py` / `bilibili.py` 的 workflow 边界整理
+- UI 层对状态文案和视觉语义的最终收口

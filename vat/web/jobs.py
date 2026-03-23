@@ -925,7 +925,7 @@ class JobManager:
             steps: job 请求的步骤列表（如 ['download', 'whisper', ...]）
         
         Returns:
-            True 表示该视频的所有请求步骤最新记录均为 completed
+            True 表示该视频的所有请求步骤最新记录均为 satisfied（completed/skipped）
         """
         if not steps:
             return True
@@ -936,7 +936,7 @@ class JobManager:
                        ROW_NUMBER() OVER (PARTITION BY step ORDER BY id DESC) as rn
                 FROM tasks
                 WHERE video_id = ? AND step IN ({placeholders})
-            ) WHERE rn = 1 AND status = 'completed'
+            ) WHERE rn = 1 AND status IN ('completed', 'skipped')
         """, [video_id] + list(steps))
         row = cursor.fetchone()
         return row['completed_count'] >= len(steps)
@@ -966,7 +966,7 @@ class JobManager:
                        ROW_NUMBER() OVER (PARTITION BY video_id, step ORDER BY id DESC) as rn
                 FROM tasks
                 WHERE video_id IN ({vid_ph}) AND step IN ({step_ph})
-            ) WHERE rn = 1 AND status = 'completed'
+            ) WHERE rn = 1 AND status IN ('completed', 'skipped')
             GROUP BY video_id
             HAVING completed_count >= ?
         """, list(video_ids) + list(steps) + [num_steps])

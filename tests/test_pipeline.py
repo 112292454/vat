@@ -402,13 +402,15 @@ class TestProcessOrchestration:
         assert db.get_task("test_vid", TaskStep.EMBED).status == TaskStatus.COMPLETED
 
     def test_unavailable_video_skips_all(self, tmp_path):
-        """不可用视频应跳过所有处理，标记全部完成"""
+        """不可用视频应跳过所有处理，标记全部 skipped。"""
         vp, db = _make_vp(tmp_path, video_metadata={"unavailable": True})
         result = vp.process(steps=None)
         assert result is True
         # 所有 _run_* 不应被调用
         for step in DEFAULT_STAGE_SEQUENCE:
             getattr(vp, f"_run_{step.value}").assert_not_called()
+            task = db.get_task("test_vid", step)
+            assert task.status == TaskStatus.SKIPPED
 
     def test_empty_pending_returns_true(self, tmp_path):
         """所有步骤已完成时应直接返回 True"""
@@ -559,7 +561,7 @@ class TestConfigIsolationContracts:
         assert shared_config.translator.llm.optimize.custom_prompt == original_optimize_prompt
         for step in DEFAULT_STAGE_SEQUENCE:
             task = database.get_task("test_vid", step)
-            assert task.status == TaskStatus.COMPLETED
+            assert task.status == TaskStatus.SKIPPED
 
     def test_playlist_prompts_restored_when_no_steps_to_run(self, tmp_path):
         from vat.config import load_config

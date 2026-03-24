@@ -440,6 +440,69 @@ class TestFixViolation:
         assert '下载' in result['message']
 
 
+class TestFixViolationHelpers:
+    def test_load_violation_context_collects_new_and_all_ranges(self):
+        uploader = BilibiliUploader.__new__(BilibiliUploader)
+        uploader._cookie_loaded = True
+        uploader.cookie_data = {}
+        uploader.get_rejected_videos = MagicMock(return_value=[{
+            'aid': 12345, 'bvid': 'BV1xx', 'title': '测试', 'state': -2,
+            'problems': [{
+                'reason': '违规', 'violation_time': 'P1(00:10:00-00:10:05)',
+                'violation_position': '', 'modify_advise': '',
+                'is_full_video': False, 'time_ranges': [(600, 605)],
+            }],
+        }])
+
+        ctx = uploader._load_violation_context(12345, previous_ranges=[(100, 110)])
+
+        assert ctx['target']['aid'] == 12345
+        assert ctx['new_ranges'] == [(600, 605)]
+        assert ctx['all_ranges'] == [(100, 110), (600, 605)]
+
+    def test_resolve_violation_source_video_prefers_local_file(self, tmp_path):
+        uploader = BilibiliUploader.__new__(BilibiliUploader)
+        uploader._cookie_loaded = True
+        uploader.cookie_data = {}
+        uploader.download_video = MagicMock()
+
+        local_video = tmp_path / "video.mp4"
+        local_video.write_bytes(b'\x00' * 1024)
+
+        ctx = uploader._resolve_violation_source_video(12345, local_video)
+
+        assert ctx['source_type'] == 'local'
+        assert ctx['source_video'] == local_video
+        assert ctx['tmp_download'] is None
+        uploader.download_video.assert_not_called()
+
+    @patch('vat.embedder.ffmpeg_wrapper.FFmpegWrapper')
+    def test_render_violation_mask_returns_storage_ranges(self, mock_ffmpeg_cls, tmp_path):
+        mock_ffmpeg = MagicMock()
+        mock_ffmpeg_cls.return_value = mock_ffmpeg
+        mock_ffmpeg.mask_violation_segments.side_effect = lambda **kwargs: kwargs['output_path'].write_bytes(b'\x00' * 1024) or True
+        mock_ffmpeg._merge_ranges.return_value = [(100, 110), (200, 210)]
+        mock_ffmpeg.get_video_info.return_value = {'duration': 3600}
+
+        uploader = BilibiliUploader.__new__(BilibiliUploader)
+        uploader._cookie_loaded = True
+        uploader.cookie_data = {}
+
+        source_video = tmp_path / "video.mp4"
+        source_video.write_bytes(b'\x00' * 1024)
+
+        ctx = uploader._render_violation_mask(
+            source_video=source_video,
+            all_ranges=[(100, 110), (200, 210)],
+            mask_text='遮罩',
+            margin_sec=1.0,
+        )
+
+        assert ctx['masked_path'] == source_video.parent / "video_masked.mp4"
+        assert ctx['all_ranges'] == [(100, 110), (200, 210)]
+        mock_ffmpeg.mask_violation_segments.assert_called_once()
+
+
 class TestDownloadVideo:
     """测试 download_video（mock HTTP + subprocess）"""
     

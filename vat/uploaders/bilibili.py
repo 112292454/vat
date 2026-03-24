@@ -1765,8 +1765,6 @@ class BilibiliUploader(BaseUploader):
                 'message': str,
             }
         """
-        from ..embedder.ffmpeg_wrapper import FFmpegWrapper
-        
         def _cb(msg):
             if callback:
                 callback(msg)
@@ -1777,91 +1775,47 @@ class BilibiliUploader(BaseUploader):
             'masked_path': None, 'source': 'local', 'message': '',
         }
         
-        # Step 1: 获取退回信息
-        _cb(f"获取 av{aid} 审核退回信息...")
-        rejected = self.get_rejected_videos()
-        target = [v for v in rejected if v['aid'] == aid]
-        
-        if not target:
-            result['message'] = f"未找到 aid={aid} 的退回稿件"
+        try:
+            violation_ctx = self._load_violation_context(
+                aid,
+                previous_ranges=previous_ranges,
+                callback=_cb,
+            )
+        except ValueError as e:
+            result['message'] = str(e)
             return result
-        
-        t = target[0]
-        _cb(f"  标题: {t['title'][:60]}")
-        
-        # 收集本次新违规时间段
-        new_ranges = []
-        for p in t['problems']:
-            new_ranges.extend(p['time_ranges'])
-            _cb(f"  违规: {p['reason'][:50]}  时间: {p['violation_time']}")
-            if p['is_full_video']:
-                result['message'] = "全片违规，无法通过遮罩修复"
-                return result
-        
-        if not new_ranges:
-            result['message'] = "无具体违规时间段，无法自动修复"
+
+        result['new_ranges'] = violation_ctx['new_ranges']
+
+        try:
+            source_ctx = self._resolve_violation_source_video(
+                aid,
+                video_path=video_path,
+                callback=_cb,
+            )
+        except RuntimeError as e:
+            result['message'] = str(e)
             return result
-        
-        result['new_ranges'] = new_ranges
-        
-        # Step 2: 合并历史 mask ranges + 本次新 ranges
-        all_ranges = list(previous_ranges or []) + new_ranges
-        _cb(f"  本次新违规: {new_ranges}")
-        if previous_ranges:
-            _cb(f"  历史已 mask: {previous_ranges}")
-            _cb(f"  合并后总计: {len(all_ranges)} 段")
-        
-        # Step 3: 确定视频源
-        import tempfile
-        source_video = None
-        source_type = 'local'
-        tmp_download = None
-        
-        if video_path and Path(video_path).exists():
-            source_video = Path(video_path)
-            _cb(f"  使用本地文件: {source_video} ({source_video.stat().st_size / 1024 / 1024:.0f}MB)")
-        else:
-            # 降级：从 B站下载
-            source_type = 'bilibili'
-            _cb("  ⚠️ 本地文件不可用，从 B站下载（质量会降低）...")
-            tmp_dir = Path(tempfile.mkdtemp(prefix=f"bili_fix_{aid}_"))
-            tmp_download = tmp_dir / f"av{aid}_source.mp4"
-            
-            if not self.download_video(aid, tmp_download):
-                result['message'] = "从 B站下载视频失败"
-                return result
-            
-            source_video = tmp_download
-            _cb(f"  B站下载完成: {source_video.stat().st_size / 1024 / 1024:.0f}MB")
-        
-        result['source'] = source_type
-        
-        # Step 4: ffmpeg 遮罩
-        _cb("开始遮罩处理...")
-        ffmpeg = FFmpegWrapper()
-        masked_path = source_video.parent / f"{source_video.stem}_masked{source_video.suffix}"
-        
-        ok = ffmpeg.mask_violation_segments(
-            video_path=source_video,
-            output_path=masked_path,
-            violation_ranges=all_ranges,
-            mask_text=mask_text,
-            margin_sec=margin_sec,
-        )
-        
-        if not ok:
-            result['message'] = "遮罩处理失败"
+
+        result['source'] = source_ctx['source_type']
+        tmp_download = source_ctx['tmp_download']
+
+        try:
+            mask_ctx = self._render_violation_mask(
+                source_video=source_ctx['source_video'],
+                all_ranges=violation_ctx['all_ranges'],
+                mask_text=mask_text,
+                margin_sec=margin_sec,
+                callback=_cb,
+            )
+        except RuntimeError as e:
+            result['message'] = str(e)
+            if tmp_download and tmp_download.exists():
+                tmp_download.unlink(missing_ok=True)
             return result
-        
-        out_size = masked_path.stat().st_size / 1024 / 1024
-        _cb(f"  遮罩完成: {masked_path.name} ({out_size:.0f}MB)")
-        
-        # 保存原始违规范围（不含 margin），供下次累积使用
-        # margin 仅在 mask_violation_segments 内部动态应用，不持久化
-        video_info = ffmpeg.get_video_info(source_video) or {}
-        raw_merged = ffmpeg._merge_ranges(all_ranges, 0, 
-                                          video_info.get('duration', 0))
-        result['all_ranges'] = raw_merged
+
+        masked_path = mask_ctx['masked_path']
+        result['all_ranges'] = mask_ctx['all_ranges']
         result['masked_path'] = str(masked_path)
         
         # Step 5: 上传替换（除非 dry_run）
@@ -1893,6 +1847,129 @@ class BilibiliUploader(BaseUploader):
             tmp_download.unlink(missing_ok=True)
         
         return result
+
+    def _load_violation_context(
+        self,
+        aid: int,
+        previous_ranges: Optional[List[tuple]] = None,
+        callback: Optional[callable] = None,
+    ) -> Dict[str, Any]:
+        """加载本轮违规修复的上下文，包括新违规段和累积段。"""
+        def _cb(msg):
+            if callback:
+                callback(msg)
+            logger.info(msg)
+
+        _cb(f"获取 av{aid} 审核退回信息...")
+        rejected = self.get_rejected_videos()
+        target = [v for v in rejected if v['aid'] == aid]
+
+        if not target:
+            raise ValueError(f"未找到 aid={aid} 的退回稿件")
+
+        target_item = target[0]
+        _cb(f"  标题: {target_item['title'][:60]}")
+
+        new_ranges = []
+        for problem in target_item['problems']:
+            new_ranges.extend(problem['time_ranges'])
+            _cb(f"  违规: {problem['reason'][:50]}  时间: {problem['violation_time']}")
+            if problem['is_full_video']:
+                raise ValueError("全片违规，无法通过遮罩修复")
+
+        if not new_ranges:
+            raise ValueError("无具体违规时间段，无法自动修复")
+
+        all_ranges = list(previous_ranges or []) + new_ranges
+        _cb(f"  本次新违规: {new_ranges}")
+        if previous_ranges:
+            _cb(f"  历史已 mask: {previous_ranges}")
+            _cb(f"  合并后总计: {len(all_ranges)} 段")
+
+        return {
+            'target': target_item,
+            'new_ranges': new_ranges,
+            'all_ranges': all_ranges,
+        }
+
+    def _resolve_violation_source_video(
+        self,
+        aid: int,
+        video_path: Optional[Path] = None,
+        callback: Optional[callable] = None,
+    ) -> Dict[str, Any]:
+        """决定本轮违规修复使用的源视频。"""
+        def _cb(msg):
+            if callback:
+                callback(msg)
+            logger.info(msg)
+
+        import tempfile
+
+        if video_path and Path(video_path).exists():
+            source_video = Path(video_path)
+            _cb(f"  使用本地文件: {source_video} ({source_video.stat().st_size / 1024 / 1024:.0f}MB)")
+            return {
+                'source_video': source_video,
+                'source_type': 'local',
+                'tmp_download': None,
+            }
+
+        _cb("  ⚠️ 本地文件不可用，从 B站下载（质量会降低）...")
+        tmp_dir = Path(tempfile.mkdtemp(prefix=f"bili_fix_{aid}_"))
+        tmp_download = tmp_dir / f"av{aid}_source.mp4"
+
+        if not self.download_video(aid, tmp_download):
+            raise RuntimeError("从 B站下载视频失败")
+
+        _cb(f"  B站下载完成: {tmp_download.stat().st_size / 1024 / 1024:.0f}MB")
+        return {
+            'source_video': tmp_download,
+            'source_type': 'bilibili',
+            'tmp_download': tmp_download,
+        }
+
+    def _render_violation_mask(
+        self,
+        *,
+        source_video: Path,
+        all_ranges: List[tuple],
+        mask_text: str,
+        margin_sec: float,
+        callback: Optional[callable] = None,
+    ) -> Dict[str, Any]:
+        """执行违规遮罩渲染，并返回供持久化的原始 ranges。"""
+        from ..embedder.ffmpeg_wrapper import FFmpegWrapper
+
+        def _cb(msg):
+            if callback:
+                callback(msg)
+            logger.info(msg)
+
+        _cb("开始遮罩处理...")
+        ffmpeg = FFmpegWrapper()
+        masked_path = source_video.parent / f"{source_video.stem}_masked{source_video.suffix}"
+
+        ok = ffmpeg.mask_violation_segments(
+            video_path=source_video,
+            output_path=masked_path,
+            violation_ranges=all_ranges,
+            mask_text=mask_text,
+            margin_sec=margin_sec,
+        )
+        if not ok:
+            raise RuntimeError("遮罩处理失败")
+
+        out_size = masked_path.stat().st_size / 1024 / 1024
+        _cb(f"  遮罩完成: {masked_path.name} ({out_size:.0f}MB)")
+
+        video_info = ffmpeg.get_video_info(source_video) or {}
+        raw_merged = ffmpeg._merge_ranges(all_ranges, 0, video_info.get('duration', 0))
+
+        return {
+            'masked_path': masked_path,
+            'all_ranges': raw_merged,
+        }
 
 
 def season_sync(db, uploader: BilibiliUploader, playlist_id: str) -> Dict[str, Any]:

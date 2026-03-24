@@ -347,8 +347,13 @@
 - `fix_violation`
   - 已新增第一层轮次级恢复 wrapper，并接入 `vat tools fix-violation`
   - 当前已经能把 `all_ranges / masked_path / source / replacement_submitted` 这类轮次级状态写回 `video.metadata.bilibili_ops.fix_violation`
-  - 但更细的恢复模型仍未完成；下一步更合理的是拿到 uploader 内部更细的阶段切口，而不是继续只在外层加逻辑
+  - 当前又进一步把 uploader 内部拆出了：
+    - 违规上下文装载
+    - 视频源决策
+    - 遮罩渲染
+  - 这样后续如果要继续细化恢复模型，已经有稳定切口，不必再从单个大函数硬拆
+  - 但更细的恢复模型仍未完成；下一步更合理的是继续围绕这些切口补更细阶段状态，而不是继续只在外层加逻辑
 
 因此，第二轮的当前状态可以概括为：
 
-`replace_video 已初步收口，season 标题同步已开始收口，fix_violation 已有第一层状态可见性，但更细粒度恢复仍是下一阶段主难点`
+`replace_video 已初步收口，season 标题同步已开始收口，fix_violation 已有第一层状态可见性和内部阶段切口，但更细粒度恢复仍是下一阶段主难点`

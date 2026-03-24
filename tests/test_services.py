@@ -193,6 +193,36 @@ class TestGetPlaylistVideosOrdering:
 
 
 class TestSyncPlaylistContracts:
+    def test_plan_sync_candidates_separates_new_existing_and_refresh_targets(self, db):
+        _setup_playlist(db, "PL_PLAN")
+        _add_pl_video(db, "vid_existing", playlist_id="PL_PLAN", index=7)
+        db.update_video("vid_existing", metadata={
+            "upload_date": "20250109",
+            "upload_date_interpolated": True,
+        })
+
+        service = PlaylistService(db)
+
+        plan = service._plan_sync_candidates(
+            playlist_id="PL_PLAN",
+            entries=[
+                {"id": "vid_existing", "title": "Existing"},
+                {"id": "vid_new", "title": "New"},
+            ],
+            auto_add_videos=True,
+            fetch_upload_dates=True,
+            callback=lambda _msg: None,
+        )
+
+        assert plan["new_videos"] == ["vid_new"]
+        assert plan["existing_videos"] == ["vid_existing"]
+        assert plan["videos_needing_refresh"] == ["vid_existing"]
+        assert plan["videos_to_fetch"] == ["vid_new", "vid_existing"]
+        assert plan["existing_playlist_updates"] == [("vid_existing", 1)]
+        assert plan["stale_zero_index_existing_videos"] == {"vid_existing"}
+        assert plan["new_video_candidates"]["vid_new"]["playlist_index"] == 2
+        assert plan["new_video_candidates"]["vid_new"]["existing_video"] is None
+
     def test_sync_playlist_raises_when_playlist_info_unavailable(self, db):
         service = PlaylistService(db)
         service._downloader = type(

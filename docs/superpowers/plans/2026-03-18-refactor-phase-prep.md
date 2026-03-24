@@ -357,3 +357,30 @@
 因此，第二轮的当前状态可以概括为：
 
 `replace_video 已初步收口，season 标题同步已开始收口，fix_violation 已有第一层状态可见性和内部阶段切口，但更细粒度恢复仍是下一阶段主难点`
+
+## 18. 2026-03-25 playlist_service 当前进展
+
+在第二轮进入 `playlist_service.py` 后，当前先没有急着大拆 `sync_playlist()`，而是先把它最明显的一段阶段边界单独拿出来：
+
+- 已新增 `_plan_sync_candidates()`
+  - 负责扫描 playlist entries
+  - 区分：
+    - `new_videos`
+    - `existing_videos`
+    - `videos_needing_refresh`
+    - `stale_zero_index_existing_videos`
+  - 并返回本轮 sync 的候选计划对象
+
+这一步的目的不是“立刻把 `sync_playlist()` 拆碎”，而是先把：
+
+- 候选集规划
+- 信息抓取
+- unavailable 剔除
+- 最终落库
+
+这四段里的第一段单独稳定下来。
+
+当前判断：
+
+- 这是一刀比较安全的切口，因为它只是在把已有局部状态收成显式 helper。
+- 后续下一刀更可能落在“fetch results -> prune unavailable -> 回写 DB”之间，而不是一开始就去动翻译提交和索引分配。

@@ -190,66 +190,22 @@ class PlaylistService:
             )
             self.db.add_playlist(existing_playlist)
         
-        # 获取已存在的视频 ID
-        existing_video_ids = self.db.get_playlist_video_ids(playlist_id)
-        callback(f"已有 {len(existing_video_ids)} 个视频")
-        
-        # 获取 Playlist 中的所有视频
-        # 注意：不在代码中按视频特征过滤。shorts/videos/streams 的区分
-        # 完全依赖 YouTube tab URL（/@channel/shorts, /videos, /streams），
-        # 各 tab 天然互斥且完整覆盖全部上传。
         entries = playlist_info.get('entries', [])
-        total_videos = len(entries)
-        callback(f"Playlist 共 {total_videos} 个视频")
-        
-        new_videos = []
-        existing_videos = []
-        new_video_candidates: Dict[str, Dict[str, Any]] = {}
-        existing_playlist_updates: List[tuple[str, int]] = []
-        
-        for index, entry in enumerate(entries, start=1):
-            if entry is None:
-                continue
-            
-            video_id = entry.get('id', '')
-            if not video_id:
-                continue
-            
-            if video_id in existing_video_ids:
-                existing_videos.append(video_id)
-                # 延迟到写入阶段再更新，避免 sync 中途被打断留下半状态
-                existing_playlist_updates.append((video_id, index))
-            else:
-                new_videos.append(video_id)
-                new_video_candidates[video_id] = {
-                    'entry': entry,
-                    'playlist_index': index,
-                    'existing_video': self.db.get_video(video_id) if auto_add_videos else None,
-                }
-        
-        # 收集需要补抓 metadata 的已存在视频：
-        # - upload_date 缺失
-        # - upload_date 仍为插值值
-        # - thumbnail 缺失
-        # - live_status 仍停留在 is_upcoming / is_live，说明视频状态尚未稳定
-        videos_needing_refresh = []
-        stale_zero_index_existing_videos: Set[str] = set()
-        if fetch_upload_dates and existing_videos:
-            for vid in existing_videos:
-                video = self.db.get_video(vid)
-                if video is None:
-                    continue
-                if self._should_refresh_existing_video_info(video):
-                    videos_needing_refresh.append(vid)
-                    pv_info = self.db.get_playlist_video_info(playlist_id, vid)
-                    current_index = (pv_info.get('upload_order_index') or 0) if pv_info else 0
-                    if current_index == 0:
-                        stale_zero_index_existing_videos.add(vid)
-            if videos_needing_refresh:
-                callback(f"发现 {len(videos_needing_refresh)} 个已存在视频需要补抓元信息，将一并获取")
-        
-        # 合并需要获取信息的视频：新视频 + 需补抓元信息的已存在视频
-        videos_to_fetch = new_videos + videos_needing_refresh
+        sync_plan = self._plan_sync_candidates(
+            playlist_id=playlist_id,
+            entries=entries,
+            auto_add_videos=auto_add_videos,
+            fetch_upload_dates=fetch_upload_dates,
+            callback=callback,
+        )
+        total_videos = sync_plan['total_videos']
+        new_videos = sync_plan['new_videos']
+        existing_videos = sync_plan['existing_videos']
+        new_video_candidates = sync_plan['new_video_candidates']
+        existing_playlist_updates = sync_plan['existing_playlist_updates']
+        videos_needing_refresh = sync_plan['videos_needing_refresh']
+        stale_zero_index_existing_videos = sync_plan['stale_zero_index_existing_videos']
+        videos_to_fetch = sync_plan['videos_to_fetch']
         
         # 如果需要获取 upload_date，并行获取详细信息
         if fetch_upload_dates and videos_to_fetch:
@@ -378,6 +334,75 @@ class PlaylistService:
             existing_videos=existing_videos,
             total_videos=total_videos
         )
+
+    def _plan_sync_candidates(
+        self,
+        *,
+        playlist_id: str,
+        entries: List[Optional[Dict[str, Any]]],
+        auto_add_videos: bool,
+        fetch_upload_dates: bool,
+        callback: Callable[[str], None],
+    ) -> Dict[str, Any]:
+        """扫描 playlist entries，生成本轮 sync 的候选计划。"""
+        existing_video_ids = self.db.get_playlist_video_ids(playlist_id)
+        callback(f"已有 {len(existing_video_ids)} 个视频")
+
+        total_videos = len(entries)
+        callback(f"Playlist 共 {total_videos} 个视频")
+
+        new_videos = []
+        existing_videos = []
+        new_video_candidates: Dict[str, Dict[str, Any]] = {}
+        existing_playlist_updates: List[tuple[str, int]] = []
+
+        for index, entry in enumerate(entries, start=1):
+            if entry is None:
+                continue
+
+            video_id = entry.get('id', '')
+            if not video_id:
+                continue
+
+            if video_id in existing_video_ids:
+                existing_videos.append(video_id)
+                existing_playlist_updates.append((video_id, index))
+                continue
+
+            new_videos.append(video_id)
+            new_video_candidates[video_id] = {
+                'entry': entry,
+                'playlist_index': index,
+                'existing_video': self.db.get_video(video_id) if auto_add_videos else None,
+            }
+
+        videos_needing_refresh = []
+        stale_zero_index_existing_videos: Set[str] = set()
+        if fetch_upload_dates and existing_videos:
+            for vid in existing_videos:
+                video = self.db.get_video(vid)
+                if video is None:
+                    continue
+                if self._should_refresh_existing_video_info(video):
+                    videos_needing_refresh.append(vid)
+                    pv_info = self.db.get_playlist_video_info(playlist_id, vid)
+                    current_index = (pv_info.get('upload_order_index') or 0) if pv_info else 0
+                    if current_index == 0:
+                        stale_zero_index_existing_videos.add(vid)
+
+            if videos_needing_refresh:
+                callback(f"发现 {len(videos_needing_refresh)} 个已存在视频需要补抓元信息，将一并获取")
+
+        return {
+            'total_videos': total_videos,
+            'new_videos': new_videos,
+            'existing_videos': existing_videos,
+            'new_video_candidates': new_video_candidates,
+            'existing_playlist_updates': existing_playlist_updates,
+            'videos_needing_refresh': videos_needing_refresh,
+            'stale_zero_index_existing_videos': stale_zero_index_existing_videos,
+            'videos_to_fetch': new_videos + videos_needing_refresh,
+        }
 
     def _build_entry_metadata(self, entry: Dict[str, Any], channel: str) -> Dict[str, Any]:
         """将 playlist flat entry 转为视频初始 metadata"""

@@ -47,6 +47,47 @@ class TestJobManagerCRUD:
         jm, _, _ = job_env
         assert jm.list_jobs() == []
 
+    def test_find_latest_job_is_not_limited_to_last_200_rows(self, job_env):
+        jm, _, _ = job_env
+        import json
+        from datetime import datetime, timedelta
+
+        with jm._get_connection() as conn:
+            target_time = datetime(2026, 3, 24, 12, 0, 0)
+            conn.execute("""
+                INSERT INTO web_jobs (
+                    job_id, video_ids, steps, gpu_device, force, status, log_file, created_at,
+                    task_type, task_params
+                ) VALUES (?, ?, ?, 'auto', 0, 'running', NULL, ?, ?, ?)
+            """, (
+                "target-job",
+                json.dumps([]),
+                json.dumps(["sync-playlist"]),
+                target_time.isoformat(),
+                "sync-playlist",
+                json.dumps({"playlist_id": "PL_TARGET"}),
+            ))
+
+            for idx in range(205):
+                created_at = target_time + timedelta(minutes=idx + 1)
+                conn.execute("""
+                    INSERT INTO web_jobs (
+                        job_id, video_ids, steps, gpu_device, force, status, log_file, created_at,
+                        task_type, task_params
+                    ) VALUES (?, ?, ?, 'auto', 0, 'completed', NULL, ?, ?, ?)
+                """, (
+                    f"newer-{idx}",
+                    json.dumps([]),
+                    json.dumps(["sync-playlist"]),
+                    created_at.isoformat(),
+                    "sync-playlist",
+                    json.dumps({"playlist_id": f"PL_{idx}"}),
+                ))
+
+        job = jm.find_latest_job("sync-playlist", {"playlist_id": "PL_TARGET"})
+        assert job is not None
+        assert job.job_id == "target-job"
+
 
 class TestWebJobSerialization:
 

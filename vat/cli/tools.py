@@ -726,7 +726,7 @@ def tools_season_sync(playlist):
     db = Database(config.storage.database_path, output_base_dir=config.storage.output_dir)
 
     try:
-        from ..services.bilibili_workflows import season_sync
+        from ..uploaders.bilibili import season_sync
         uploader = _get_bilibili_uploader(config)
 
         _emit(f"开始 season sync (playlist={playlist})...")

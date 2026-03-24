@@ -13,7 +13,8 @@ from ..config import Config, load_config
 from ..database import Database
 from ..models import (
     Video, Task, SourceType, TaskStep, TaskStatus,
-    STAGE_GROUPS, expand_stage_group, get_required_stages, DEFAULT_STAGE_SEQUENCE
+    STAGE_GROUPS, expand_stage_group, get_required_stages, DEFAULT_STAGE_SEQUENCE,
+    is_task_status_satisfied,
 )
 from ..pipeline import create_video_from_url, create_video_from_source, detect_source_type, VideoProcessor, schedule_videos, run_video_batch
 from ..downloaders import YouTubeDownloader
@@ -389,7 +390,7 @@ def status(ctx, video_id, filter_failed, filter_pending):
                     task_status[task.step] = task
             
             # 统计状态
-            completed_count = sum(1 for t in task_status.values() if t.status == TaskStatus.COMPLETED)
+            completed_count = sum(1 for t in task_status.values() if is_task_status_satisfied(t.status))
             failed_count = sum(1 for t in task_status.values() if t.status == TaskStatus.FAILED)
             running_count = sum(1 for t in task_status.values() if t.status == TaskStatus.RUNNING)
             
@@ -882,8 +883,7 @@ def _auto_season_sync(config, db, logger, playlist_id: str, retry_delay_minutes:
         retry_delay_minutes: 重试等待时间（分钟），默认30分钟
     """
     try:
-        from ..uploaders.bilibili import BilibiliUploader, BILIUP_AVAILABLE
-        from ..services.bilibili_workflows import season_sync
+        from ..uploaders.bilibili import BilibiliUploader, BILIUP_AVAILABLE, season_sync
         
         if not BILIUP_AVAILABLE:
             return
@@ -1740,8 +1740,7 @@ def upload_sync(ctx, playlist, retry_delay):
     click.echo(f"Playlist: {pl.title} ({playlist})")
     
     try:
-        from ..uploaders.bilibili import BilibiliUploader, BILIUP_AVAILABLE
-        from ..services.bilibili_workflows import season_sync
+        from ..uploaders.bilibili import BilibiliUploader, BILIUP_AVAILABLE, season_sync
         
         if not BILIUP_AVAILABLE:
             click.echo("错误: biliup 库不可用，请安装: pip install biliup", err=True)

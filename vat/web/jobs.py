@@ -496,7 +496,7 @@ class JobManager:
         task_type: str,
         task_params_subset: Optional[Dict] = None,
         statuses: Optional[List[JobStatus]] = None,
-        limit: int = 200,
+        limit: Optional[int] = None,
     ) -> Optional[WebJob]:
         """
         按 task_type + task_params 子集查找最近的任务。
@@ -505,18 +505,27 @@ class JobManager:
         逐步替代进程内状态字典。
         """
         expected_params = task_params_subset or {}
-        allowed_statuses = set(statuses or [])
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            query = "SELECT * FROM web_jobs WHERE task_type = ?"
+            params = [task_type]
 
-        for job in self.list_jobs(limit=limit):
-            if job.task_type != task_type:
-                continue
-            if allowed_statuses and job.status not in allowed_statuses:
-                continue
+            if statuses:
+                placeholders = ",".join("?" for _ in statuses)
+                query += f" AND status IN ({placeholders})"
+                params.extend(status.value for status in statuses)
 
-            actual_params = job.task_params or {}
-            if all(actual_params.get(key) == value for key, value in expected_params.items()):
-                return job
+            query += " ORDER BY created_at DESC"
+            if limit is not None:
+                query += " LIMIT ?"
+                params.append(limit)
 
+            cursor.execute(query, params)
+            for row in cursor.fetchall():
+                job = self._row_to_job(row)
+                actual_params = job.task_params or {}
+                if all(actual_params.get(key) == value for key, value in expected_params.items()):
+                    return job
         return None
     
     def cancel_job(self, job_id: str) -> bool:

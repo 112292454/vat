@@ -156,6 +156,8 @@ SATISFIED_TASK_STATUS_VALUES = tuple(status.value for status in SATISFIED_TASK_S
 
 def is_task_status_satisfied(status: "TaskStatus | str") -> bool:
     """判断任务状态是否表示该阶段语义已满足。"""
+    if hasattr(status, "value"):
+        status = status.value
     if isinstance(status, str):
         try:
             status = TaskStatus(status)

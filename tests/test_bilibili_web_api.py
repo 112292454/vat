@@ -95,10 +95,11 @@ class TestResyncSeasonInfoRoute:
         )
         fake_uploader = object()
         threadpool_call = {}
+        fake_db = _FakeDatabase("db.sqlite3", "outputs")
 
         app.include_router(router)
         monkeypatch.setattr("vat.web.routes.bilibili.load_config", lambda: fake_config)
-        monkeypatch.setattr("vat.web.routes.bilibili.Database", _FakeDatabase)
+        monkeypatch.setattr("vat.web.routes.bilibili.get_db", lambda: fake_db)
         monkeypatch.setattr("vat.web.routes.bilibili._get_uploader", lambda with_upload_params=False: fake_uploader)
 
         def _should_not_be_called_directly(*args, **kwargs):
@@ -218,6 +219,58 @@ class TestResyncSeasonInfoRoute:
             "skipped": 0,
             "details": [],
         }
+
+
+class TestSyncSeasonTitlesRoute:
+    @pytest.mark.anyio
+    async def test_dispatches_season_title_sync_via_threadpool(self, app, client, monkeypatch):
+        fake_config = SimpleNamespace(
+            storage=SimpleNamespace(database_path="db.sqlite3", output_dir="outputs"),
+        )
+        fake_uploader = object()
+        threadpool_call = {}
+        fake_db = _FakeDatabase("db.sqlite3", "outputs")
+
+        app.include_router(router)
+        monkeypatch.setattr("vat.web.routes.bilibili.load_config", lambda: fake_config)
+        monkeypatch.setattr("vat.web.routes.bilibili.get_db", lambda: fake_db)
+        monkeypatch.setattr("vat.web.routes.bilibili._get_uploader", lambda with_upload_params=False: fake_uploader)
+
+        def _should_not_be_called_directly(*args, **kwargs):
+            raise AssertionError("sync_season_episode_titles_with_recovery 应通过线程池调度，而不是直接在 async 路由中调用")
+
+        async def _fake_run_in_threadpool(func, *args, **kwargs):
+            threadpool_call["func"] = func
+            threadpool_call["args"] = args
+            threadpool_call["kwargs"] = kwargs
+            return {
+                "success": True,
+                "updated": 2,
+                "skipped": 1,
+                "details": [],
+            }
+
+        monkeypatch.setattr(
+            "vat.web.routes.bilibili.sync_season_episode_titles_with_recovery",
+            _should_not_be_called_directly,
+            raising=False,
+        )
+        monkeypatch.setattr("vat.web.routes.bilibili.run_in_threadpool", _fake_run_in_threadpool)
+
+        async with client as ac:
+            response = await ac.post("/bilibili/season/42/sync-titles")
+
+        assert response.status_code == 200
+        assert response.json() == {
+            "success": True,
+            "updated": 2,
+            "skipped": 1,
+            "message": "合集 42 标题同步完成：2 个已更新，1 个已同步",
+        }
+        assert threadpool_call["func"] is _should_not_be_called_directly
+        assert threadpool_call["args"][0] is fake_db
+        assert threadpool_call["args"][1] is fake_uploader
+        assert threadpool_call["args"][2] == 42
 
 
 class TestBilibiliJobStatusRoutes:

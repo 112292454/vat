@@ -1429,30 +1429,44 @@ class BilibiliUploader(BaseUploader):
         Returns:
             是否成功
         """
+        context = self._load_replace_video_context(aid)
+        if not context:
+            return False
+
+        new_filename = self._upload_replacement_file(new_video_path, context['old_videos'][0])
+        if not new_filename:
+            return False
+
+        return self._apply_replace_edit(
+            session=context['session'],
+            bili_jct=context['bili_jct'],
+            aid=aid,
+            archive=context['archive'],
+            old_videos=context['old_videos'],
+            new_filename=new_filename,
+        )
+
+    def _load_replace_video_context(self, aid: int) -> Optional[Dict[str, Any]]:
+        """加载 replace_video 所需的远端上下文。"""
         session = self._get_authenticated_session()
         bili_jct = self.cookie_data.get('bili_jct', '')
         assert bili_jct, "bili_jct 为空"
-        
-        # 1. 获取稿件当前信息
+
         detail = self.get_archive_detail(aid)
         if not detail:
-            return False
-        
+            return None
+
         archive = detail['archive']
         old_videos = detail['videos']
-        
         if not old_videos:
             logger.error(f"稿件 av{aid} 无视频信息")
-            return False
-        
-        # 创作中心 API 的 tag 字段对退回视频通常为空，desc 被截断到 250 字符。
-        # 必须从公共 API 补全这些字段（与 edit_video_info 一致）。
+            return None
+
         creator_desc = archive.get('desc', '')
         creator_tag = archive.get('tag', '')
-        
+
         pub_detail = self.get_video_detail(aid)
         if pub_detail:
-            # 补全 tags：公共 API 返回 tag 对象列表或逗号分隔字符串
             if not creator_tag:
                 pub_tags = pub_detail.get('tag', '')
                 if isinstance(pub_tags, list):
@@ -1462,59 +1476,69 @@ class BilibiliUploader(BaseUploader):
                 if pub_tags:
                     archive['tag'] = pub_tags
                     logger.info(f"  使用公共 API 补全 tags: {pub_tags[:80]}")
-            
-            # 补全 desc：公共 API 通常返回更完整的 desc
+
             pub_desc = pub_detail.get('desc', '')
             if len(pub_desc) > len(creator_desc):
                 archive['desc'] = pub_desc
                 logger.info(f"  使用公共 API 补全 desc ({len(pub_desc)} 字符，创作中心仅 {len(creator_desc)})")
-        
-        # 额外尝试：_get_full_desc 单独请求完整 desc（双重保险）
+
         if len(archive.get('desc', '')) <= 250:
             full_desc = self._get_full_desc(aid, session)
             if full_desc and len(full_desc) > len(archive.get('desc', '')):
                 archive['desc'] = full_desc
                 logger.info(f"  _get_full_desc 获取更完整 desc ({len(full_desc)} 字符)")
-        
+
         logger.info(f"替换视频 av{aid}: {archive.get('title', '')[:50]}")
-        logger.info(f"  新视频文件: {new_video_path}")
-        logger.info(f"  tag: {archive.get('tag', '')[:80] or '(空)'}")
-        logger.info(f"  desc 长度: {len(archive.get('desc', ''))} 字符")
-        
-        # 2. 上传新视频文件（只上传文件，不创建稿件）
+        return {
+            "session": session,
+            "bili_jct": bili_jct,
+            "archive": archive,
+            "old_videos": old_videos,
+        }
+
+    def _upload_replacement_file(self, new_video_path: Path, old_video: Dict[str, Any]) -> Optional[str]:
+        """上传替换视频文件，返回新 filename。"""
         try:
             from biliup.plugins.bili_webup import BiliBili, Data
-            
+
             self._load_cookie()
             video_part = Data()
-            video_part.title = old_videos[0].get('title', '')
-            video_part.desc = old_videos[0].get('desc', '')
-            
+            video_part.title = old_video.get('title', '')
+            video_part.desc = old_video.get('desc', '')
+
             with BiliBili(video_part) as bili:
                 bili.login_by_cookies(self._raw_cookie_data)
-                
-                # 上传视频文件
+
                 new_video_path = Path(new_video_path)
                 uploaded = bili.upload_file(str(new_video_path), lines=self.line, tasks=self.threads)
                 logger.info(f"  upload_file 返回值: {uploaded}")
-                
+
                 if not uploaded:
-                    logger.error(f"视频文件上传失败: 返回值为空")
-                    return False
-                
-                # biliup upload_file 返回 dict，filename 字段名可能是 'bili_filename' 或 'filename'
+                    logger.error("视频文件上传失败: 返回值为空")
+                    return None
+
                 new_filename = uploaded.get('bili_filename') or uploaded.get('filename')
                 if not new_filename:
                     logger.error(f"视频文件上传后无 filename 字段: {uploaded}")
-                    return False
-                
+                    return None
+
                 logger.info(f"  新视频上传成功: filename={new_filename}")
-                
+                return new_filename
         except Exception as e:
             logger.error(f"上传新视频文件异常: {e}")
-            return False
-        
-        # 3. 编辑稿件，替换视频 filename
+            return None
+
+    def _apply_replace_edit(
+        self,
+        *,
+        session,
+        bili_jct: str,
+        aid: int,
+        archive: Dict[str, Any],
+        old_videos: List[Dict[str, Any]],
+        new_filename: str,
+    ) -> bool:
+        """应用 replace_video 的 edit 阶段。"""
         try:
             edit_payload = {
                 'aid': aid,
@@ -1532,7 +1556,7 @@ class BilibiliUploader(BaseUploader):
                 }],
                 'csrf': bili_jct,
             }
-            
+
             resp = session.post(
                 f'https://member.bilibili.com/x/vu/web/edit?csrf={bili_jct}',
                 json=edit_payload,
@@ -1543,14 +1567,13 @@ class BilibiliUploader(BaseUploader):
                 timeout=15
             )
             result = resp.json()
-            
+
             if result.get('code') == 0:
                 logger.info(f"  ✅ 稿件 av{aid} 视频已替换，已重新提交审核")
                 return True
-            else:
-                logger.error(f"  编辑稿件失败: code={result.get('code')}, msg={result.get('message')}")
-                return False
-                
+
+            logger.error(f"  编辑稿件失败: code={result.get('code')}, msg={result.get('message')}")
+            return False
         except Exception as e:
             logger.error(f"编辑稿件异常: {e}")
             return False

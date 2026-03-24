@@ -299,3 +299,55 @@
 - `playlist_service.py` 的巨型事务脚本继续收口
 - `replace_video / sync_season_episode_titles / fix_violation` 的补偿状态机
 - `LLMTranslator / FFmpegWrapper / ASRData` 的下一轮有限拆分
+
+## 16. 第二轮问题的推荐顺序
+
+在第一轮 A-E 收口完成后，后续不应再按“哪个文件大就先拆哪个”推进。
+
+更合理的第二轮顺序应是：
+
+1. **先做远端副作用恢复模型设计**
+   - `replace_video`
+   - `sync_season_episode_titles`
+   - `fix_violation`
+   - 原因：这是当前剩余风险最高的业务语义问题
+
+2. **再收口 `playlist_service.py`**
+   - 尤其是 `sync_playlist()` 的阶段拆分
+   - 原因：它是后续 watch/upload/metadata 行为的中心业务脚本
+
+3. **再处理 `watch_sessions/watch_rounds` 与 `web_jobs` 的最终关系**
+   - 原因：这是长期状态模型统一问题，但当前不比前两项更危险
+
+4. **最后再做技术子域第二轮有限拆分**
+   - `LLMTranslator`
+   - `FFmpegWrapper`
+   - `ASRData`
+   - 原因：技术层边界第一轮已经收住，后续更多是结构优化，而不是当前最高风险源
+
+一句话：
+
+`第二轮先解业务语义，再解中心脚本，再解长期状态模型，最后才继续拆技术结构`
+
+## 17. 2026-03-25 第二轮当前进展
+
+第二轮目前已经不只是设计稿，最前两项中的一部分已经开始落地：
+
+- `replace_video`
+  - 已新增恢复 workflow，并把最关键的 `file_uploaded` 中间态写入 `video.metadata.bilibili_ops.replace_video`
+  - uploader 内部已拆出上下文加载 / 替换文件上传 / edit 提交三个步骤
+
+- `sync_season_episode_titles`
+  - 已新增恢复 workflow，并把 `original_order / need_update_aids / readded_aids / failed_aids` 写入 `playlist.metadata.bilibili_ops.sync_season_episode_titles`
+  - Web `sync-titles` 路由已经切到该 workflow，通过线程池执行
+  - 当前采取保守策略：只有在 `season_id -> playlist` 能唯一映射时才持久化恢复状态；否则仍执行，但不落库
+
+仍待继续深入的核心点：
+
+- `fix_violation`
+  - 还未正式进入恢复模型实现
+  - 下一步更合理的是先拿到更细的阶段切口，而不是直接在 CLI 循环外面再包一层
+
+因此，第二轮的当前状态可以概括为：
+
+`replace_video 已初步收口，season 标题同步已开始收口，fix_violation 仍是下一阶段主难点`

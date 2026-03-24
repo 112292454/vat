@@ -14,7 +14,10 @@ from fastapi.templating import Jinja2Templates
 from ...config import load_config
 from ...database import Database
 from ...uploaders.bilibili import BilibiliUploader
-from ...services.bilibili_workflows import resync_season_video_infos
+from ...services.bilibili_workflows import (
+    resync_season_video_infos,
+    sync_season_episode_titles_with_recovery,
+)
 from ...uploaders.upload_config import get_upload_config_manager, UploadConfigManager
 from ...embedder.ffmpeg_wrapper import FFmpegWrapper
 from ...utils.logger import setup_logger
@@ -979,8 +982,15 @@ async def sort_season(season_id: int):
 async def sync_season_titles(season_id: int):
     """同步合集中的视频标题：用实际标题替换合集中的名称"""
     try:
+        db = get_db()
         uploader = _get_uploader()
-        result = uploader.sync_season_episode_titles(season_id)
+        result = await run_in_threadpool(
+            sync_season_episode_titles_with_recovery,
+            db,
+            uploader,
+            season_id,
+            2.0,
+        )
         if result['success']:
             return JSONResponse({
                 "success": True,

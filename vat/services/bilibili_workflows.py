@@ -6,6 +6,7 @@ Bilibili 业务层 workflow。
 import json
 import sqlite3
 import time
+from datetime import datetime
 from typing import Any, Dict, Optional, TYPE_CHECKING
 
 from vat.services.playlist_service import PlaylistService
@@ -18,6 +19,106 @@ if TYPE_CHECKING:
 
 
 logger = setup_logger("bilibili_workflows")
+
+
+def _find_video_id_by_aid(db: Any, aid: int) -> Optional[str]:
+    conn = sqlite3.connect(str(db.db_path))
+    c = conn.cursor()
+    c.execute("SELECT id, metadata FROM videos WHERE metadata LIKE ?", (f'%{aid}%',))
+    rows = c.fetchall()
+    conn.close()
+
+    for (vid, meta_str) in rows:
+        if not meta_str:
+            continue
+        meta = json.loads(meta_str)
+        if str(meta.get('bilibili_aid')) == str(aid):
+            return vid
+    return None
+
+
+def _update_bilibili_op_state(
+    db: Any,
+    video_id: str,
+    op_name: str,
+    *,
+    state: str,
+    last_successful_state: Optional[str] = None,
+    last_error: str = "",
+    **extra: Any,
+) -> None:
+    video = db.get_video(video_id)
+    if not video:
+        return
+
+    metadata = dict(video.metadata or {})
+    ops = dict(metadata.get("bilibili_ops", {}))
+    op_data = dict(ops.get(op_name, {}))
+    op_data.update(extra)
+    op_data["state"] = state
+    if last_successful_state:
+        op_data["last_successful_state"] = last_successful_state
+    if last_error:
+        op_data["last_error"] = last_error
+    op_data["updated_at"] = datetime.now().isoformat()
+    ops[op_name] = op_data
+    metadata["bilibili_ops"] = ops
+    db.update_video(video_id, metadata=metadata)
+
+
+def _find_playlist_id_by_season_id(db: Any, season_id: int) -> Optional[str]:
+    exact_matches = []
+    fallback_matches = []
+
+    for playlist in db.list_playlists():
+        meta = playlist.metadata or {}
+        upload_config = meta.get("upload_config", {})
+        if str(upload_config.get("season_id")) == str(season_id):
+            exact_matches.append(playlist.id)
+            continue
+
+        videos = db.get_videos(playlist_id=playlist.id)
+        if any(str((video.metadata or {}).get("bilibili_target_season_id")) == str(season_id) for video in videos):
+            fallback_matches.append(playlist.id)
+
+    if len(exact_matches) == 1:
+        return exact_matches[0]
+    if len(exact_matches) > 1:
+        return None
+
+    unique_fallbacks = sorted(set(fallback_matches))
+    if len(unique_fallbacks) == 1:
+        return unique_fallbacks[0]
+    return None
+
+
+def _update_playlist_bilibili_op_state(
+    db: Any,
+    playlist_id: str,
+    op_name: str,
+    *,
+    state: str,
+    last_successful_state: Optional[str] = None,
+    last_error: str = "",
+    **extra: Any,
+) -> None:
+    playlist = db.get_playlist(playlist_id)
+    if not playlist:
+        return
+
+    metadata = dict(playlist.metadata or {})
+    ops = dict(metadata.get("bilibili_ops", {}))
+    op_data = dict(ops.get(op_name, {}))
+    op_data.update(extra)
+    op_data["state"] = state
+    if last_successful_state:
+        op_data["last_successful_state"] = last_successful_state
+    if last_error:
+        op_data["last_error"] = last_error
+    op_data["updated_at"] = datetime.now().isoformat()
+    ops[op_name] = op_data
+    metadata["bilibili_ops"] = ops
+    db.update_playlist(playlist_id, metadata=metadata)
 
 
 def season_sync(db, uploader: "BilibiliUploader", playlist_id: str) -> Dict[str, Any]:
@@ -395,3 +496,285 @@ def resync_season_video_infos(
     )
     _cb(result['message'])
     return result
+
+
+def replace_video_with_recovery(
+    db: Any,
+    uploader: "BilibiliUploader",
+    aid: int,
+    new_video_path: Any,
+) -> Dict[str, Any]:
+    """
+    带最小恢复状态记录的 replace_video workflow。
+    """
+    result = {"success": False, "message": ""}
+    video_id = _find_video_id_by_aid(db, aid)
+    if not video_id:
+        result["message"] = f"DB 中未找到 av{aid} 对应的视频记录"
+        return result
+
+    _update_bilibili_op_state(
+        db,
+        video_id,
+        "replace_video",
+        state="pending",
+        aid=aid,
+        new_video_path=str(new_video_path),
+    )
+
+    context = uploader._load_replace_video_context(aid)
+    if not context:
+        _update_bilibili_op_state(
+            db,
+            video_id,
+            "replace_video",
+            state="failed",
+            last_error="无法加载稿件上下文",
+        )
+        result["message"] = "无法加载稿件上下文"
+        return result
+
+    _update_bilibili_op_state(
+        db,
+        video_id,
+        "replace_video",
+        state="archive_loaded",
+    )
+
+    new_filename = uploader._upload_replacement_file(new_video_path, context["old_videos"][0])
+    if not new_filename:
+        _update_bilibili_op_state(
+            db,
+            video_id,
+            "replace_video",
+            state="failed",
+            last_successful_state="archive_loaded",
+            last_error="上传替换文件失败",
+        )
+        result["message"] = "上传替换文件失败"
+        return result
+
+    _update_bilibili_op_state(
+        db,
+        video_id,
+        "replace_video",
+        state="file_uploaded",
+        last_successful_state="file_uploaded",
+        uploaded_filename=new_filename,
+    )
+
+    ok = uploader._apply_replace_edit(
+        session=context["session"],
+        bili_jct=context["bili_jct"],
+        aid=aid,
+        archive=context["archive"],
+        old_videos=context["old_videos"],
+        new_filename=new_filename,
+    )
+
+    if not ok:
+        _update_bilibili_op_state(
+            db,
+            video_id,
+            "replace_video",
+            state="failed",
+            last_successful_state="file_uploaded",
+            last_error="编辑稿件失败",
+            uploaded_filename=new_filename,
+        )
+        result["message"] = "编辑稿件失败"
+        return result
+
+    _update_bilibili_op_state(
+        db,
+        video_id,
+        "replace_video",
+        state="verified",
+        last_successful_state="edit_applied",
+        uploaded_filename=new_filename,
+    )
+    result["success"] = True
+    result["message"] = "替换完成"
+    return result
+
+
+def sync_season_episode_titles_with_recovery(
+    db: Any,
+    uploader: "BilibiliUploader",
+    season_id: int,
+    delay_seconds: float = 2.0,
+) -> Dict[str, Any]:
+    """
+    带最小恢复状态记录的合集标题同步 workflow。
+
+    状态记录优先写入唯一映射到该 season 的 playlist.metadata。
+    若当前仓库中无法唯一定位 playlist，则仍执行流程，但不持久化恢复状态。
+    """
+    playlist_id = _find_playlist_id_by_season_id(db, season_id)
+    if not playlist_id:
+        logger.warning(f"season {season_id} 无法唯一映射到 playlist，跳过持久化恢复状态")
+
+    def _persist(state: str, *, last_successful_state: Optional[str] = None, last_error: str = "", **extra: Any) -> None:
+        if not playlist_id:
+            return
+        _update_playlist_bilibili_op_state(
+            db,
+            playlist_id,
+            "sync_season_episode_titles",
+            state=state,
+            last_successful_state=last_successful_state,
+            last_error=last_error,
+            season_id=season_id,
+            **extra,
+        )
+
+    try:
+        season_info = uploader.get_season_episodes(season_id)
+        if not season_info:
+            _persist("failed", last_error="无法获取合集信息")
+            return {"success": False, "error": "无法获取合集信息"}
+
+        all_episodes = season_info.get("episodes", [])
+        if not all_episodes:
+            _persist(
+                "verified",
+                last_successful_state="verified",
+                original_order=[],
+                need_update_aids=[],
+                readded_aids=[],
+                failed_aids=[],
+            )
+            return {"success": True, "updated": 0, "skipped": 0, "details": []}
+
+        original_order = [ep["aid"] for ep in all_episodes]
+        need_update = []
+        for ep in all_episodes:
+            ep_title = ep.get("title", "")
+            archive_title = ep.get("archiveTitle", "")
+            if ep_title != archive_title:
+                need_update.append(
+                    {
+                        "aid": ep["aid"],
+                        "old_title": ep_title,
+                        "new_title": archive_title,
+                        "episode_id": ep["id"],
+                    }
+                )
+
+        need_update_aids = [item["aid"] for item in need_update]
+        if not need_update:
+            _persist(
+                "verified",
+                last_successful_state="verified",
+                original_order=original_order,
+                need_update_aids=[],
+                readded_aids=[],
+                failed_aids=[],
+            )
+            return {
+                "success": True,
+                "updated": 0,
+                "skipped": len(all_episodes),
+                "details": [],
+            }
+
+        _persist(
+            "snapshot_taken",
+            last_successful_state="snapshot_taken",
+            original_order=original_order,
+            need_update_aids=need_update_aids,
+            readded_aids=[],
+            failed_aids=[],
+        )
+
+        aids_to_remove = [item["aid"] for item in need_update]
+        if not uploader.remove_from_season(aids_to_remove, season_id):
+            _persist(
+                "failed",
+                last_successful_state="snapshot_taken",
+                last_error="删除视频失败",
+                original_order=original_order,
+                need_update_aids=need_update_aids,
+                readded_aids=[],
+                failed_aids=[],
+            )
+            return {"success": False, "error": "删除视频失败"}
+
+        readded_aids = []
+        failed = []
+        _persist(
+            "episodes_removed",
+            last_successful_state="episodes_removed",
+            original_order=original_order,
+            need_update_aids=need_update_aids,
+            readded_aids=[],
+            failed_aids=[],
+        )
+
+        for idx, item in enumerate(need_update):
+            aid = item["aid"]
+            if uploader.add_to_season(aid, season_id):
+                readded_aids.append(aid)
+                _persist(
+                    "episodes_readded",
+                    last_successful_state="episodes_readded",
+                    original_order=original_order,
+                    need_update_aids=need_update_aids,
+                    readded_aids=readded_aids,
+                    failed_aids=failed,
+                )
+            else:
+                failed.append(aid)
+                logger.error(f"重新添加视频 av{aid} 到合集失败")
+
+            if idx < len(need_update) - 1 and delay_seconds > 0:
+                time.sleep(delay_seconds)
+
+        if failed:
+            _persist(
+                "failed",
+                last_successful_state="episodes_readded" if readded_aids else "episodes_removed",
+                last_error=f"部分视频添加失败: {failed}",
+                original_order=original_order,
+                need_update_aids=need_update_aids,
+                readded_aids=readded_aids,
+                failed_aids=failed,
+            )
+            return {
+                "success": False,
+                "error": f"部分视频添加失败: {failed}",
+                "updated": len(need_update) - len(failed),
+                "failed": failed,
+            }
+
+        if not uploader.sort_season_episodes(season_id, original_order):
+            logger.warning(f"合集 {season_id} 标题已更新，但恢复排序失败")
+            _persist(
+                "episodes_readded",
+                last_successful_state="episodes_readded",
+                last_error="恢复排序失败",
+                original_order=original_order,
+                need_update_aids=need_update_aids,
+                readded_aids=readded_aids,
+                failed_aids=[],
+            )
+        else:
+            _persist(
+                "verified",
+                last_successful_state="order_restored",
+                original_order=original_order,
+                need_update_aids=need_update_aids,
+                readded_aids=readded_aids,
+                failed_aids=[],
+            )
+
+        return {
+            "success": True,
+            "updated": len(need_update),
+            "skipped": len(all_episodes) - len(need_update),
+            "details": need_update,
+        }
+    except Exception as e:
+        logger.error(f"同步合集标题异常: {e}", exc_info=True)
+        _persist("failed", last_error=str(e))
+        return {"success": False, "error": str(e)}

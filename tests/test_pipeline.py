@@ -838,6 +838,24 @@ class TestDownloadStageContracts:
 class TestSchedulerDownloadDelay:
     """SingleGPUScheduler 视频间延迟"""
 
+    @patch('vat.pipeline.scheduler.run_video_batch')
+    def test_single_gpu_scheduler_delegates_to_shared_batch_runner(self, mock_run_batch, tmp_path):
+        from vat.pipeline.scheduler import SingleGPUScheduler
+        from vat.config import load_config
+
+        config = load_config()
+        config.storage.database_path = str(tmp_path / "test.db")
+        scheduler = SingleGPUScheduler(config, gpu_id=2)
+
+        scheduler.run(["v1", "v2"], steps=["whisper"], force=True)
+
+        mock_run_batch.assert_called_once()
+        kwargs = mock_run_batch.call_args.kwargs
+        assert kwargs["video_ids"] == ["v1", "v2"]
+        assert kwargs["steps"] == ["whisper"]
+        assert kwargs["force"] is True
+        assert kwargs["gpu_id"] == 2
+
     @patch('vat.pipeline.scheduler.VideoProcessor')
     @patch('time.sleep')
     def test_delay_between_videos(self, mock_sleep, MockVP, tmp_path):

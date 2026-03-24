@@ -15,7 +15,7 @@ from ..models import (
     Video, Task, SourceType, TaskStep, TaskStatus,
     STAGE_GROUPS, expand_stage_group, get_required_stages, DEFAULT_STAGE_SEQUENCE
 )
-from ..pipeline import create_video_from_url, create_video_from_source, detect_source_type, VideoProcessor, schedule_videos
+from ..pipeline import create_video_from_url, create_video_from_source, detect_source_type, VideoProcessor, schedule_videos, run_video_batch
 from ..downloaders import YouTubeDownloader
 from ..services import PlaylistService
 from ..utils.logger import setup_logger
@@ -761,141 +761,21 @@ def process(ctx, video_id, process_all, playlist, stages, gpu, force, dry_run, c
         upload_interval = config.uploader.bilibili.upload_interval
         download_delay = max(download_delay, upload_interval)
     
-    def process_one_video(args):
-        """处理单个视频（可在线程池中并发调用）"""
-        idx, vid = args
-        video = db.get_video(vid)
-        if not video:
-            logger.warning(f"视频不存在: {vid}")
-            return vid, False, "视频不存在"
-        
-        title = video.title[:30] if video.title else vid
-        logger.info(f"[{idx + 1}/{total}] 开始处理: {title}")
-        
-        try:
-            video_config = deepcopy(config)
-            processor = VideoProcessor(
-                video_id=vid,
-                config=video_config,
-                gpu_id=gpu_id,
-                force=force,
-                video_index=idx,
-                total_videos=total,
-                playlist_id=playlist
-            )
-            success = processor.process(steps=step_names)
-            if success:
-                logger.info(f"[{idx + 1}/{total}] 完成: {title}")
-                return vid, True, None
-            else:
-                logger.warning(f"[{idx + 1}/{total}] 失败: {title}")
-                return vid, False, "处理返回失败"
-        except Exception as e:
-            import traceback
-            logger.error(f"[{idx + 1}/{total}] 失败: {title} - {e}\n{traceback.format_exc()}")
-            return vid, False, str(e)
-    
-    def _run_batch(video_list):
-        """执行一批视频处理，返回 (failed_vids, stopped_early)
-        
-        stopped_early: fail-fast 模式下因失败而提前终止时为 True
-        """
-        failed_vids = []
-        stopped_early = False
-        if concurrency <= 1:
-            for i, (idx, vid) in enumerate(video_list):
-                if i > 0 and download_delay > 0:
-                    logger.info(f"等待 {download_delay:.0f} 秒后处理下一个视频...")
-                    import time
-                    time.sleep(download_delay)
-                _, success, _ = process_one_video((idx, vid))
-                if not success:
-                    failed_vids.append(vid)
-                    if fail_fast:
-                        remaining = len(video_list) - i - 1
-                        if remaining > 0:
-                            logger.warning(f"fail-fast: 视频 {vid} 处理失败，跳过剩余 {remaining} 个视频")
-                        stopped_early = True
-                        break
-        else:
-            from concurrent.futures import ThreadPoolExecutor, as_completed
-            _fail_fast_triggered = False
-            with ThreadPoolExecutor(max_workers=concurrency) as executor:
-                # 逐个提交任务，遇到失败后不再提交新任务
-                pending_futures = {}
-                video_iter = iter(video_list)
-                
-                # 先填满线程池
-                for _ in range(min(concurrency, len(video_list))):
-                    try:
-                        idx, vid = next(video_iter)
-                        future = executor.submit(process_one_video, (idx, vid))
-                        pending_futures[future] = vid
-                    except StopIteration:
-                        break
-                
-                while pending_futures:
-                    # 等待任意一个完成
-                    done_futures = []
-                    for future in as_completed(pending_futures):
-                        done_futures.append(future)
-                        break  # 每次只处理一个完成的
-                    
-                    for future in done_futures:
-                        vid = pending_futures.pop(future)
-                        try:
-                            _, success, _ = future.result()
-                            if not success:
-                                failed_vids.append(vid)
-                                if fail_fast:
-                                    _fail_fast_triggered = True
-                        except Exception as e:
-                            logger.error(f"并发处理异常: {vid} - {e}")
-                            failed_vids.append(vid)
-                            if fail_fast:
-                                _fail_fast_triggered = True
-                    
-                    # 如果没有触发 fail-fast，继续提交新任务
-                    if not _fail_fast_triggered:
-                        try:
-                            idx, vid = next(video_iter)
-                            future = executor.submit(process_one_video, (idx, vid))
-                            pending_futures[future] = vid
-                        except StopIteration:
-                            pass
-                    elif not pending_futures:
-                        # 所有已提交的任务都完成了，退出
-                        break
-                    # 如果 fail-fast 已触发但还有运行中的任务，继续等待它们完成
-                
-                if _fail_fast_triggered:
-                    stopped_early = True
-                    logger.warning(f"fail-fast: 处理失败，不再启动新任务（已等待运行中的任务完成）")
-        
-        return failed_vids, stopped_early
-    
-    # 执行处理（失败的视频放到队尾重试，最多重试2轮）
-    max_retry_rounds = 2
-    logger.info(f"开始处理 {total} 个视频（并发: {concurrency}）")
-    
-    failed_vids, stopped_early = _run_batch(list(enumerate(video_ids)))
-    
-    if not (fail_fast and stopped_early):
-        for retry_round in range(1, max_retry_rounds + 1):
-            if not failed_vids:
-                break
-            logger.info(f"第 {retry_round} 轮重试: {len(failed_vids)} 个失败视频")
-            retry_list = [(video_ids.index(vid), vid) for vid in failed_vids]
-            failed_vids, stopped_early = _run_batch(retry_list)
-            if fail_fast and stopped_early:
-                break
-    elif failed_vids:
-        logger.info(f"fail-fast 模式：跳过重试")
-    
-    if failed_vids:
-        logger.warning(f"处理完成，{len(failed_vids)} 个视频最终失败: {', '.join(failed_vids[:5])}")
-    else:
-        logger.info("处理完成，全部成功")
+    result = run_video_batch(
+        config=config,
+        video_ids=video_ids,
+        steps=step_names,
+        force=force,
+        gpu_id=gpu_id,
+        concurrency=concurrency,
+        playlist_id=playlist,
+        fail_fast=fail_fast,
+        delay_seconds=download_delay,
+        max_retry_rounds=2,
+        logger_override=logger,
+        db=db,
+        processor_cls=VideoProcessor,
+    )
     
     # ========== 批量上传后自动 upload sync ==========
     # 条件：stages 包含 upload 且有 playlist 上下文

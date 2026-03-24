@@ -2,7 +2,11 @@
 多GPU任务调度器
 """
 import os
+import time
 import traceback
+from copy import deepcopy
+from dataclasses import dataclass, field
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from multiprocessing import Process
 from typing import List, Optional
 
@@ -12,6 +16,182 @@ from ..utils.logger import setup_logger
 from .executor import VideoProcessor
 
 logger = setup_logger("pipeline.scheduler")
+
+
+@dataclass
+class BatchRunResult:
+    """批处理运行结果"""
+    total_videos: int
+    failed_video_ids: List[str] = field(default_factory=list)
+    stopped_early: bool = False
+
+
+def run_video_batch(
+    *,
+    config: Config,
+    video_ids: List[str],
+    steps: Optional[List[str]] = None,
+    force: bool = False,
+    gpu_id: Optional[int] = None,
+    concurrency: int = 1,
+    playlist_id: Optional[str] = None,
+    fail_fast: bool = False,
+    delay_seconds: Optional[float] = None,
+    max_retry_rounds: int = 0,
+    logger_override=None,
+    db: Optional[Database] = None,
+    processor_cls=None,
+) -> BatchRunResult:
+    """
+    共享批处理运行时。
+
+    给 `cli process` 与 `pipeline.scheduler` 统一使用，避免双轨控制面。
+    """
+    batch_logger = logger_override or logger
+    assert isinstance(video_ids, list), f"video_ids 必须是列表, 得到 {type(video_ids)}"
+    if not video_ids:
+        batch_logger.info("没有待处理的视频")
+        return BatchRunResult(total_videos=0)
+
+    if db is None:
+        db = Database(config.storage.database_path, output_base_dir=config.storage.output_dir)
+    if processor_cls is None:
+        processor_cls = VideoProcessor
+    total = len(video_ids)
+    effective_delay = (
+        config.downloader.youtube.download_delay
+        if delay_seconds is None else delay_seconds
+    )
+
+    def process_one_video(args):
+        idx, vid = args
+        video = db.get_video(vid)
+        if not video:
+            batch_logger.warning(f"视频不存在: {vid}")
+            return vid, False, "视频不存在"
+
+        title = video.title[:30] if video.title else vid
+        batch_logger.info(f"[{idx + 1}/{total}] 开始处理: {title}")
+
+        try:
+            processor = processor_cls(
+                video_id=vid,
+                config=deepcopy(config),
+                gpu_id=gpu_id,
+                force=force,
+                video_index=idx,
+                total_videos=total,
+                playlist_id=playlist_id,
+            )
+            success = processor.process(steps=steps)
+            if success:
+                batch_logger.info(f"[{idx + 1}/{total}] 完成: {title}")
+                return vid, True, None
+            batch_logger.warning(f"[{idx + 1}/{total}] 失败: {title}")
+            return vid, False, "处理返回失败"
+        except Exception as e:
+            batch_logger.error(
+                f"[{idx + 1}/{total}] 失败: {title} - {e}\n{traceback.format_exc()}"
+            )
+            return vid, False, str(e)
+
+    def _run_batch(video_list):
+        failed_vids = []
+        stopped_early = False
+
+        if concurrency <= 1:
+            for i, (idx, vid) in enumerate(video_list):
+                if i > 0 and effective_delay > 0:
+                    batch_logger.info(f"等待 {effective_delay:.0f} 秒后处理下一个视频...")
+                    time.sleep(effective_delay)
+                _, success, _ = process_one_video((idx, vid))
+                if not success:
+                    failed_vids.append(vid)
+                    if fail_fast:
+                        remaining = len(video_list) - i - 1
+                        if remaining > 0:
+                            batch_logger.warning(
+                                f"fail-fast: 视频 {vid} 处理失败，跳过剩余 {remaining} 个视频"
+                            )
+                        stopped_early = True
+                        break
+        else:
+            fail_fast_triggered = False
+            with ThreadPoolExecutor(max_workers=concurrency) as executor:
+                pending_futures = {}
+                video_iter = iter(video_list)
+
+                for _ in range(min(concurrency, len(video_list))):
+                    try:
+                        idx, vid = next(video_iter)
+                        future = executor.submit(process_one_video, (idx, vid))
+                        pending_futures[future] = vid
+                    except StopIteration:
+                        break
+
+                while pending_futures:
+                    done_future = None
+                    for future in as_completed(pending_futures):
+                        done_future = future
+                        break
+
+                    if done_future is None:
+                        break
+
+                    vid = pending_futures.pop(done_future)
+                    try:
+                        _, success, _ = done_future.result()
+                        if not success:
+                            failed_vids.append(vid)
+                            if fail_fast:
+                                fail_fast_triggered = True
+                    except Exception as e:
+                        batch_logger.error(f"并发处理异常: {vid} - {e}")
+                        failed_vids.append(vid)
+                        if fail_fast:
+                            fail_fast_triggered = True
+
+                    if not fail_fast_triggered:
+                        try:
+                            idx, vid = next(video_iter)
+                            future = executor.submit(process_one_video, (idx, vid))
+                            pending_futures[future] = vid
+                        except StopIteration:
+                            pass
+                    elif not pending_futures:
+                        break
+
+                if fail_fast_triggered:
+                    stopped_early = True
+                    batch_logger.warning("fail-fast: 处理失败，不再启动新任务（已等待运行中的任务完成）")
+
+        return failed_vids, stopped_early
+
+    batch_logger.info(f"开始处理 {total} 个视频（并发: {concurrency}）")
+    failed_vids, stopped_early = _run_batch(list(enumerate(video_ids)))
+
+    if not (fail_fast and stopped_early):
+        for retry_round in range(1, max_retry_rounds + 1):
+            if not failed_vids:
+                break
+            batch_logger.info(f"第 {retry_round} 轮重试: {len(failed_vids)} 个失败视频")
+            retry_list = [(video_ids.index(vid), vid) for vid in failed_vids]
+            failed_vids, stopped_early = _run_batch(retry_list)
+            if fail_fast and stopped_early:
+                break
+    elif failed_vids:
+        batch_logger.info("fail-fast 模式：跳过重试")
+
+    if failed_vids:
+        batch_logger.warning(f"处理完成，{len(failed_vids)} 个视频最终失败: {', '.join(failed_vids[:5])}")
+    else:
+        batch_logger.info("处理完成，全部成功")
+
+    return BatchRunResult(
+        total_videos=total,
+        failed_video_ids=failed_vids,
+        stopped_early=stopped_early,
+    )
 
 
 class MultiGPUScheduler:
@@ -119,35 +299,28 @@ class MultiGPUScheduler:
         # 子进程中需要重新初始化 logger
         worker_logger = setup_logger(f"pipeline.scheduler.gpu{gpu_id}")
         worker_logger.info(f"[GPU {gpu_id}] 开始处理 {len(video_ids)} 个视频")
-        
-        # 逐个处理视频
-        for i, video_id in enumerate(video_ids):
-            worker_logger.info(f"[GPU {gpu_id}] 处理视频 {i+1}/{len(video_ids)}: {video_id}")
-            
-            try:
-                processor = VideoProcessor(
-                    video_id=video_id,
-                    config=self.config,
-                    gpu_id=gpu_id,
-                    force=force,
-                    video_index=i,
-                    total_videos=len(video_ids)
-                )
-                
-                success = processor.process(steps)
-                
-                if success:
-                    worker_logger.info(f"[GPU {gpu_id}] 视频处理成功: {video_id}")
-                else:
-                    worker_logger.warning(f"[GPU {gpu_id}] 视频处理失败: {video_id}")
-                    
-            except KeyboardInterrupt:
-                worker_logger.warning(f"[GPU {gpu_id}] 用户中止操作")
-                raise
-            except Exception as e:
-                worker_logger.error(f"[GPU {gpu_id}] 视频处理异常: {video_id} - {e}")
-                worker_logger.debug(traceback.format_exc())
-        
+
+        try:
+            run_video_batch(
+                config=self.config,
+                video_ids=video_ids,
+                steps=steps,
+                force=force,
+                gpu_id=gpu_id,
+                concurrency=1,
+                delay_seconds=self.config.downloader.youtube.download_delay,
+                max_retry_rounds=0,
+                logger_override=worker_logger,
+                db=self.db,
+                processor_cls=VideoProcessor,
+            )
+        except KeyboardInterrupt:
+            worker_logger.warning(f"[GPU {gpu_id}] 用户中止操作")
+            raise
+        except Exception as e:
+            worker_logger.error(f"[GPU {gpu_id}] 批处理异常: {e}")
+            worker_logger.debug(traceback.format_exc())
+
         worker_logger.info(f"[GPU {gpu_id}] 所有视频处理完成")
 
 
@@ -184,50 +357,28 @@ class SingleGPUScheduler:
         if not video_ids:
             logger.info("没有待处理的视频")
             return
-        
-        # 设置GPU
+
         os.environ['CUDA_VISIBLE_DEVICES'] = str(self.gpu_id)
-        
         logger.info(f"使用 GPU {self.gpu_id} 顺序处理 {len(video_ids)} 个视频")
-        
-        # 视频间延迟（从配置读取）
-        download_delay = self.config.downloader.youtube.download_delay
-        
-        # 逐个处理
-        for i, video_id in enumerate(video_ids):
-            assert video_id, f"第 {i+1} 个视频ID为空"
-            
-            if i > 0 and download_delay > 0:
-                logger.info(f"等待 {download_delay:.0f} 秒后处理下一个视频...")
-                import time
-                time.sleep(download_delay)
-            
-            logger.info(f"处理视频 [{i+1}/{len(video_ids)}]: {video_id}")
-            
-            try:
-                processor = VideoProcessor(
-                    video_id=video_id,
-                    config=self.config,
-                    gpu_id=self.gpu_id,
-                    force=force,
-                    video_index=i,
-                    total_videos=len(video_ids)
-                )
-                
-                success = processor.process(steps)
-                
-                if success:
-                    logger.info(f"视频处理成功: {video_id}")
-                else:
-                    logger.warning(f"视频处理失败: {video_id}")
-                    
-            except KeyboardInterrupt:
-                logger.warning(f"用户中止操作")
-                raise
-            except Exception as e:
-                logger.error(f"视频处理异常: {video_id} - {e}")
-                logger.debug(traceback.format_exc())
-        
+
+        try:
+            run_video_batch(
+                config=self.config,
+                video_ids=video_ids,
+                steps=steps,
+                force=force,
+                gpu_id=self.gpu_id,
+                concurrency=1,
+                delay_seconds=self.config.downloader.youtube.download_delay,
+                max_retry_rounds=0,
+                logger_override=logger,
+                db=self.db,
+                processor_cls=VideoProcessor,
+            )
+        except KeyboardInterrupt:
+            logger.warning("用户中止操作")
+            raise
+
         logger.info(f"所有视频处理完成 (共 {len(video_ids)} 个)")
 
 

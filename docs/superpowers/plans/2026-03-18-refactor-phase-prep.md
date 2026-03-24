@@ -228,3 +228,27 @@
 - `watch_sessions/watch_rounds` 与 `web_jobs` 的最终统一关系
 - `playlist_service.py` / `bilibili.py` 的 workflow 边界整理
 - UI 层对状态文案和视觉语义的最终收口
+
+## 13. 2026-03-24 Phase C 完成记录
+
+`Phase C` 已完成，核心是“主控制链唯一化”，而不是继续在 CLI 与 scheduler 两边分别维护批处理逻辑。
+
+已落地的点：
+
+- 新增共享批处理运行时，`cli process` 与 `pipeline.scheduler` 现在复用同一套正常处理路径。
+- `SingleGPUScheduler` 与 `MultiGPUScheduler` worker 已复用共享运行时。
+- `process` 命令保留了 `upload-cron / dtime` 特殊分流，但正常视频处理路径不再保留内联批处理实现。
+- 相关 CLI 与 scheduler 契约测试已补齐并通过。
+
+当前判断：
+
+- `Phase A + Phase B + Phase C` 完成后，Web 边界、核心状态语义、正常处理控制链已经形成较稳定的新基线。
+- 后续主线应切到：
+  1. 业务 workflow 归位（尤其 `playlist/watch/upload`）
+  2. 技术子域收口（统一 LLM facade / 字幕子域 / 媒体基础操作）
+
+仍需后续阶段处理的点：
+
+- `WatchService -> web.jobs` 反向依赖
+- `playlist_service.py` / `bilibili.py` 中的高层 workflow 混杂
+- 技术层几个关键大文件的有限拆分

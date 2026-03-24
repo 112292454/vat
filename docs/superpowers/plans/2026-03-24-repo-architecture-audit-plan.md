@@ -801,6 +801,22 @@
 - 收掉 route 层的 service 逻辑复制
 - 给多阶段远端副作用流程建立最小恢复模型
 
+### 9.2.2 2026-03-24 进展更新
+
+`Phase C` 已实际完成以下收口：
+
+- `cli process` 与 `pipeline.scheduler` 正常处理路径已共享同一批处理运行时 `run_video_batch(...)`
+- `SingleGPUScheduler` 与 `MultiGPUScheduler` 的 worker 已复用该运行时
+- `process` 命令保留了 `upload-cron/dtime` 特殊分流，但不再维护独立的正常批处理实现
+- `playlist_id/concurrency/fail_fast/gpu_id` 等主控制参数已通过共享运行时统一下沉
+
+当前判断：
+
+- 主控制链在正常视频处理路径上已经只有一套底层编排语义
+- 后续最有价值的重构主线应转向：
+  - 业务 workflow 归位
+  - 技术子域边界收口
+
 ### 9.4 第四阶段：技术子域收口
 
 - 统一 LLM facade

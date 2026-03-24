@@ -129,6 +129,7 @@ def tools_fix_violation(aid, video_path, margin, mask_text, dry_run, max_rounds,
                 _emit("⚠️ 本地文件未找到，将从B站下载（质量会降低）")
 
         from .commands import _get_previous_violation_ranges, _save_violation_ranges
+        from ..services.bilibili_workflows import fix_violation_with_recovery
 
         # 读取累积的 violation_ranges
         all_previous_ranges = _get_previous_violation_ranges(db, aid)
@@ -140,7 +141,9 @@ def tools_fix_violation(aid, video_path, margin, mask_text, dry_run, max_rounds,
             _emit(f"第 {round_num + 1}/{max_rounds} 轮修复")
             _emit(f"{'='*40}")
 
-            result = uploader.fix_violation(
+            result = fix_violation_with_recovery(
+                db=db,
+                uploader=uploader,
                 aid=aid,
                 video_path=local_video,
                 mask_text=mask_text,

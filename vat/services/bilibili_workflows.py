@@ -7,6 +7,7 @@ import json
 import sqlite3
 import time
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, Optional, TYPE_CHECKING
 
 from vat.services.playlist_service import PlaylistService
@@ -22,7 +23,11 @@ logger = setup_logger("bilibili_workflows")
 
 
 def _find_video_id_by_aid(db: Any, aid: int) -> Optional[str]:
-    conn = sqlite3.connect(str(db.db_path))
+    db_path = getattr(db, "db_path", None)
+    if not isinstance(db_path, (str, Path)):
+        return None
+
+    conn = sqlite3.connect(str(db_path))
     c = conn.cursor()
     c.execute("SELECT id, metadata FROM videos WHERE metadata LIKE ?", (f'%{aid}%',))
     rows = c.fetchall()
@@ -778,3 +783,103 @@ def sync_season_episode_titles_with_recovery(
         logger.error(f"同步合集标题异常: {e}", exc_info=True)
         _persist("failed", last_error=str(e))
         return {"success": False, "error": str(e)}
+
+
+def fix_violation_with_recovery(
+    db: Any,
+    uploader: "BilibiliUploader",
+    aid: int,
+    *,
+    video_path: Any = None,
+    mask_text: str = "此处内容因平台合规要求已被遮罩",
+    margin_sec: float = 2.0,
+    previous_ranges: Optional[list] = None,
+    dry_run: bool = False,
+    callback: Optional[callable] = None,
+) -> Dict[str, Any]:
+    """
+    带轮次级恢复状态记录的违规修复 workflow。
+
+    这一步先不重写 uploader 内部实现，只在外层保存：
+    - 本轮输入参数
+    - all_ranges / masked_path / source
+    - 提交替换是否已发出
+    """
+    video_id = None
+    try:
+        video_id = _find_video_id_by_aid(db, aid)
+    except Exception as e:
+        logger.warning(f"fix_violation 无法定位 av{aid} 对应视频，跳过恢复状态持久化: {e}")
+
+    def _persist(state: str, *, last_successful_state: Optional[str] = None, last_error: str = "", **extra: Any) -> None:
+        if not video_id:
+            return
+        _update_bilibili_op_state(
+            db,
+            video_id,
+            "fix_violation",
+            state=state,
+            last_successful_state=last_successful_state,
+            last_error=last_error,
+            aid=aid,
+            video_path=str(video_path) if video_path else None,
+            dry_run=dry_run,
+            previous_ranges=previous_ranges or [],
+            **extra,
+        )
+
+    _persist("pending")
+
+    result = uploader.fix_violation(
+        aid=aid,
+        video_path=video_path,
+        mask_text=mask_text,
+        margin_sec=margin_sec,
+        previous_ranges=previous_ranges,
+        dry_run=dry_run,
+        callback=callback,
+    )
+
+    all_ranges = result.get("all_ranges", [])
+    masked_path = result.get("masked_path")
+    source = result.get("source")
+    upload_duration = result.get("upload_duration")
+
+    if result.get("success"):
+        if dry_run:
+            _persist(
+                "masked_video_ready",
+                last_successful_state="masked_video_ready",
+                all_ranges=all_ranges,
+                masked_path=masked_path,
+                source=source,
+            )
+        else:
+            _persist(
+                "replacement_submitted",
+                last_successful_state="replacement_submitted",
+                all_ranges=all_ranges,
+                masked_path=masked_path,
+                source=source,
+                upload_duration=upload_duration,
+            )
+        return result
+
+    last_successful_state = None
+    if masked_path:
+        last_successful_state = "masked_video_ready"
+    elif all_ranges:
+        last_successful_state = "ranges_merged"
+    elif result.get("new_ranges"):
+        last_successful_state = "violation_info_loaded"
+
+    _persist(
+        "failed",
+        last_successful_state=last_successful_state,
+        last_error=result.get("message", "fix_violation 失败"),
+        all_ranges=all_ranges,
+        masked_path=masked_path,
+        source=source,
+        upload_duration=upload_duration,
+    )
+    return result

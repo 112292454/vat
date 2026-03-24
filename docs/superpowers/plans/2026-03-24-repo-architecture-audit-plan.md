@@ -801,6 +801,23 @@
 - 收掉 route 层的 service 逻辑复制
 - 给多阶段远端副作用流程建立最小恢复模型
 
+### 9.3.1 2026-03-24 进展更新
+
+`Phase D` 已实际完成以下归位：
+
+- `WatchService` 不再直接 import `vat.web.jobs`
+- 业务层已通过轻量 `process_job_submitter` helper 获得 process job 提交通道
+- `season_sync / resync_video_info / resync_season_video_infos` 已迁到 `vat/services/bilibili_workflows.py`
+- CLI tools、CLI commands、Web bilibili route 的主调用链已切到新的业务层模块
+- `uploaders/bilibili.py` 中保留了薄 wrapper，用于兼容旧引用，但高层逻辑已不再以 adapter 文件为主入口
+
+当前判断：
+
+- `playlist/watch/upload` 这条业务链已经开始从“adapter/service/route/tools 混杂编排”转向更合理的层次
+- 后续更有价值的工作将集中在：
+  - `playlist_service.py` 的事务脚本收口
+  - `replace_video / sync_season_episode_titles / fix_violation` 的恢复模型
+
 ### 9.2.2 2026-03-24 进展更新
 
 `Phase C` 已实际完成以下收口：

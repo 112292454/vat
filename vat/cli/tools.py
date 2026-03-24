@@ -220,7 +220,7 @@ def _post_fix_actions(db, uploader, config, aid: int):
     2. add_to_season: 如果配置了目标合集且尚未添加，则添加到合集
     """
     import json, sqlite3
-    from ..uploaders.bilibili import resync_video_info
+    from ..services.bilibili_workflows import resync_video_info
     logger = get_logger()
     
     # Step 1: 重新渲染元信息并同步到 B站
@@ -446,7 +446,7 @@ def tools_upload_sync(playlist, retry_delay):
             _failed(f"Playlist 不存在: {playlist}")
             return
 
-        from ..uploaders.bilibili import season_sync
+        from ..services.bilibili_workflows import season_sync
         uploader = _get_bilibili_uploader(config)
 
         _emit(f"开始 upload sync: {pl.title}")
@@ -726,7 +726,7 @@ def tools_season_sync(playlist):
     db = Database(config.storage.database_path, output_base_dir=config.storage.output_dir)
 
     try:
-        from ..uploaders.bilibili import season_sync
+        from ..services.bilibili_workflows import season_sync
         uploader = _get_bilibili_uploader(config)
 
         _emit(f"开始 season sync (playlist={playlist})...")

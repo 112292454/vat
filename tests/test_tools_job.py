@@ -586,7 +586,7 @@ class TestResyncVideoInfo(TestCase):
     @patch('sqlite3.connect')
     def test_success(self, mock_connect):
         """正常场景：渲染并同步成功"""
-        from vat.uploaders.bilibili import resync_video_info
+        from vat.services.bilibili_workflows import resync_video_info
         
         mock_db, mock_video = self._make_mock_db()
         mock_config = self._make_mock_config()
@@ -616,7 +616,7 @@ class TestResyncVideoInfo(TestCase):
     @patch('sqlite3.connect')
     def test_video_not_found(self, mock_connect):
         """DB 中找不到对应视频"""
-        from vat.uploaders.bilibili import resync_video_info
+        from vat.services.bilibili_workflows import resync_video_info
         
         mock_db = MagicMock()
         mock_db.db_path = ':memory:'
@@ -638,7 +638,7 @@ class TestResyncVideoInfo(TestCase):
     @patch('sqlite3.connect')
     def test_no_translated_data(self, mock_connect):
         """视频缺少翻译数据"""
-        from vat.uploaders.bilibili import resync_video_info
+        from vat.services.bilibili_workflows import resync_video_info
         
         mock_db, _ = self._make_mock_db(translated={})
         # 覆盖 metadata 中 translated 为空
@@ -662,7 +662,7 @@ class TestResyncVideoInfo(TestCase):
     @patch('sqlite3.connect')
     def test_edit_fails(self, mock_connect):
         """edit_video_info 返回 False"""
-        from vat.uploaders.bilibili import resync_video_info
+        from vat.services.bilibili_workflows import resync_video_info
         
         mock_db, _ = self._make_mock_db()
         mock_config = self._make_mock_config()

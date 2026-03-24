@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 
 os.environ["HOME"] = os.path.join(tempfile.gettempdir(), "vat-test-home")
 
-from vat.uploaders import bilibili as bilibili_module
+from vat.services import bilibili_workflows as bilibili_module
 
 
 def _make_uploader():

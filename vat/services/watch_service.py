@@ -20,15 +20,14 @@ import os
 import time
 import uuid
 from datetime import datetime, timedelta
-from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Callable, Dict, List, Optional, Set, Tuple
 
 from ..config import Config
 from ..database import Database
 from ..models import TaskStatus, DEFAULT_STAGE_SEQUENCE, TaskStep
 from ..services.playlist_service import PlaylistService
+from ..services.process_job_submitter import build_process_job_submitter
 from ..utils.logger import setup_logger
-from ..web.jobs import JobManager
 
 logger = setup_logger("watch_service")
 
@@ -62,6 +61,7 @@ class WatchService:
         force: bool = False,
         fail_fast: bool = False,
         once: bool = False,
+        process_job_submitter: Optional[Callable[..., Optional[str]]] = None,
     ):
         self.config = config
         self.db = db
@@ -92,11 +92,7 @@ class WatchService:
         # 安全上限：当 max_new_per_round=0（不限制）时的硬上限
         # 防止首次 sync 或异常情况一次提交数千视频
         self._safety_cap = 50
-        
-        # 通过 JobManager 提交 process job，复用 WebUI 的任务管理基础设施
-        # 这样 watch 提交的处理任务在 WebUI 可见、可追踪、可取消
-        log_dir = Path(config.storage.database_path).parent / "job_logs"
-        self.job_manager = JobManager(str(config.storage.database_path), str(log_dir))
+        self._process_job_submitter = process_job_submitter or build_process_job_submitter(config)
     
     def run(self):
         """
@@ -405,12 +401,7 @@ class WatchService:
     
     def _submit_process_job(self, video_ids: List[str], playlist_id: str) -> Optional[str]:
         """
-        通过 JobManager 提交 process job 处理视频
-        
-        复用 WebUI 的 JobManager 基础设施，确保：
-        - 任务在 web_jobs 表有正式记录，WebUI 可见
-        - 子进程管理、日志、状态追踪全部由 JobManager 处理
-        - watch 只负责编排，不干涉处理流程内部
+        通过注入的 submitter 提交 process job 处理视频。
         
         Returns:
             job_id 字符串（用于追踪），失败返回 None
@@ -422,7 +413,7 @@ class WatchService:
         steps = self.stages.split(",") if self.stages else ["all"]
         
         try:
-            job_id = self.job_manager.submit_job(
+            job_id = self._process_job_submitter(
                 video_ids=video_ids,
                 steps=steps,
                 gpu_device=self.gpu_device,
@@ -430,10 +421,9 @@ class WatchService:
                 concurrency=self.concurrency,
                 playlist_id=playlist_id,
                 fail_fast=self.fail_fast,
-                task_type='process',
             )
             logger.info(
-                f"通过 JobManager 提交处理任务: {job_id}, "
+                f"通过 process submitter 提交处理任务: {job_id}, "
                 f"{len(video_ids)} 个视频, stages={self.stages}, playlist={playlist_id}"
             )
             return job_id

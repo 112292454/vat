@@ -13,7 +13,8 @@ from fastapi.templating import Jinja2Templates
 
 from ...config import load_config
 from ...database import Database
-from ...uploaders.bilibili import BilibiliUploader, resync_season_video_infos
+from ...uploaders.bilibili import BilibiliUploader
+from ...services.bilibili_workflows import resync_season_video_infos
 from ...uploaders.upload_config import get_upload_config_manager, UploadConfigManager
 from ...embedder.ffmpeg_wrapper import FFmpegWrapper
 from ...utils.logger import setup_logger
@@ -700,7 +701,7 @@ async def resync_video_info_route(aid: int):
     翻译更新后需要同步等）。
     """
     try:
-        from ...uploaders.bilibili import resync_video_info
+        from ...services.bilibili_workflows import resync_video_info
         
         config = load_config()
         db = get_db()

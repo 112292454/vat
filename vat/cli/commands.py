@@ -882,7 +882,8 @@ def _auto_season_sync(config, db, logger, playlist_id: str, retry_delay_minutes:
         retry_delay_minutes: 重试等待时间（分钟），默认30分钟
     """
     try:
-        from ..uploaders.bilibili import BilibiliUploader, season_sync, BILIUP_AVAILABLE
+        from ..uploaders.bilibili import BilibiliUploader, BILIUP_AVAILABLE
+        from ..services.bilibili_workflows import season_sync
         
         if not BILIUP_AVAILABLE:
             return
@@ -1739,7 +1740,8 @@ def upload_sync(ctx, playlist, retry_delay):
     click.echo(f"Playlist: {pl.title} ({playlist})")
     
     try:
-        from ..uploaders.bilibili import BilibiliUploader, season_sync, BILIUP_AVAILABLE
+        from ..uploaders.bilibili import BilibiliUploader, BILIUP_AVAILABLE
+        from ..services.bilibili_workflows import season_sync
         
         if not BILIUP_AVAILABLE:
             click.echo("错误: biliup 库不可用，请安装: pip install biliup", err=True)

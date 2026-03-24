@@ -252,3 +252,28 @@
 - `WatchService -> web.jobs` 反向依赖
 - `playlist_service.py` / `bilibili.py` 中的高层 workflow 混杂
 - 技术层几个关键大文件的有限拆分
+
+## 14. 2026-03-24 Phase D 完成记录
+
+`Phase D` 已完成，核心是“业务 workflow 归位”，而不是继续扩大 Web 或 uploader 的控制面。
+
+已落地的点：
+
+- `WatchService` 不再直接依赖 `vat.web.jobs`，改为通过业务层 submitter helper 获取 process job 提交通道。
+- `season_sync / resync_video_info / resync_season_video_infos` 已迁到 `vat/services/bilibili_workflows.py`。
+- CLI tools、CLI commands、Web Bilibili 路由的主调用链已切到新的业务层 workflow 模块。
+- `uploaders/bilibili.py` 目前仅保留兼容 wrapper，不再是这些高层流程的主入口。
+
+当前判断：
+
+- 到 `Phase D` 为止，控制面、状态语义、正常处理主链、以及最明显的业务 workflow 边界都已经完成第一轮收口。
+- 后续主线应优先转向技术子域收口：
+  1. 统一 LLM facade
+  2. 收字幕子域
+  3. 收媒体基础操作
+
+仍需后续阶段处理的点：
+
+- `playlist_service.py` 的巨型事务脚本
+- `replace_video / sync_season_episode_titles / fix_violation` 的补偿与恢复模型
+- `watch_sessions/watch_rounds` 与 `web_jobs` 的最终统一关系

@@ -430,38 +430,16 @@ class ASRData:
             ass_style: ASS 样式字符串（可选）
             style_name: 样式模板名称（可选）
         """
-        save_path = handle_long_path(save_path)
-        Path(save_path).parent.mkdir(parents=True, exist_ok=True)
-
-        if save_path.endswith(".srt"):
-            self.to_srt(save_path=save_path)
-        elif save_path.endswith(".txt"):
-            self.to_txt(save_path=save_path)
-        elif save_path.endswith(".json"):
-            with open(save_path, "w", encoding="utf-8") as f:
-                json.dump(self.to_json(), f, ensure_ascii=False)
-        elif save_path.endswith(".ass"):
-            self.to_ass(
-                save_path=save_path,
-                style_str=ass_style,
-                style_name=style_name,
-            )
-        else:
-            raise ValueError(f"Unsupported file extension: {save_path}")
+        from ..subtitle_utils.codecs import save_asr_data
+        save_asr_data(self, save_path, ass_style=ass_style, style_name=style_name)
 
     def to_txt(self, save_path=None) -> str:
         """转换为纯文本格式（无时间戳）
         
         布局：原文在上，译文在下
         """
-        result = []
-        for seg in self.segments:
-            original = seg.text
-            translated = seg.translated_text
-            text = f"{original}\n{translated}" if translated else original
-            result.append(text)
-        
-        text = "\n".join(result)
+        from ..subtitle_utils.codecs import asr_data_to_txt
+        text = asr_data_to_txt(self)
         if save_path:
             save_path = handle_long_path(save_path)
             with open(save_path, "w", encoding="utf-8") as f:
@@ -473,14 +451,8 @@ class ASRData:
         
         布局：原文在上，译文在下
         """
-        srt_lines = []
-        for n, seg in enumerate(self.segments, 1):
-            original = seg.text
-            translated = seg.translated_text
-            text = f"{original}\n{translated}" if translated else original
-            srt_lines.append(f"{n}\n{seg.to_srt_ts()}\n{text}\n")
-
-        srt_text = "\n".join(srt_lines)
+        from ..subtitle_utils.codecs import asr_data_to_srt
+        srt_text = asr_data_to_srt(self)
         if save_path:
             save_path = handle_long_path(save_path)
             with open(save_path, "w", encoding="utf-8") as f:
@@ -493,15 +465,8 @@ class ASRData:
 
     def to_json(self) -> dict:
         """Convert to JSON format"""
-        result_json = {}
-        for i, segment in enumerate(self.segments, 1):
-            result_json[str(i)] = {
-                "start_time": segment.start_time,
-                "end_time": segment.end_time,
-                "original_subtitle": segment.text,
-                "translated_subtitle": segment.translated_text,
-            }
-        return result_json
+        from ..subtitle_utils.codecs import asr_data_to_json
+        return asr_data_to_json(self)
 
     def to_ass(
         self,
@@ -786,44 +751,14 @@ class ASRData:
             FileNotFoundError: File does not exist
             ValueError: Unsupported file format
         """
-        file_path_obj = Path(file_path)
-        if not file_path_obj.exists():
-            raise FileNotFoundError(f"File not found: {file_path_obj}")
-
-        try:
-            content = file_path_obj.read_text(encoding="utf-8")
-        except UnicodeDecodeError:
-            content = file_path_obj.read_text(encoding="gbk")
-
-        suffix = file_path_obj.suffix.lower()
-
-        if suffix == ".srt":
-            return ASRData.from_srt(content)
-        elif suffix == ".vtt":
-            if "<c>" in content:
-                return ASRData.from_youtube_vtt(content)
-            return ASRData.from_vtt(content)
-        elif suffix == ".ass":
-            return ASRData.from_ass(content)
-        elif suffix == ".json":
-            return ASRData.from_json(json.loads(content))
-        else:
-            raise ValueError(f"Unsupported file format: {suffix}")
+        from ..subtitle_utils.codecs import load_asr_data_from_file
+        return load_asr_data_from_file(file_path)
 
     @staticmethod
     def from_json(json_data: dict) -> "ASRData":
         """Create ASRData from JSON data"""
-        segments = []
-        for i in sorted(json_data.keys(), key=int):
-            segment_data = json_data[i]
-            segment = ASRDataSeg(
-                text=segment_data["original_subtitle"],
-                translated_text=segment_data["translated_subtitle"],
-                start_time=segment_data["start_time"],
-                end_time=segment_data["end_time"],
-            )
-            segments.append(segment)
-        return ASRData(segments)
+        from ..subtitle_utils.codecs import asr_data_from_json
+        return asr_data_from_json(json_data)
 
     @staticmethod
     def from_srt(srt_str: str) -> "ASRData":
@@ -838,65 +773,8 @@ class ASRData:
         Returns:
             Parsed ASRData instance
         """
-        segments = []
-        srt_time_pattern = re.compile(
-            r"(\d{2}):(\d{2}):(\d{1,2})[.,](\d{3})\s-->\s(\d{2}):(\d{2}):(\d{1,2})[.,](\d{3})"
-        )
-        blocks = re.split(r"\n\s*\n", srt_str.strip())
-
-        # Detect bilingual mode: all 4-line + 70% different languages
-        def is_different_lang(block: str) -> bool:
-            lines = block.splitlines()
-            if len(lines) != 4:
-                return False
-            try:
-                return detect(lines[2]) != detect(lines[3])
-            except LangDetectException:
-                return False
-
-        all_four_lines = all(len(b.splitlines()) == 4 for b in blocks)
-        sample = blocks[:50]
-        sample_size = len(sample)
-        is_bilingual = (
-            sample_size > 0
-            and all_four_lines
-            and sum(map(is_different_lang, sample)) / sample_size >= 0.7
-        )
-
-        # Process all blocks based on detected mode
-        for block in blocks:
-            lines = block.splitlines()
-            if len(lines) < 3:
-                continue
-
-            match = srt_time_pattern.match(lines[1])
-            if not match:
-                continue
-
-            time_parts = list(map(int, match.groups()))
-            start_time = sum(
-                [
-                    time_parts[0] * 3600000,
-                    time_parts[1] * 60000,
-                    time_parts[2] * 1000,
-                    time_parts[3],
-                ]
-            )
-            end_time = sum(
-                [
-                    time_parts[4] * 3600000,
-                    time_parts[5] * 60000,
-                    time_parts[6] * 1000,
-                    time_parts[7],
-                ]
-            )
-
-            if is_bilingual and len(lines) == 4:
-                segments.append(ASRDataSeg(lines[2], start_time, end_time, lines[3]))
-            else:
-                segments.append(ASRDataSeg(" ".join(lines[2:]), start_time, end_time))
-
-        return ASRData(segments)
+        from ..subtitle_utils.codecs import asr_data_from_srt
+        return asr_data_from_srt(srt_str)
 
     @staticmethod
     def from_vtt(vtt_str: str) -> "ASRData":
@@ -908,50 +786,8 @@ class ASRData:
         Returns:
             ASRData instance
         """
-        segments = []
-        content = vtt_str.split("\n\n")[2:]
-
-        timestamp_pattern = re.compile(
-            r"(\d{2}):(\d{2}):(\d{2})\.(\d{3})\s*-->\s*(\d{2}):(\d{2}):(\d{2})\.(\d{3})"
-        )
-
-        for block in content:
-            lines = block.strip().split("\n")
-            if len(lines) < 2:
-                continue
-
-            timestamp_line = lines[1]
-            match = timestamp_pattern.match(timestamp_line)
-            if not match:
-                continue
-
-            time_parts = list(map(int, match.groups()))
-            start_time = sum(
-                [
-                    time_parts[0] * 3600000,
-                    time_parts[1] * 60000,
-                    time_parts[2] * 1000,
-                    time_parts[3],
-                ]
-            )
-            end_time = sum(
-                [
-                    time_parts[4] * 3600000,
-                    time_parts[5] * 60000,
-                    time_parts[6] * 1000,
-                    time_parts[7],
-                ]
-            )
-
-            text_line = " ".join(lines[2:])
-            cleaned_text = re.sub(r"<\d{2}:\d{2}:\d{2}\.\d{3}>", "", text_line)
-            cleaned_text = re.sub(r"</?c>", "", cleaned_text)
-            cleaned_text = cleaned_text.strip()
-
-            if cleaned_text and cleaned_text != " ":
-                segments.append(ASRDataSeg(cleaned_text, start_time, end_time))
-
-        return ASRData(segments)
+        from ..subtitle_utils.codecs import asr_data_from_vtt
+        return asr_data_from_vtt(vtt_str)
 
     @staticmethod
     def from_youtube_vtt(vtt_str: str) -> "ASRData":
@@ -964,62 +800,8 @@ class ASRData:
             Parsed ASRData with word-level segments
         """
 
-        def parse_timestamp(ts: str) -> int:
-            """Convert timestamp string to milliseconds"""
-            h, m, s = ts.split(":")
-            return int(float(h) * 3600000 + float(m) * 60000 + float(s) * 1000)
-
-        def split_timestamped_text(text: str) -> List[ASRDataSeg]:
-            """Extract word segments from timestamped text"""
-            pattern = re.compile(r"<(\d{2}:\d{2}:\d{2}\.\d{3})>([^<]*)")
-            matches = list(pattern.finditer(text))
-            word_segments = []
-
-            for i in range(len(matches) - 1):
-                current_match = matches[i]
-                next_match = matches[i + 1]
-
-                start_time = parse_timestamp(current_match.group(1))
-                end_time = parse_timestamp(next_match.group(1))
-                word = current_match.group(2).strip()
-
-                if word:
-                    word_segments.append(ASRDataSeg(word, start_time, end_time))
-
-            return word_segments
-
-        segments = []
-        blocks = re.split(r"\n\n+", vtt_str.strip())
-
-        timestamp_pattern = re.compile(
-            r"(\d{2}):(\d{2}):(\d{2}\.\d{3})\s*-->\s*(\d{2}):(\d{2}):(\d{2}\.\d{3})"
-        )
-        for block in blocks:
-            lines = block.strip().split("\n")
-            if not lines:
-                continue
-
-            match = timestamp_pattern.match(lines[0])
-            if not match:
-                continue
-
-            text = "\n".join(lines)
-
-            timestamp_row = re.search(r"\n(.*?<c>.*?</c>.*)", block)
-            if timestamp_row:
-                text = re.sub(r"<c>|</c>", "", timestamp_row.group(1))
-                block_start_time_string = (
-                    f"{match.group(1)}:{match.group(2)}:{match.group(3)}"
-                )
-                block_end_time_string = (
-                    f"{match.group(4)}:{match.group(5)}:{match.group(6)}"
-                )
-                text = f"<{block_start_time_string}>{text}<{block_end_time_string}>"
-
-                word_segments = split_timestamped_text(text)
-                segments.extend(word_segments)
-
-        return ASRData(segments)
+        from ..subtitle_utils.codecs import asr_data_from_youtube_vtt
+        return asr_data_from_youtube_vtt(vtt_str)
 
     @staticmethod
     def from_ass(ass_str: str) -> "ASRData":
@@ -1031,67 +813,5 @@ class ASRData:
         Returns:
             ASRData instance
         """
-        segments = []
-        ass_time_pattern = re.compile(
-            r"Dialogue: \d+,(\d+:\d{2}:\d{2}\.\d{2}),(\d+:\d{2}:\d{2}\.\d{2}),(.*?),.*?,\d+,\d+,\d+,.*?,(.*?)$"
-        )
-
-        def parse_ass_time(time_str: str) -> int:
-            """Convert ASS timestamp to milliseconds"""
-            hours, minutes, seconds = time_str.split(":")
-            seconds, centiseconds = seconds.split(".")
-            return (
-                int(hours) * 3600000
-                + int(minutes) * 60000
-                + int(seconds) * 1000
-                + int(centiseconds) * 10
-            )
-
-        # 检查是否有翻译：同时存在Default和Secondary样式
-        has_default = "Dialogue:" in ass_str and ",Default," in ass_str
-        has_secondary = ",Secondary," in ass_str
-        has_translation = has_default and has_secondary
-        temp_segments = {}
-        lines = ass_str.splitlines()
-
-        for line in lines:
-          if not line.startswith("Dialogue:"):
-            continue
-          match = ass_time_pattern.match(line)
-          if not match:
-            continue
-          start_time = parse_ass_time(match.group(1))
-          end_time = parse_ass_time(match.group(2))
-          style = match.group(3).strip()
-          text = match.group(4)
-
-          text = re.sub(r"\{[^}]*\}", "", text)
-          text = text.replace("\\N", "\n")
-          text = text.strip()
-
-          if not text:
-              continue
-
-          if has_translation:
-              # 双语模式：只认 Secondary（原文）和 Default（译文），忽略 Default_Base
-              if style not in ("Secondary", "Default"):
-                  continue
-              
-              time_key = f"{start_time}-{end_time}"
-              if time_key not in temp_segments:
-                  temp_segments[time_key] = ASRDataSeg(
-                      text="", start_time=start_time, end_time=end_time
-                  )
-              
-              if style == "Default":
-                  temp_segments[time_key].translated_text = text
-              else:  # Secondary
-                  temp_segments[time_key].text = text
-          else:
-              segments.append(ASRDataSeg(text, start_time, end_time))
-
-        # 双语模式：将所有 temp_segments 转为 segments
-        if has_translation:
-            segments.extend(temp_segments.values())
-
-        return ASRData(segments)
+        from ..subtitle_utils.codecs import asr_data_from_ass
+        return asr_data_from_ass(ass_str)

@@ -96,16 +96,9 @@ class TestVideoInfoTranslatorTranslate:
     def test_translate_parses_json_markdown_and_normalizes_output(self, monkeypatch):
         translator = VideoInfoTranslator(model="test-model")
 
-        class _FakeClient:
-            class chat:
-                class completions:
-                    @staticmethod
-                    def create(**kwargs):
-                        return SimpleNamespace(
-                            choices=[
-                                SimpleNamespace(
-                                    message=SimpleNamespace(
-                                        content="""```json
+        monkeypatch.setattr(
+            "vat.llm.video_info_translator.call_text_llm",
+            lambda **kwargs: """```json
 {
   "title_translated": "【白上吹雪】马力欧与寶可夢",
   "description_summary": "摘要",
@@ -116,13 +109,8 @@ class TestVideoInfoTranslatorTranslate:
   "recommended_tid_name": "日常",
   "tid_reason": "reason"
 }
-```"""
-                                    )
-                                )
-                            ]
-                        )
-
-        monkeypatch.setattr(translator, "_get_client", lambda: _FakeClient())
+```""",
+        )
 
         result = translator.translate(
             title="原标题",
@@ -164,16 +152,10 @@ class TestVideoInfoTranslatorTranslate:
         ])
         sleep_calls = []
 
-        class _FakeClient:
-            class chat:
-                class completions:
-                    @staticmethod
-                    def create(**kwargs):
-                        return SimpleNamespace(
-                            choices=[SimpleNamespace(message=SimpleNamespace(content=next(responses)))]
-                        )
-
-        monkeypatch.setattr(translator, "_get_client", lambda: _FakeClient())
+        monkeypatch.setattr(
+            "vat.llm.video_info_translator.call_text_llm",
+            lambda **kwargs: next(responses),
+        )
         monkeypatch.setattr("time.sleep", lambda seconds: sleep_calls.append(seconds))
 
         result = translator.translate(
@@ -191,28 +173,22 @@ class TestVideoInfoTranslatorTranslate:
         attempts = {"count": 0}
         sleep_calls = []
 
-        class _FakeClient:
-            class chat:
-                class completions:
-                    @staticmethod
-                    def create(**kwargs):
-                        attempts["count"] += 1
-                        if attempts["count"] == 1:
-                            raise RuntimeError("connection reset")
-                        return SimpleNamespace(
-                            choices=[SimpleNamespace(message=SimpleNamespace(content=json.dumps({
-                                "title_translated": "翻译标题",
-                                "description_summary": "摘要",
-                                "description_translated": "翻译简介",
-                                "tags_translated": [],
-                                "tags_generated": [],
-                                "recommended_tid": 21,
-                                "recommended_tid_name": "日常",
-                                "tid_reason": "reason",
-                            }, ensure_ascii=False)))]
-                        )
+        def fake_call_text_llm(**kwargs):
+            attempts["count"] += 1
+            if attempts["count"] == 1:
+                raise RuntimeError("connection reset")
+            return json.dumps({
+                "title_translated": "翻译标题",
+                "description_summary": "摘要",
+                "description_translated": "翻译简介",
+                "tags_translated": [],
+                "tags_generated": [],
+                "recommended_tid": 21,
+                "recommended_tid_name": "日常",
+                "tid_reason": "reason",
+            }, ensure_ascii=False)
 
-        monkeypatch.setattr(translator, "_get_client", lambda: _FakeClient())
+        monkeypatch.setattr("vat.llm.video_info_translator.call_text_llm", fake_call_text_llm)
         monkeypatch.setattr("time.sleep", lambda seconds: sleep_calls.append(seconds))
 
         result = translator.translate("原标题", "原简介", [], uploader="主播")
@@ -223,19 +199,13 @@ class TestVideoInfoTranslatorTranslate:
     def test_translate_raises_when_llm_response_missing_title_translated(self, monkeypatch):
         translator = VideoInfoTranslator(model="test-model")
 
-        class _FakeClient:
-            class chat:
-                class completions:
-                    @staticmethod
-                    def create(**kwargs):
-                        return SimpleNamespace(
-                            choices=[SimpleNamespace(message=SimpleNamespace(content=json.dumps({
-                                "description_summary": "摘要",
-                                "description_translated": "翻译简介",
-                            }, ensure_ascii=False)))]
-                        )
-
-        monkeypatch.setattr(translator, "_get_client", lambda: _FakeClient())
+        monkeypatch.setattr(
+            "vat.llm.video_info_translator.call_text_llm",
+            lambda **kwargs: json.dumps({
+                "description_summary": "摘要",
+                "description_translated": "翻译简介",
+            }, ensure_ascii=False),
+        )
 
         with pytest.raises(RuntimeError, match="视频信息翻译最终失败"):
             translator.translate("原标题", "原简介", [], uploader="主播")
@@ -243,13 +213,9 @@ class TestVideoInfoTranslatorTranslate:
     def test_translate_accepts_plain_fenced_code_block(self, monkeypatch):
         translator = VideoInfoTranslator(model="test-model")
 
-        class _FakeClient:
-            class chat:
-                class completions:
-                    @staticmethod
-                    def create(**kwargs):
-                        return SimpleNamespace(
-                            choices=[SimpleNamespace(message=SimpleNamespace(content="""```
+        monkeypatch.setattr(
+            "vat.llm.video_info_translator.call_text_llm",
+            lambda **kwargs: """```
 {
   "title_translated": "翻译标题",
   "description_summary": "摘要",
@@ -260,10 +226,8 @@ class TestVideoInfoTranslatorTranslate:
   "recommended_tid_name": "日常",
   "tid_reason": "reason"
 }
-```"""))]
-                        )
-
-        monkeypatch.setattr(translator, "_get_client", lambda: _FakeClient())
+```""",
+        )
 
         result = translator.translate("原标题", "原简介", [], uploader="主播")
 
@@ -272,22 +236,16 @@ class TestVideoInfoTranslatorTranslate:
     def test_translate_uses_default_tid_fallback_when_llm_omits_tid_fields(self, monkeypatch):
         translator = VideoInfoTranslator(model="test-model")
 
-        class _FakeClient:
-            class chat:
-                class completions:
-                    @staticmethod
-                    def create(**kwargs):
-                        return SimpleNamespace(
-                            choices=[SimpleNamespace(message=SimpleNamespace(content=json.dumps({
-                                "title_translated": "翻译标题",
-                                "description_summary": "摘要",
-                                "description_translated": "翻译简介",
-                                "tags_translated": [],
-                                "tags_generated": [],
-                            }, ensure_ascii=False)))]
-                        )
-
-        monkeypatch.setattr(translator, "_get_client", lambda: _FakeClient())
+        monkeypatch.setattr(
+            "vat.llm.video_info_translator.call_text_llm",
+            lambda **kwargs: json.dumps({
+                "title_translated": "翻译标题",
+                "description_summary": "摘要",
+                "description_translated": "翻译简介",
+                "tags_translated": [],
+                "tags_generated": [],
+            }, ensure_ascii=False),
+        )
 
         result = translator.translate("原标题", "原简介", [], uploader="主播", default_tid=17)
 
@@ -299,15 +257,11 @@ class TestVideoInfoTranslatorTranslate:
         translator = VideoInfoTranslator(model="test-model")
         attempts = {"count": 0}
 
-        class _FakeClient:
-            class chat:
-                class completions:
-                    @staticmethod
-                    def create(**kwargs):
-                        attempts["count"] += 1
-                        raise RuntimeError("quota exceeded")
+        def fake_call_text_llm(**kwargs):
+            attempts["count"] += 1
+            raise RuntimeError("quota exceeded")
 
-        monkeypatch.setattr(translator, "_get_client", lambda: _FakeClient())
+        monkeypatch.setattr("vat.llm.video_info_translator.call_text_llm", fake_call_text_llm)
 
         with pytest.raises(RuntimeError, match="视频信息翻译最终失败"):
             translator.translate("原标题", "原简介", [], uploader="主播")
@@ -317,25 +271,19 @@ class TestVideoInfoTranslatorTranslate:
     def test_translate_allows_empty_uploader_and_still_returns_result(self, monkeypatch):
         translator = VideoInfoTranslator(model="test-model")
 
-        class _FakeClient:
-            class chat:
-                class completions:
-                    @staticmethod
-                    def create(**kwargs):
-                        return SimpleNamespace(
-                            choices=[SimpleNamespace(message=SimpleNamespace(content=json.dumps({
-                                "title_translated": "翻译标题",
-                                "description_summary": "摘要",
-                                "description_translated": "翻译简介",
-                                "tags_translated": [],
-                                "tags_generated": [],
-                                "recommended_tid": 21,
-                                "recommended_tid_name": "日常",
-                                "tid_reason": "reason",
-                            }, ensure_ascii=False)))]
-                        )
-
-        monkeypatch.setattr(translator, "_get_client", lambda: _FakeClient())
+        monkeypatch.setattr(
+            "vat.llm.video_info_translator.call_text_llm",
+            lambda **kwargs: json.dumps({
+                "title_translated": "翻译标题",
+                "description_summary": "摘要",
+                "description_translated": "翻译简介",
+                "tags_translated": [],
+                "tags_generated": [],
+                "recommended_tid": 21,
+                "recommended_tid_name": "日常",
+                "tid_reason": "reason",
+            }, ensure_ascii=False),
+        )
 
         result = translator.translate("原标题", "原简介", [], uploader="")
 

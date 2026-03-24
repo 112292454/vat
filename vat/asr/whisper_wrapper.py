@@ -17,6 +17,7 @@ except ImportError:
 
 from .asr_data import ASRData, ASRDataSeg
 from .chunked_asr import ChunkedASR
+from vat.media import extract_audio_ffmpeg
 from vat.utils.gpu import resolve_gpu_device, is_cuda_available
 from vat.utils.logger import setup_logger
 
@@ -647,33 +648,16 @@ class WhisperASR:
             video_path: 视频文件路径
             audio_path: 输出音频路径
         """
-        audio_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        # 使用ffmpeg提取音频为16kHz单声道WAV
-        # aresample=async=1: 对直播录制视频中的音频时间戳间隙填充静音，
-        # 确保 WAV 时长与 MP4 视频流一致，避免字幕时间轴累进偏移。
-        # 对无间隙视频验证为完全无损（二进制一致），可安全作为默认行为。
-        cmd = [
-            'ffmpeg',
-            '-i', str(video_path),
-            '-vn',  # 不处理视频
-            '-af', 'aresample=async=1',
-            '-acodec', 'pcm_s16le',  # 16位PCM编码
-            '-ac', '1',  # 单声道
-            '-ar', '16000',  # 16kHz采样率
-            '-y',  # 覆盖输出文件
-            str(audio_path)
-        ]
-        
         try:
-            subprocess.run(
-                cmd,
-                check=True,
-                capture_output=True,
-                text=True
+            extract_audio_ffmpeg(
+                video_path,
+                audio_path,
+                sample_rate=16000,
+                channels=1,
+                codec='pcm_s16le',
             )
-        except subprocess.CalledProcessError as e:
-            raise RuntimeError(f"音频提取失败: {e.stderr}")
+        except (FileNotFoundError, RuntimeError) as e:
+            raise RuntimeError(str(e)) from e
     
     def save_results_as_json(self, asr_data: ASRData, output_path: Path):
         """

@@ -10,6 +10,7 @@ import threading
 from pathlib import Path
 from typing import Optional, Dict, Any, List, Callable, Union
 
+from vat.media import extract_audio_ffmpeg, probe_media_info
 from vat.utils.gpu import resolve_gpu_device, get_available_gpus, is_cuda_available
 from vat.utils.logger import setup_logger
 
@@ -169,40 +170,17 @@ class FFmpegWrapper:
         Returns:
             是否成功
         """
-        if not video_path.exists():
-            print(f"错误: 输入视频文件不存在: {video_path}")
-            return False
-            
-        audio_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        # aresample=async=1: 对直播录制视频中的音频时间戳间隙填充静音，
-        # 确保 WAV 时长与 MP4 视频流一致，避免字幕时间轴累进偏移。
-        # 对无间隙视频验证为完全无损（二进制一致），可安全作为默认行为。
-        cmd = [
-            'ffmpeg',
-            '-i', str(video_path),
-            '-vn',  # 不处理视频
-            '-af', 'aresample=async=1',
-            '-acodec', codec,
-            '-ac', str(channels),
-            '-ar', str(sample_rate),
-            '-y',  # 覆盖输出
-            str(audio_path)
-        ]
-        
         try:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                check=True
+            extract_audio_ffmpeg(
+                video_path,
+                audio_path,
+                sample_rate=sample_rate,
+                channels=channels,
+                codec=codec,
             )
-            if not audio_path.exists():
-                print(f"错误: 音频提取完成但未生成文件: {audio_path}")
-                return False
             return True
-        except subprocess.CalledProcessError as e:
-            print(f"音频提取失败: {e.stderr}")
+        except (FileNotFoundError, RuntimeError) as e:
+            logger.error(str(e))
             return False
     
     def embed_subtitle_soft(
@@ -715,57 +693,7 @@ class FFmpegWrapper:
         Returns:
             视频信息字典
         """
-        cmd = [
-            'ffprobe',
-            '-v', 'quiet',
-            '-print_format', 'json',
-            '-show_format',
-            '-show_streams',
-            str(video_path)
-        ]
-        
-        try:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                check=True
-            )
-            
-            import json
-            info = json.loads(result.stdout)
-            
-            # 提取关键信息
-            video_stream = None
-            audio_stream = None
-            
-            for stream in info.get('streams', []):
-                if stream['codec_type'] == 'video' and video_stream is None:
-                    video_stream = stream
-                elif stream['codec_type'] == 'audio' and audio_stream is None:
-                    audio_stream = stream
-            
-            format_info = info.get('format', {})
-            
-            return {
-                'duration': float(format_info.get('duration', 0)),
-                'size': int(format_info.get('size', 0)),
-                'bit_rate': int(format_info.get('bit_rate', 0)),
-                'video': {
-                    'codec': video_stream.get('codec_name', '') if video_stream else '',
-                    'width': video_stream.get('width', 0) if video_stream else 0,
-                    'height': video_stream.get('height', 0) if video_stream else 0,
-                    'fps': eval(video_stream.get('r_frame_rate', '0/1')) if video_stream else 0,
-                } if video_stream else None,
-                'audio': {
-                    'codec': audio_stream.get('codec_name', '') if audio_stream else '',
-                    'sample_rate': audio_stream.get('sample_rate', 0) if audio_stream else 0,
-                    'channels': audio_stream.get('channels', 0) if audio_stream else 0,
-                } if audio_stream else None,
-            }
-        except Exception as e:
-            print(f"获取视频信息失败: {e}")
-            return None
+        return probe_media_info(video_path)
     
     def convert_video(
         self,

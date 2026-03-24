@@ -103,10 +103,8 @@ class TestSceneIdentifierDetectScene:
     def test_detect_scene_returns_default_on_invalid_llm_output(self, monkeypatch):
         identifier = _make_identifier()
         monkeypatch.setattr(
-            "vat.llm.scene_identifier.call_llm",
-            lambda **kwargs: SimpleNamespace(
-                choices=[SimpleNamespace(message=SimpleNamespace(content="invalid-scene"))]
-            ),
+            "vat.llm.scene_identifier.call_text_llm",
+            lambda **kwargs: "invalid-scene",
         )
 
         result = identifier.detect_scene("标题", "desc")
@@ -117,10 +115,8 @@ class TestSceneIdentifierDetectScene:
     def test_detect_scene_returns_detected_scene_on_valid_output(self, monkeypatch):
         identifier = _make_identifier()
         monkeypatch.setattr(
-            "vat.llm.scene_identifier.call_llm",
-            lambda **kwargs: SimpleNamespace(
-                choices=[SimpleNamespace(message=SimpleNamespace(content="gaming"))]
-            ),
+            "vat.llm.scene_identifier.call_text_llm",
+            lambda **kwargs: "gaming",
         )
 
         result = identifier.detect_scene("Minecraft 标题", "desc")
@@ -137,11 +133,9 @@ class TestSceneIdentifierDetectScene:
 
         def fake_call_llm(*, messages, model, temperature, api_key, base_url, proxy):
             captured["messages"] = messages
-            return SimpleNamespace(
-                choices=[SimpleNamespace(message=SimpleNamespace(content="chatting"))]
-            )
+            return "chatting"
 
-        monkeypatch.setattr("vat.llm.scene_identifier.call_llm", fake_call_llm)
+        monkeypatch.setattr("vat.llm.scene_identifier.call_text_llm", fake_call_llm)
 
         result = identifier.detect_scene("标题", "")
 
@@ -151,10 +145,8 @@ class TestSceneIdentifierDetectScene:
     def test_detect_scene_accepts_uppercase_output_after_lowering(self, monkeypatch):
         identifier = _make_identifier()
         monkeypatch.setattr(
-            "vat.llm.scene_identifier.call_llm",
-            lambda **kwargs: SimpleNamespace(
-                choices=[SimpleNamespace(message=SimpleNamespace(content="GAMING"))]
-            ),
+            "vat.llm.scene_identifier.call_text_llm",
+            lambda **kwargs: "GAMING",
         )
 
         result = identifier.detect_scene("Minecraft 标题", "desc")
@@ -165,8 +157,8 @@ class TestSceneIdentifierDetectScene:
     def test_detect_scene_returns_default_when_llm_choices_empty(self, monkeypatch):
         identifier = _make_identifier()
         monkeypatch.setattr(
-            "vat.llm.scene_identifier.call_llm",
-            lambda **kwargs: SimpleNamespace(choices=[]),
+            "vat.llm.scene_identifier.call_text_llm",
+            lambda **kwargs: (_ for _ in ()).throw(ValueError("Invalid response")),
         )
 
         result = identifier.detect_scene("标题", "desc")
@@ -176,7 +168,7 @@ class TestSceneIdentifierDetectScene:
 
     def test_detect_scene_returns_default_on_exception(self, monkeypatch):
         identifier = _make_identifier()
-        monkeypatch.setattr("vat.llm.scene_identifier.call_llm", lambda **kwargs: (_ for _ in ()).throw(RuntimeError("boom")))
+        monkeypatch.setattr("vat.llm.scene_identifier.call_text_llm", lambda **kwargs: (_ for _ in ()).throw(RuntimeError("boom")))
 
         result = identifier.detect_scene("标题", "desc")
 

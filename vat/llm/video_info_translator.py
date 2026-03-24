@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from typing import List, Optional, Dict, Any
 
 from .client import get_or_create_client
+from .facade import call_text_llm, extract_json_block
 from vat.utils.logger import setup_logger
 
 
@@ -350,23 +351,20 @@ class VideoInfoTranslator:
         
         for attempt in range(max_retries):
             try:
-                client = self._get_client()
-                response = client.chat.completions.create(
+                content = call_text_llm(
                     model=self.model,
                     messages=[
                         {"role": "system", "content": "你是一个专业的视频内容翻译专家。请严格按JSON格式输出。"},
                         {"role": "user", "content": prompt}
                     ],
                     temperature=0.7,
+                    api_key=self.api_key,
+                    base_url=self.base_url,
+                    proxy=self.proxy,
                 )
-                
-                content = response.choices[0].message.content.strip()
-                
+
                 # 提取JSON
-                if "```json" in content:
-                    content = content.split("```json")[1].split("```")[0].strip()
-                elif "```" in content:
-                    content = content.split("```")[1].split("```")[0].strip()
+                content = extract_json_block(content)
                 
                 result = json.loads(content)
                 

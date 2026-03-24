@@ -277,3 +277,25 @@
 - `playlist_service.py` 的巨型事务脚本
 - `replace_video / sync_season_episode_titles / fix_violation` 的补偿与恢复模型
 - `watch_sessions/watch_rounds` 与 `web_jobs` 的最终统一关系
+
+## 15. 2026-03-24 Phase E 完成记录
+
+`Phase E` 已完成第一轮技术子域收口。
+
+已落地的点：
+
+- 新增 `vat/llm/facade.py`，`SceneIdentifier` 与 `VideoInfoTranslator` 已切到统一文本调用入口。
+- 新增 `vat/media/`，统一 ffprobe 与音频提取基础操作。
+- `BaseDownloader`、`FFmpegWrapper`、`WhisperASR`、`VideoProcessor` 已开始复用媒体基础 helper。
+- 新增 `vat/subtitle_utils/codecs.py`，`ASRData` 的文件编解码与保存职责已迁出到 codec 模块，并通过委托保持兼容。
+
+当前判断：
+
+- 到 `Phase E` 为止，这个分支已经完成了控制面、状态语义、业务 workflow、技术子域第一轮收口。
+- 后续如果继续深入，重点将不再是“先理顺边界”，而是更深一层的有限重构与补偿模型设计。
+
+仍需后续阶段处理的点：
+
+- `playlist_service.py` 的巨型事务脚本继续收口
+- `replace_video / sync_season_episode_titles / fix_violation` 的补偿状态机
+- `LLMTranslator / FFmpegWrapper / ASRData` 的下一轮有限拆分

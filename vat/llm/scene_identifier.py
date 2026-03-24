@@ -2,7 +2,7 @@
 import yaml
 from pathlib import Path
 from typing import Dict, Any, Optional
-from vat.llm import call_llm
+from vat.llm.facade import call_text_llm
 from vat.utils.logger import setup_logger
 
 logger = setup_logger("scene_identifier")
@@ -81,17 +81,12 @@ Output: """
             ]
             
             # 调用 LLM
-            response = call_llm(
+            scene_id = call_text_llm(
                 messages=messages, model=self.model, temperature=0.1,
                 api_key=self.api_key, base_url=self.base_url,
                 proxy=self.proxy,
             )
-            
-            if not response or not response.choices:
-                logger.error("LLM 返回为空")
-                return self._get_default_scene()
-            
-            scene_id = response.choices[0].message.content.strip().lower()
+            scene_id = scene_id.lower()
             
             # 验证场景 ID 是否有效
             if not self._is_valid_scene(scene_id):

@@ -845,6 +845,25 @@
   - `llm_translator.py`
   - `whisper_wrapper.py`
 
+### 9.4.1 2026-03-24 进展更新
+
+`Phase E` 已完成第一轮技术子域收口：
+
+- 新增 `vat/llm/facade.py`，统一高层文本调用入口
+- `SceneIdentifier` 与 `VideoInfoTranslator` 已切到 facade
+- 新增 `vat/media/`，收口 ffprobe 与音频提取基础操作
+- `BaseDownloader`、`FFmpegWrapper`、`WhisperASR`、`VideoProcessor` 已复用媒体基础 helper
+- 新增 `vat/subtitle_utils/codecs.py`
+- `ASRData` 的文件编解码和文件保存职责已迁移到 codec 模块，并通过委托保持 API 兼容
+
+当前判断：
+
+- 到这里为止，控制面、状态语义、业务 workflow、技术子域第一轮边界都已经完成收口
+- 后续如果继续深入，重点将不再是“先把边界理顺”，而是更细的：
+  - `playlist_service.py` 事务脚本继续收口
+  - `replace_video / sync_season_episode_titles / fix_violation` 的补偿模型
+  - `LLMTranslator / FFmpegWrapper / ASRData` 的下一轮有限拆分
+
 ## 10. 实施级迁移计划
 
 这一节不是“最终唯一方案”，而是基于当前审查形成的第一版实施路径。

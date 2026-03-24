@@ -24,6 +24,7 @@ from ..asr import WhisperASR, ASRData, ASRDataSeg, write_srt, write_ass, split_b
 from ..asr.vocal_separation import VocalSeparator, VocalSeparationResult
 from ..translator import LLMTranslator
 from ..embedder import FFmpegWrapper
+from ..media import extract_audio_ffmpeg
 from ..utils.cache_metadata import CacheMetadata, WHISPER_KEY_CONFIGS, SPLIT_KEY_CONFIGS
 from ..utils.cache import disable_cache, enable_cache
 from ..utils.logger import setup_logger, set_video_id
@@ -1128,20 +1129,13 @@ class VideoProcessor:
             video_path: 视频文件路径
             audio_path: 输出音频路径
         """
-        import subprocess
-        
-        # aresample=async=1: 对直播录制视频中的音频时间戳间隙填充静音，
-        # 确保 WAV 时长与 MP4 视频流一致，避免字幕时间轴累进偏移
-        cmd = [
-            'ffmpeg', '-y', '-i', str(video_path),
-            '-vn', '-af', 'aresample=async=1',
-            '-acodec', 'pcm_s16le', '-ar', '44100', '-ac', '2',
-            str(audio_path)
-        ]
-        
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        if result.returncode != 0:
-            raise RuntimeError(f"音频提取失败: {result.stderr}")
+        extract_audio_ffmpeg(
+            video_path,
+            audio_path,
+            sample_rate=44100,
+            channels=2,
+            codec='pcm_s16le',
+        )
     
     def _run_split(self) -> bool:
         """

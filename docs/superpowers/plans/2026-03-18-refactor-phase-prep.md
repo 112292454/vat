@@ -386,11 +386,16 @@
 - 随后又继续拆出了：
   - `_prune_sync_candidates_after_fetch()`
   - `_collect_fetch_results()`
+  - `_persist_sync_members()`
+  - `_apply_fetch_results()`
 - 现在 `sync_playlist()` 的前三段已经开始显式化：
   1. 候选集规划
   2. fetch 结果收集
   3. fetch 后裁剪
-- 后续下一刀更可能落在“最终落库 -> 下游翻译/索引分配”之间，而不是再回头把前面重新揉回主流程。
+  4. 成员落库
+  5. fetch 结果应用
+- 现在 `sync_playlist()` 主流程已经明显更接近“按阶段编排”，而不是在一个函数里同时揉杂规划、抓取、裁剪、落库和回退细节。
+- 后续如果继续深入，下一刀更可能落在“playlist 更新收尾 / 索引分配”与前面的阶段边界之间。
 
 ## 19. sync_playlist 功能需求与边界基线
 

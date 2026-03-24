@@ -242,47 +242,24 @@ class PlaylistService:
             pruned_stale_existing_videos = adjusted['pruned_stale_existing_videos']
 
         # 到这里才真正落库：先判定可用性，再写入新增视频，避免中断留下半成品
-        for vid, index in existing_playlist_updates:
-            self.db.update_video_playlist_info(vid, playlist_id, index)
-
-        if auto_add_videos:
-            for vid in new_videos:
-                candidate = new_video_candidates[vid]
-                existing_video = candidate['existing_video']
-                entry = candidate['entry']
-                index = candidate['playlist_index']
-
-                if existing_video:
-                    self.db.add_video_to_playlist(vid, playlist_id, index)
-                    callback(f"[{index}/{total_videos}] 关联已有视频: {existing_video.title[:40]}...")
-                else:
-                    video = Video(
-                        id=vid,
-                        source_type=SourceType.YOUTUBE,
-                        source_url=f"https://www.youtube.com/watch?v={vid}",
-                        title=entry.get('title', ''),
-                        playlist_id=playlist_id,
-                        playlist_index=index,
-                        metadata=self._build_entry_metadata(entry, channel),
-                    )
-                    self.db.add_video(video)
-                    self.db.add_video_to_playlist(vid, playlist_id, index)
-                    callback(f"[{index}/{total_videos}] 新增: {video.title[:50]}...")
+        self._persist_sync_members(
+            playlist_id=playlist_id,
+            total_videos=total_videos,
+            channel=channel,
+            auto_add_videos=auto_add_videos,
+            existing_playlist_updates=existing_playlist_updates,
+            new_videos=new_videos,
+            new_video_candidates=new_video_candidates,
+            callback=callback,
+        )
 
         if fetch_upload_dates and videos_to_fetch:
-            for vid in pruned_stale_existing_videos:
-                self._remove_stale_unavailable_video(playlist_id, vid, callback)
-
-            for vid, result in fetch_results:
-                if result.ok and result.upload_date:
-                    self._apply_video_info_to_db(vid, result.info)
-                    self._submit_translate_task(vid, result.info)
-            
-            # 对未成功获取日期的视频进行插值 + 标记永久不可用
-            callback("处理无法获取日期的视频...")
-            self._process_failed_fetches(playlist_id, fetch_results, callback)
-            
-            callback("发布日期获取完成")
+            self._apply_fetch_results(
+                playlist_id=playlist_id,
+                pruned_stale_existing_videos=pruned_stale_existing_videos,
+                fetch_results=fetch_results,
+                callback=callback,
+            )
         
         # 为新视频分配 upload_order_index（增量式，不全量重排）
         # 只处理 index=0 的新视频，从 max(existing)+1 开始
@@ -432,6 +409,70 @@ class PlaylistService:
             'pruned_new_videos': pruned_new_videos,
             'pruned_stale_existing_videos': pruned_stale_existing_videos,
         }
+
+    def _persist_sync_members(
+        self,
+        *,
+        playlist_id: str,
+        total_videos: int,
+        channel: str,
+        auto_add_videos: bool,
+        existing_playlist_updates: List[tuple[str, int]],
+        new_videos: List[str],
+        new_video_candidates: Dict[str, Dict[str, Any]],
+        callback: Callable[[str], None],
+    ) -> None:
+        """把经过规划和裁剪后的成员计划落库。"""
+        for vid, index in existing_playlist_updates:
+            self.db.update_video_playlist_info(vid, playlist_id, index)
+
+        if not auto_add_videos:
+            return
+
+        for vid in new_videos:
+            candidate = new_video_candidates[vid]
+            existing_video = candidate['existing_video']
+            entry = candidate['entry']
+            index = candidate['playlist_index']
+
+            if existing_video:
+                self.db.add_video_to_playlist(vid, playlist_id, index)
+                callback(f"[{index}/{total_videos}] 关联已有视频: {existing_video.title[:40]}...")
+                continue
+
+            video = Video(
+                id=vid,
+                source_type=SourceType.YOUTUBE,
+                source_url=f"https://www.youtube.com/watch?v={vid}",
+                title=entry.get('title', ''),
+                playlist_id=playlist_id,
+                playlist_index=index,
+                metadata=self._build_entry_metadata(entry, channel),
+            )
+            self.db.add_video(video)
+            self.db.add_video_to_playlist(vid, playlist_id, index)
+            callback(f"[{index}/{total_videos}] 新增: {video.title[:50]}...")
+
+    def _apply_fetch_results(
+        self,
+        *,
+        playlist_id: str,
+        pruned_stale_existing_videos: Set[str],
+        fetch_results: List[tuple[str, VideoInfoResult]],
+        callback: Callable[[str], None],
+    ) -> None:
+        """应用 fetch 结果：清理 stale、回写成功结果、处理失败回退。"""
+        for vid in pruned_stale_existing_videos:
+            self._remove_stale_unavailable_video(playlist_id, vid, callback)
+
+        for vid, result in fetch_results:
+            if result.ok and result.upload_date:
+                self._apply_video_info_to_db(vid, result.info)
+                self._submit_translate_task(vid, result.info)
+
+        callback("处理无法获取日期的视频...")
+        self._process_failed_fetches(playlist_id, fetch_results, callback)
+        callback("发布日期获取完成")
 
     def _collect_fetch_results(
         self,

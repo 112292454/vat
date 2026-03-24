@@ -307,6 +307,126 @@ class TestSyncPlaylistContracts:
         assert fetch_results[1][1].status == "error"
         assert "boom" in (fetch_results[1][1].error_message or "")
 
+    def test_persist_sync_members_updates_existing_and_creates_new(self, db):
+        _setup_playlist(db, "PL_PERSIST")
+        existing_video = Video(
+            id="vid_reuse",
+            source_type=SourceType.YOUTUBE,
+            source_url="https://www.youtube.com/watch?v=vid_reuse",
+            title="Reuse",
+            metadata={},
+        )
+        db.add_video(existing_video)
+        db.add_video_to_playlist("vid_reuse", "PL_PERSIST", playlist_index=9)
+
+        service = PlaylistService(db)
+
+        service._persist_sync_members(
+            playlist_id="PL_PERSIST",
+            total_videos=3,
+            channel="Uploader",
+            auto_add_videos=True,
+            existing_playlist_updates=[("vid_reuse", 1)],
+            new_videos=["vid_new", "vid_reuse_other_playlist"],
+            new_video_candidates={
+                "vid_new": {
+                    "entry": {"id": "vid_new", "title": "New Video"},
+                    "playlist_index": 2,
+                    "existing_video": None,
+                },
+                "vid_reuse_other_playlist": {
+                    "entry": {"id": "vid_reuse_other_playlist", "title": "Existing Elsewhere"},
+                    "playlist_index": 3,
+                    "existing_video": Video(
+                        id="vid_reuse_other_playlist",
+                        source_type=SourceType.YOUTUBE,
+                        source_url="https://www.youtube.com/watch?v=vid_reuse_other_playlist",
+                        title="Existing Elsewhere",
+                        metadata={},
+                    ),
+                },
+            },
+            callback=lambda _msg: None,
+        )
+
+        assert db.get_playlist_video_info("PL_PERSIST", "vid_reuse")["playlist_index"] == 1
+        assert db.get_video("vid_new") is not None
+        assert db.get_playlist_video_info("PL_PERSIST", "vid_new")["playlist_index"] == 2
+        assert db.get_video("vid_reuse_other_playlist") is None
+        assert db.get_playlist_video_info("PL_PERSIST", "vid_reuse_other_playlist")["playlist_index"] == 3
+
+    def test_persist_sync_members_skips_new_candidates_when_auto_add_disabled(self, db):
+        _setup_playlist(db, "PL_NOADD_HELPER")
+        service = PlaylistService(db)
+
+        service._persist_sync_members(
+            playlist_id="PL_NOADD_HELPER",
+            total_videos=1,
+            channel="Uploader",
+            auto_add_videos=False,
+            existing_playlist_updates=[],
+            new_videos=["vid_skip"],
+            new_video_candidates={
+                "vid_skip": {
+                    "entry": {"id": "vid_skip", "title": "Skip"},
+                    "playlist_index": 1,
+                    "existing_video": None,
+                },
+            },
+            callback=lambda _msg: None,
+        )
+
+        assert db.get_video("vid_skip") is None
+        assert db.get_playlist_video_info("PL_NOADD_HELPER", "vid_skip") is None
+
+    def test_apply_fetch_results_runs_cleanup_success_updates_and_failure_processing(self, db, monkeypatch):
+        service = PlaylistService(db)
+        removed = []
+        applied = []
+        translated = []
+        failed_batches = []
+        messages = []
+
+        monkeypatch.setattr(
+            service,
+            "_remove_stale_unavailable_video",
+            lambda playlist_id, vid, callback: removed.append((playlist_id, vid)),
+        )
+        monkeypatch.setattr(
+            service,
+            "_apply_video_info_to_db",
+            lambda vid, info: applied.append((vid, info)),
+        )
+        monkeypatch.setattr(
+            service,
+            "_submit_translate_task",
+            lambda vid, info, force=False: translated.append((vid, info, force)),
+        )
+        monkeypatch.setattr(
+            service,
+            "_process_failed_fetches",
+            lambda playlist_id, fetch_results, callback: failed_batches.append((playlist_id, fetch_results)),
+        )
+
+        service._apply_fetch_results(
+            playlist_id="PL_APPLY",
+            pruned_stale_existing_videos={"vid_stale"},
+            fetch_results=[
+                ("vid_ok", VideoInfoResult(status="ok", info={"upload_date": "20250101"})),
+                ("vid_error", VideoInfoResult(status="error", error_message="boom")),
+            ],
+            callback=messages.append,
+        )
+
+        assert removed == [("PL_APPLY", "vid_stale")]
+        assert applied == [("vid_ok", {"upload_date": "20250101"})]
+        assert translated == [("vid_ok", {"upload_date": "20250101"}, False)]
+        assert failed_batches == [("PL_APPLY", [
+            ("vid_ok", VideoInfoResult(status="ok", info={"upload_date": "20250101"})),
+            ("vid_error", VideoInfoResult(status="error", error_message="boom")),
+        ])]
+        assert messages == ["处理无法获取日期的视频...", "发布日期获取完成"]
+
     def test_sync_playlist_raises_when_playlist_info_unavailable(self, db):
         service = PlaylistService(db)
         service._downloader = type(

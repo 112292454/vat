@@ -203,6 +203,125 @@ class TestFFmpegWrapperHardEmbedPlanning:
         assert result is True
         assert planned == ["cuda:5"]
 
+    def test_prepare_hard_embed_preflight_returns_false_when_video_missing(self, monkeypatch, tmp_path):
+        monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/ffmpeg")
+        wrapper = FFmpegWrapper()
+        missing_video = tmp_path / "missing.mp4"
+        sub = tmp_path / "sub.srt"
+        out = tmp_path / "out.mp4"
+        sub.write_text("dummy", encoding="utf-8")
+
+        should_not_run = []
+        monkeypatch.setattr("vat.embedder.ffmpeg_wrapper._nvenc_manager.init", lambda max_per_gpu=5: should_not_run.append(max_per_gpu))
+
+        result = wrapper._prepare_hard_embed_preflight(
+            video_path=missing_video,
+            subtitle_path=sub,
+            output_path=out,
+            gpu_device="auto",
+            max_nvenc_sessions=5,
+        )
+
+        assert result is False
+        assert should_not_run == []
+
+    def test_prepare_hard_embed_preflight_initializes_nvenc_and_prepares_output_dir(self, monkeypatch, tmp_path):
+        monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/ffmpeg")
+        wrapper = FFmpegWrapper()
+        video = tmp_path / "video.mp4"
+        sub = tmp_path / "sub.srt"
+        out = tmp_path / "nested" / "out.mp4"
+        video.write_bytes(b"00")
+        sub.write_text("dummy", encoding="utf-8")
+        init_calls = []
+
+        monkeypatch.setattr("vat.embedder.ffmpeg_wrapper._nvenc_manager.init", lambda max_per_gpu=5: init_calls.append(max_per_gpu))
+
+        result = wrapper._prepare_hard_embed_preflight(
+            video_path=video,
+            subtitle_path=sub,
+            output_path=out,
+            gpu_device="auto",
+            max_nvenc_sessions=7,
+        )
+
+        assert result is True
+        assert init_calls == [7]
+        assert out.parent.exists() is True
+
+    def test_prepare_hard_embed_preflight_raises_on_cpu_gpu_device(self, monkeypatch, tmp_path):
+        monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/ffmpeg")
+        wrapper = FFmpegWrapper()
+        video = tmp_path / "video.mp4"
+        sub = tmp_path / "sub.srt"
+        out = tmp_path / "nested" / "out.mp4"
+        video.write_bytes(b"00")
+        sub.write_text("dummy", encoding="utf-8")
+        init_calls = []
+
+        monkeypatch.setattr("vat.embedder.ffmpeg_wrapper._nvenc_manager.init", lambda max_per_gpu=5: init_calls.append(max_per_gpu))
+
+        with pytest.raises(RuntimeError, match="禁止 CPU 回退"):
+            wrapper._prepare_hard_embed_preflight(
+                video_path=video,
+                subtitle_path=sub,
+                output_path=out,
+                gpu_device="cpu",
+                max_nvenc_sessions=5,
+            )
+
+        assert init_calls == [5]
+        assert out.parent.exists() is False
+
+    def test_embed_subtitle_hard_delegates_preflight_stage(self, monkeypatch, tmp_path):
+        monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/ffmpeg")
+        wrapper = FFmpegWrapper()
+        video = tmp_path / "video.mp4"
+        sub = tmp_path / "sub.srt"
+        out = tmp_path / "out.mp4"
+        video.write_bytes(b"00")
+        sub.write_text("dummy", encoding="utf-8")
+        delegated = []
+
+        monkeypatch.setattr(
+            "vat.embedder.ffmpeg_wrapper._nvenc_manager.init",
+            lambda max_per_gpu=5: pytest.fail("unexpected inline nvenc init"),
+        )
+        monkeypatch.setattr(
+            Path,
+            "mkdir",
+            lambda self, parents=False, exist_ok=False: pytest.fail("unexpected inline output dir setup"),
+        )
+        monkeypatch.setattr(
+            wrapper,
+            "_prepare_hard_embed_preflight",
+            lambda **kwargs: delegated.append(kwargs) or True,
+            raising=False,
+        )
+        monkeypatch.setattr(wrapper, "_resolve_hard_embed_gpu_device", lambda gpu_device: 0, raising=False)
+        monkeypatch.setattr(wrapper, "_prepare_hard_embed_nvenc_session", lambda **kwargs: None, raising=False)
+        monkeypatch.setattr(wrapper, "_probe_hard_embed_original_bitrate", lambda video_path: 1000, raising=False)
+        monkeypatch.setattr(wrapper, "_build_hard_embed_ffmpeg_command", lambda **kwargs: ["ffmpeg", "planned"], raising=False)
+        monkeypatch.setattr(wrapper, "_run_ffmpeg_embed_process", lambda **kwargs: True, raising=False)
+        monkeypatch.setattr(wrapper, "_finalize_hard_embed_resources", lambda **kwargs: None, raising=False)
+
+        result = wrapper.embed_subtitle_hard(
+            video,
+            sub,
+            out,
+            gpu_device="auto",
+            max_nvenc_sessions=9,
+        )
+
+        assert result is True
+        assert delegated == [{
+            "video_path": video,
+            "subtitle_path": sub,
+            "output_path": out,
+            "gpu_device": "auto",
+            "max_nvenc_sessions": 9,
+        }]
+
     def test_build_hard_embed_subtitle_filter_uses_ass_and_fontsdir_with_escaped_paths(self, monkeypatch):
         monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/ffmpeg")
         wrapper = FFmpegWrapper()

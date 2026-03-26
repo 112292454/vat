@@ -379,24 +379,15 @@ class FFmpegWrapper:
         Returns:
             是否成功
         """
-        if not video_path.exists():
-            logger.error(f"输入视频文件不存在: {video_path}")
+        if not self._prepare_hard_embed_preflight(
+            video_path=video_path,
+            subtitle_path=subtitle_path,
+            output_path=output_path,
+            gpu_device=gpu_device,
+            max_nvenc_sessions=max_nvenc_sessions,
+        ):
             return False
-        if not subtitle_path.exists():
-            logger.error(f"字幕文件不存在: {subtitle_path}")
-            return False
-        
-        # 初始化 NVENC 会话管理器（幂等）
-        _nvenc_manager.init(max_per_gpu=max_nvenc_sessions)
-        
-        # GPU 设备校验（仅校验格式，不占用 session）
-        if gpu_device not in ("auto",) and not gpu_device.startswith("cuda:"):
-            error_msg = "Embed 阶段需要 GPU，按 GPU 原则禁止 CPU 回退"
-            logger.error(error_msg)
-            raise RuntimeError(error_msg)
-        
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        
+
         subtitle_ext = subtitle_path.suffix.lower()
         processed_subtitle = subtitle_path
         temp_files_to_cleanup = []  # 记录需要清理的临时文件
@@ -458,6 +449,33 @@ class FFmpegWrapper:
                 gpu_id=gpu_id,
                 temp_files_to_cleanup=temp_files_to_cleanup,
             )
+
+    def _prepare_hard_embed_preflight(
+        self,
+        *,
+        video_path: Path,
+        subtitle_path: Path,
+        output_path: Path,
+        gpu_device: str,
+        max_nvenc_sessions: int,
+    ) -> bool:
+        """执行硬字幕合成前的输入校验与基础环境准备。"""
+        if not video_path.exists():
+            logger.error(f"输入视频文件不存在: {video_path}")
+            return False
+        if not subtitle_path.exists():
+            logger.error(f"字幕文件不存在: {subtitle_path}")
+            return False
+
+        _nvenc_manager.init(max_per_gpu=max_nvenc_sessions)
+
+        if gpu_device not in ("auto",) and not gpu_device.startswith("cuda:"):
+            error_msg = "Embed 阶段需要 GPU，按 GPU 原则禁止 CPU 回退"
+            logger.error(error_msg)
+            raise RuntimeError(error_msg)
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        return True
 
     def _finalize_hard_embed_resources(
         self,

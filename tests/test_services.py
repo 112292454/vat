@@ -427,6 +427,43 @@ class TestSyncPlaylistContracts:
         ])]
         assert messages == ["处理无法获取日期的视频...", "发布日期获取完成"]
 
+    def test_finalize_sync_playlist_updates_snapshot_and_returns_result(self, db, monkeypatch):
+        _setup_playlist(db, "PL_FINALIZE")
+        _add_pl_video(db, "vid_old", playlist_id="PL_FINALIZE", index=3)
+        _add_pl_video(db, "vid_new", playlist_id="PL_FINALIZE", index=1)
+
+        service = PlaylistService(db)
+        assigned = []
+        messages = []
+        monkeypatch.setattr(
+            service,
+            "_assign_indices_to_new_videos",
+            lambda playlist_id, callback: assigned.append((playlist_id, callback)),
+        )
+
+        result = service._finalize_sync_playlist(
+            playlist_id="PL_FINALIZE",
+            playlist_title="Finalize Playlist",
+            total_videos=3,
+            new_videos=["vid_new"],
+            existing_videos=["vid_old"],
+            callback=messages.append,
+        )
+
+        refreshed = db.get_playlist("PL_FINALIZE")
+        assert assigned and assigned[0][0] == "PL_FINALIZE"
+        assert refreshed.title == "Finalize Playlist"
+        assert refreshed.video_count == 2
+        assert refreshed.last_synced_at is not None
+        assert messages == [
+            "分配时间顺序索引...",
+            "同步完成: 新增 1 个, 已存在 1 个",
+        ]
+        assert result.playlist_id == "PL_FINALIZE"
+        assert result.new_videos == ["vid_new"]
+        assert result.existing_videos == ["vid_old"]
+        assert result.total_videos == 3
+
     def test_sync_playlist_raises_when_playlist_info_unavailable(self, db):
         service = PlaylistService(db)
         service._downloader = type(

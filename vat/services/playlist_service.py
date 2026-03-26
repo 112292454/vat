@@ -261,29 +261,13 @@ class PlaylistService:
                 callback=callback,
             )
         
-        # 为新视频分配 upload_order_index（增量式，不全量重排）
-        # 只处理 index=0 的新视频，从 max(existing)+1 开始
-        callback("分配时间顺序索引...")
-        self._assign_indices_to_new_videos(playlist_id, callback)
-
-        # 更新 Playlist 信息
-        # video_count 使用关联表实际数量，而非 yt-dlp 本次返回的 entries 数量
-        # （增量同步时 entries 只包含本次获取到的视频，不代表全量）
-        actual_video_count = len(self.db.get_playlist_video_ids(playlist_id))
-        self.db.update_playlist(
-            playlist_id,
-            title=playlist_title,
-            video_count=actual_video_count,
-            last_synced_at=datetime.now()
-        )
-
-        callback(f"同步完成: 新增 {len(new_videos)} 个, 已存在 {len(existing_videos)} 个")
-        
-        return SyncResult(
+        return self._finalize_sync_playlist(
             playlist_id=playlist_id,
+            playlist_title=playlist_title,
+            total_videos=total_videos,
             new_videos=new_videos,
             existing_videos=existing_videos,
-            total_videos=total_videos
+            callback=callback,
         )
 
     def _plan_sync_candidates(
@@ -473,6 +457,36 @@ class PlaylistService:
         callback("处理无法获取日期的视频...")
         self._process_failed_fetches(playlist_id, fetch_results, callback)
         callback("发布日期获取完成")
+
+    def _finalize_sync_playlist(
+        self,
+        *,
+        playlist_id: str,
+        playlist_title: str,
+        total_videos: int,
+        new_videos: List[str],
+        existing_videos: List[str],
+        callback: Callable[[str], None],
+    ) -> SyncResult:
+        """完成 sync_playlist 尾部收尾：分配索引、刷新快照并返回结果。"""
+        callback("分配时间顺序索引...")
+        self._assign_indices_to_new_videos(playlist_id, callback)
+
+        actual_video_count = len(self.db.get_playlist_video_ids(playlist_id))
+        self.db.update_playlist(
+            playlist_id,
+            title=playlist_title,
+            video_count=actual_video_count,
+            last_synced_at=datetime.now(),
+        )
+
+        callback(f"同步完成: 新增 {len(new_videos)} 个, 已存在 {len(existing_videos)} 个")
+        return SyncResult(
+            playlist_id=playlist_id,
+            new_videos=new_videos,
+            existing_videos=existing_videos,
+            total_videos=total_videos,
+        )
 
     def _collect_fetch_results(
         self,

@@ -322,6 +322,154 @@ class TestFFmpegWrapperHardEmbedPlanning:
             "max_nvenc_sessions": 9,
         }]
 
+    def test_plan_hard_embed_subtitle_inputs_uses_original_subtitle_for_non_ass(self, monkeypatch, tmp_path):
+        monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/ffmpeg")
+        wrapper = FFmpegWrapper()
+        sub = tmp_path / "sub.srt"
+        sub.write_text("dummy", encoding="utf-8")
+        planned = []
+
+        monkeypatch.setattr(
+            wrapper,
+            "_build_hard_embed_subtitle_filter",
+            lambda **kwargs: planned.append(kwargs) or "subtitles='planned'",
+            raising=False,
+        )
+        monkeypatch.setattr(
+            wrapper,
+            "_prepare_hard_embed_ass_subtitle",
+            lambda **kwargs: pytest.fail("unexpected ass preprocess"),
+            raising=False,
+        )
+
+        subtitle_ext, processed_subtitle, temp_files_to_cleanup, vf = wrapper._plan_hard_embed_subtitle_inputs(
+            video_path=tmp_path / "video.mp4",
+            subtitle_path=sub,
+            subtitle_style=None,
+            style_dir="/styles",
+            fonts_dir="/fonts",
+            reference_height=720,
+        )
+
+        assert subtitle_ext == ".srt"
+        assert processed_subtitle == sub
+        assert temp_files_to_cleanup == []
+        assert vf == "subtitles='planned'"
+        assert planned == [{
+            "subtitle_ext": ".srt",
+            "processed_subtitle": sub,
+            "fonts_dir": "/fonts",
+        }]
+
+    def test_plan_hard_embed_subtitle_inputs_delegates_ass_preprocess_before_filter(self, monkeypatch, tmp_path):
+        monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/ffmpeg")
+        wrapper = FFmpegWrapper()
+        video = tmp_path / "video.mp4"
+        sub = tmp_path / "sub.ass"
+        processed_ass = tmp_path / "processed.ass"
+        video.write_bytes(b"00")
+        sub.write_text("dummy", encoding="utf-8")
+        prepared = []
+        planned = []
+
+        monkeypatch.setattr(
+            wrapper,
+            "_prepare_hard_embed_ass_subtitle",
+            lambda **kwargs: prepared.append(kwargs) or (processed_ass, [str(tmp_path / "temp.ass")]),
+            raising=False,
+        )
+        monkeypatch.setattr(
+            wrapper,
+            "_build_hard_embed_subtitle_filter",
+            lambda **kwargs: planned.append(kwargs) or "ass='planned'",
+            raising=False,
+        )
+
+        subtitle_ext, processed_subtitle, temp_files_to_cleanup, vf = wrapper._plan_hard_embed_subtitle_inputs(
+            video_path=video,
+            subtitle_path=sub,
+            subtitle_style="named-style",
+            style_dir="/styles",
+            fonts_dir="/fonts",
+            reference_height=900,
+        )
+
+        assert subtitle_ext == ".ass"
+        assert processed_subtitle == processed_ass
+        assert temp_files_to_cleanup == [str(tmp_path / "temp.ass")]
+        assert vf == "ass='planned'"
+        assert prepared == [{
+            "video_path": video,
+            "subtitle_path": sub,
+            "subtitle_style": "named-style",
+            "style_dir": "/styles",
+            "fonts_dir": "/fonts",
+            "reference_height": 900,
+        }]
+        assert planned == [{
+            "subtitle_ext": ".ass",
+            "processed_subtitle": processed_ass,
+            "fonts_dir": "/fonts",
+        }]
+
+    def test_embed_subtitle_hard_delegates_subtitle_planning_handoff(self, monkeypatch, tmp_path):
+        monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/ffmpeg")
+        wrapper = FFmpegWrapper()
+        video = tmp_path / "video.mp4"
+        sub = tmp_path / "sub.ass"
+        out = tmp_path / "out.mp4"
+        processed_ass = tmp_path / "processed.ass"
+        video.write_bytes(b"00")
+        sub.write_text("dummy", encoding="utf-8")
+        delegated = []
+
+        monkeypatch.setattr(wrapper, "_prepare_hard_embed_preflight", lambda **kwargs: True, raising=False)
+        monkeypatch.setattr(
+            wrapper,
+            "_prepare_hard_embed_ass_subtitle",
+            lambda **kwargs: pytest.fail("unexpected inline ass preprocess"),
+            raising=False,
+        )
+        monkeypatch.setattr(
+            wrapper,
+            "_build_hard_embed_subtitle_filter",
+            lambda **kwargs: pytest.fail("unexpected inline subtitle filter planning"),
+            raising=False,
+        )
+        monkeypatch.setattr(
+            wrapper,
+            "_plan_hard_embed_subtitle_inputs",
+            lambda **kwargs: delegated.append(kwargs) or (".ass", processed_ass, [str(tmp_path / "temp.ass")], "ass='planned'"),
+            raising=False,
+        )
+        monkeypatch.setattr(wrapper, "_resolve_hard_embed_gpu_device", lambda gpu_device: 0, raising=False)
+        monkeypatch.setattr(wrapper, "_prepare_hard_embed_nvenc_session", lambda **kwargs: None, raising=False)
+        monkeypatch.setattr(wrapper, "_probe_hard_embed_original_bitrate", lambda video_path: 1000, raising=False)
+        monkeypatch.setattr(wrapper, "_build_hard_embed_ffmpeg_command", lambda **kwargs: ["ffmpeg", kwargs["vf"]], raising=False)
+        monkeypatch.setattr(wrapper, "_run_ffmpeg_embed_process", lambda **kwargs: True, raising=False)
+        monkeypatch.setattr(wrapper, "_finalize_hard_embed_resources", lambda **kwargs: None, raising=False)
+
+        result = wrapper.embed_subtitle_hard(
+            video,
+            sub,
+            out,
+            gpu_device="auto",
+            subtitle_style="named-style",
+            style_dir="/styles",
+            fonts_dir="/fonts",
+            reference_height=900,
+        )
+
+        assert result is True
+        assert delegated == [{
+            "video_path": video,
+            "subtitle_path": sub,
+            "subtitle_style": "named-style",
+            "style_dir": "/styles",
+            "fonts_dir": "/fonts",
+            "reference_height": 900,
+        }]
+
     def test_build_hard_embed_subtitle_filter_uses_ass_and_fontsdir_with_escaped_paths(self, monkeypatch):
         monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/ffmpeg")
         wrapper = FFmpegWrapper()

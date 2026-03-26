@@ -388,27 +388,13 @@ class FFmpegWrapper:
         ):
             return False
 
-        subtitle_ext = subtitle_path.suffix.lower()
-        processed_subtitle = subtitle_path
-        temp_files_to_cleanup = []  # 记录需要清理的临时文件
-        
-        # ========== 阶段 1: ASS 字幕预处理（CPU 密集，不占用 GPU session） ==========
-        # 在获取 NVENC 会话之前完成所有 CPU 预处理工作，
-        # 避免在字体渲染/自动换行期间空耗 GPU 会话槽位。
-        # ============================================================================
-        if subtitle_ext == '.ass' and subtitle_style:
-            processed_subtitle, temp_files_to_cleanup = self._prepare_hard_embed_ass_subtitle(
-                video_path=video_path,
-                subtitle_path=subtitle_path,
-                subtitle_style=subtitle_style,
-                style_dir=style_dir,
-                fonts_dir=fonts_dir,
-                reference_height=reference_height,
-            )
-        vf = self._build_hard_embed_subtitle_filter(
-            subtitle_ext=subtitle_ext,
-            processed_subtitle=processed_subtitle,
+        subtitle_ext, processed_subtitle, temp_files_to_cleanup, vf = self._plan_hard_embed_subtitle_inputs(
+            video_path=video_path,
+            subtitle_path=subtitle_path,
+            subtitle_style=subtitle_style,
+            style_dir=style_dir,
             fonts_dir=fonts_dir,
+            reference_height=reference_height,
         )
 
         # ========== 阶段 2: 获取 NVENC 会话 + 构建 ffmpeg 命令 ==========
@@ -502,6 +488,38 @@ class FFmpegWrapper:
             return int(gpu_device.split(":")[1])
         except (IndexError, ValueError):
             raise ValueError(f"无效的 GPU 设备格式: {gpu_device}")
+
+    def _plan_hard_embed_subtitle_inputs(
+        self,
+        *,
+        video_path: Path,
+        subtitle_path: Path,
+        subtitle_style: Optional[str],
+        style_dir: Optional[str],
+        fonts_dir: Optional[str],
+        reference_height: int,
+    ) -> tuple[str, Path, list[str], str]:
+        """规划硬字幕合成使用的字幕输入与滤镜。"""
+        subtitle_ext = subtitle_path.suffix.lower()
+        processed_subtitle = subtitle_path
+        temp_files_to_cleanup: list[str] = []
+
+        if subtitle_ext == '.ass' and subtitle_style:
+            processed_subtitle, temp_files_to_cleanup = self._prepare_hard_embed_ass_subtitle(
+                video_path=video_path,
+                subtitle_path=subtitle_path,
+                subtitle_style=subtitle_style,
+                style_dir=style_dir,
+                fonts_dir=fonts_dir,
+                reference_height=reference_height,
+            )
+
+        vf = self._build_hard_embed_subtitle_filter(
+            subtitle_ext=subtitle_ext,
+            processed_subtitle=processed_subtitle,
+            fonts_dir=fonts_dir,
+        )
+        return subtitle_ext, processed_subtitle, temp_files_to_cleanup, vf
 
     def _prepare_hard_embed_ass_subtitle(
         self,

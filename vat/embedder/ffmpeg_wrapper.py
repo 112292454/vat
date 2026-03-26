@@ -1045,6 +1045,60 @@ class FFmpegWrapper:
         af = ",".join(af_parts) if af_parts else "anull"
         return vf, af
 
+    def _plan_mask_violation_execution(
+        self,
+        *,
+        video_path: Path,
+        output_path: Path,
+        vf: str,
+        af: str,
+        video_info: Dict[str, Any],
+        gpu_device: str,
+    ) -> Optional[tuple[int, List[str]]]:
+        """规划违规遮罩执行阶段所需 GPU 与 ffmpeg 命令。"""
+        _nvenc_manager.init()
+
+        if gpu_device == "auto":
+            gpu_id = _nvenc_manager.select_gpu()
+        else:
+            try:
+                gpu_id = int(gpu_device.split(":")[1])
+            except (IndexError, ValueError):
+                gpu_id = 0
+
+        if not _nvenc_manager.acquire(gpu_id, timeout=300):
+            logger.error(f"NVENC 会话获取超时: GPU {gpu_id}")
+            return None
+
+        original_bitrate = video_info.get('bit_rate', 0)
+        if original_bitrate > 0:
+            codec_params = [
+                '-rc', 'vbr',
+                '-cq', '23',
+                '-b:v', str(int(original_bitrate * 1.1)),
+                '-maxrate', str(int(original_bitrate * 1.5)),
+            ]
+        else:
+            codec_params = ['-rc', 'constqp', '-qp', '23']
+
+        cmd = [
+            'ffmpeg',
+            '-hwaccel', 'cuda',
+            '-hwaccel_device', str(gpu_id),
+            '-i', str(video_path),
+            '-vf', vf,
+            '-af', af,
+            '-c:v', 'hevc_nvenc',
+            '-gpu', str(gpu_id),
+            *codec_params,
+            '-preset', 'p4',
+            '-c:a', 'aac',
+            '-movflags', '+faststart',
+            '-y',
+            str(output_path)
+        ]
+        return gpu_id, cmd
+
     def mask_violation_segments(
         self,
         video_path: Path,
@@ -1093,50 +1147,19 @@ class FFmpegWrapper:
             mask_text=mask_text,
         )
 
-        # GPU 编码选择
-        _nvenc_manager.init()
-        
-        if gpu_device == "auto":
-            gpu_id = _nvenc_manager.select_gpu()
-        else:
-            try:
-                gpu_id = int(gpu_device.split(":")[1])
-            except (IndexError, ValueError):
-                gpu_id = 0
-        
-        if not _nvenc_manager.acquire(gpu_id, timeout=300):
-            logger.error(f"NVENC 会话获取超时: GPU {gpu_id}")
+        planned_execution = self._plan_mask_violation_execution(
+            video_path=video_path,
+            output_path=output_path,
+            vf=vf,
+            af=af,
+            video_info=video_info,
+            gpu_device=gpu_device,
+        )
+        if planned_execution is None:
             return False
-        
-        # 获取原视频码率，控制输出质量
-        original_bitrate = video_info.get('bit_rate', 0)
-        if original_bitrate > 0:
-            codec_params = [
-                '-rc', 'vbr',
-                '-cq', '23',
-                '-b:v', str(int(original_bitrate * 1.1)),
-                '-maxrate', str(int(original_bitrate * 1.5)),
-            ]
-        else:
-            codec_params = ['-rc', 'constqp', '-qp', '23']
-        
-        cmd = [
-            'ffmpeg',
-            '-hwaccel', 'cuda',
-            '-hwaccel_device', str(gpu_id),
-            '-i', str(video_path),
-            '-vf', vf,
-            '-af', af,
-            '-c:v', 'hevc_nvenc',
-            '-gpu', str(gpu_id),
-            *codec_params,
-            '-preset', 'p4',
-            '-c:a', 'aac',
-            '-movflags', '+faststart',
-            '-y',
-            str(output_path)
-        ]
-        
+
+        gpu_id, cmd = planned_execution
+
         try:
             logger.info(f"开始遮罩处理 (GPU {gpu_id})...")
             result = subprocess.run(
@@ -1145,15 +1168,15 @@ class FFmpegWrapper:
                 text=True,
                 timeout=3600,  # 1小时超时
             )
-            
+
             if result.returncode != 0:
                 logger.error(f"ffmpeg 遮罩处理失败: {result.stderr[-500:]}")
                 return False
-            
+
             if not output_path.exists():
                 logger.error("遮罩处理完成但未生成文件")
                 return False
-            
+
             # 检查输出文件大小合理性
             in_size = video_path.stat().st_size
             out_size = output_path.stat().st_size
@@ -1163,7 +1186,7 @@ class FFmpegWrapper:
                 f"({out_size / 1024 / 1024:.1f}MB, 相对原文件 {ratio:.1%})"
             )
             return True
-            
+
         except subprocess.TimeoutExpired:
             logger.error("ffmpeg 遮罩处理超时 (>1小时)")
             return False
@@ -1172,7 +1195,7 @@ class FFmpegWrapper:
             return False
         finally:
             _nvenc_manager.release(gpu_id)
-    
+
     @staticmethod
     def _merge_ranges(
         ranges: List[tuple], margin: float, max_duration: float

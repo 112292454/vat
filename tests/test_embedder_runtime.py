@@ -1776,6 +1776,273 @@ class TestFFmpegWrapperMaskViolationPlanning:
             "volume=enable='between(t,20.0,25.0)':volume=0"
         )
 
+    def test_plan_mask_violation_execution_selects_gpu_acquires_session_and_builds_vbr_command(self, monkeypatch, tmp_path):
+        monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/ffmpeg")
+        wrapper = FFmpegWrapper()
+        video = tmp_path / "video.mp4"
+        out = tmp_path / "masked.mp4"
+        video.write_bytes(b"00")
+        planned = []
+
+        monkeypatch.setattr(
+            "vat.embedder.ffmpeg_wrapper._nvenc_manager.init",
+            lambda max_per_gpu=5: planned.append(("init", max_per_gpu)),
+        )
+        monkeypatch.setattr(
+            "vat.embedder.ffmpeg_wrapper._nvenc_manager.select_gpu",
+            lambda: planned.append(("select", None)) or 3,
+        )
+        monkeypatch.setattr(
+            "vat.embedder.ffmpeg_wrapper._nvenc_manager.acquire",
+            lambda gpu_id, timeout=300: planned.append(("acquire", {"gpu_id": gpu_id, "timeout": timeout})) or True,
+        )
+
+        gpu_id, cmd = wrapper._plan_mask_violation_execution(
+            video_path=video,
+            output_path=out,
+            vf="vf=planned",
+            af="af=planned",
+            video_info={"bit_rate": 2000},
+            gpu_device="auto",
+        )
+
+        assert gpu_id == 3
+        assert cmd == [
+            "ffmpeg",
+            "-hwaccel", "cuda",
+            "-hwaccel_device", "3",
+            "-i", str(video),
+            "-vf", "vf=planned",
+            "-af", "af=planned",
+            "-c:v", "hevc_nvenc",
+            "-gpu", "3",
+            "-rc", "vbr",
+            "-cq", "23",
+            "-b:v", "2200",
+            "-maxrate", "3000",
+            "-preset", "p4",
+            "-c:a", "aac",
+            "-movflags", "+faststart",
+            "-y",
+            str(out),
+        ]
+        assert planned == [
+            ("init", 5),
+            ("select", None),
+            ("acquire", {"gpu_id": 3, "timeout": 300}),
+        ]
+
+    def test_plan_mask_violation_execution_falls_back_to_gpu_zero_and_constqp_when_bitrate_missing(self, monkeypatch, tmp_path):
+        monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/ffmpeg")
+        wrapper = FFmpegWrapper()
+        video = tmp_path / "video.mp4"
+        out = tmp_path / "masked.mp4"
+        video.write_bytes(b"00")
+        acquired = []
+
+        monkeypatch.setattr("vat.embedder.ffmpeg_wrapper._nvenc_manager.init", lambda max_per_gpu=5: None)
+        monkeypatch.setattr(
+            "vat.embedder.ffmpeg_wrapper._nvenc_manager.select_gpu",
+            lambda: pytest.fail("unexpected auto gpu selection"),
+        )
+        monkeypatch.setattr(
+            "vat.embedder.ffmpeg_wrapper._nvenc_manager.acquire",
+            lambda gpu_id, timeout=300: acquired.append((gpu_id, timeout)) or True,
+        )
+
+        gpu_id, cmd = wrapper._plan_mask_violation_execution(
+            video_path=video,
+            output_path=out,
+            vf="vf=planned",
+            af="af=planned",
+            video_info={"bit_rate": 0},
+            gpu_device="cuda:not-a-number",
+        )
+
+        assert gpu_id == 0
+        assert acquired == [(0, 300)]
+        assert cmd == [
+            "ffmpeg",
+            "-hwaccel", "cuda",
+            "-hwaccel_device", "0",
+            "-i", str(video),
+            "-vf", "vf=planned",
+            "-af", "af=planned",
+            "-c:v", "hevc_nvenc",
+            "-gpu", "0",
+            "-rc", "constqp",
+            "-qp", "23",
+            "-preset", "p4",
+            "-c:a", "aac",
+            "-movflags", "+faststart",
+            "-y",
+            str(out),
+        ]
+
+    def test_plan_mask_violation_execution_returns_none_when_nvenc_acquire_times_out(self, monkeypatch, tmp_path):
+        monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/ffmpeg")
+        wrapper = FFmpegWrapper()
+        video = tmp_path / "video.mp4"
+        out = tmp_path / "masked.mp4"
+        video.write_bytes(b"00")
+
+        monkeypatch.setattr("vat.embedder.ffmpeg_wrapper._nvenc_manager.init", lambda max_per_gpu=5: None)
+        monkeypatch.setattr("vat.embedder.ffmpeg_wrapper._nvenc_manager.select_gpu", lambda: 2)
+        monkeypatch.setattr("vat.embedder.ffmpeg_wrapper._nvenc_manager.acquire", lambda gpu_id, timeout=300: False)
+
+        planned = wrapper._plan_mask_violation_execution(
+            video_path=video,
+            output_path=out,
+            vf="vf=planned",
+            af="af=planned",
+            video_info={"bit_rate": 2468},
+            gpu_device="auto",
+        )
+
+        assert planned is None
+
+    def test_plan_mask_violation_execution_parses_explicit_gpu_device_into_command(self, monkeypatch, tmp_path):
+        monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/ffmpeg")
+        wrapper = FFmpegWrapper()
+        video = tmp_path / "video.mp4"
+        out = tmp_path / "masked.mp4"
+        video.write_bytes(b"00")
+        acquired = []
+
+        monkeypatch.setattr("vat.embedder.ffmpeg_wrapper._nvenc_manager.init", lambda max_per_gpu=5: None)
+        monkeypatch.setattr(
+            "vat.embedder.ffmpeg_wrapper._nvenc_manager.select_gpu",
+            lambda: pytest.fail("unexpected auto gpu selection"),
+        )
+        monkeypatch.setattr(
+            "vat.embedder.ffmpeg_wrapper._nvenc_manager.acquire",
+            lambda gpu_id, timeout=300: acquired.append((gpu_id, timeout)) or True,
+        )
+
+        gpu_id, cmd = wrapper._plan_mask_violation_execution(
+            video_path=video,
+            output_path=out,
+            vf="vf=planned",
+            af="af=planned",
+            video_info={"bit_rate": 2468},
+            gpu_device="cuda:4",
+        )
+
+        assert gpu_id == 4
+        assert acquired == [(4, 300)]
+        assert cmd[cmd.index("-hwaccel_device") + 1] == "4"
+        assert cmd[cmd.index("-gpu") + 1] == "4"
+
+    def test_mask_violation_segments_returns_false_when_execution_planning_fails(self, monkeypatch, tmp_path):
+        monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/ffmpeg")
+        wrapper = FFmpegWrapper()
+        video = tmp_path / "video.mp4"
+        out = tmp_path / "masked.mp4"
+        video.write_bytes(b"00")
+        released = []
+
+        monkeypatch.setattr(
+            wrapper,
+            "_prepare_mask_violation_context",
+            lambda **kwargs: ({"duration": 120.0, "video": {"width": 1280, "height": 720}, "bit_rate": 2468}, 1280, 720, [(8.5, 13.5)]),
+            raising=False,
+        )
+        monkeypatch.setattr(
+            wrapper,
+            "_plan_mask_violation_filters",
+            lambda **kwargs: ("vf=planned", "af=planned"),
+            raising=False,
+        )
+        monkeypatch.setattr(
+            wrapper,
+            "_plan_mask_violation_execution",
+            lambda **kwargs: None,
+            raising=False,
+        )
+        monkeypatch.setattr("subprocess.run", lambda *args, **kwargs: pytest.fail("unexpected ffmpeg run"))
+        monkeypatch.setattr("vat.embedder.ffmpeg_wrapper._nvenc_manager.release", lambda gpu_id: released.append(gpu_id))
+
+        result = wrapper.mask_violation_segments(
+            video_path=video,
+            output_path=out,
+            violation_ranges=[(10.0, 12.0)],
+            mask_text="此处内容因平台合规要求已被遮罩",
+            gpu_device="auto",
+            margin_sec=1.5,
+        )
+
+        assert result is False
+        assert released == []
+
+    def test_mask_violation_segments_delegates_execution_planning_stage(self, monkeypatch, tmp_path):
+        monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/ffmpeg")
+        wrapper = FFmpegWrapper()
+        video = tmp_path / "video.mp4"
+        out = tmp_path / "masked.mp4"
+        video.write_bytes(b"00")
+        delegated = []
+        released = []
+        video_info = {"duration": 120.0, "video": {"width": 1280, "height": 720}, "bit_rate": 2468}
+
+        monkeypatch.setattr(
+            wrapper,
+            "_prepare_mask_violation_context",
+            lambda **kwargs: (video_info, 1280, 720, [(8.5, 13.5)]),
+            raising=False,
+        )
+        monkeypatch.setattr(
+            wrapper,
+            "_plan_mask_violation_filters",
+            lambda **kwargs: ("vf=planned", "af=planned"),
+            raising=False,
+        )
+        monkeypatch.setattr(
+            "vat.embedder.ffmpeg_wrapper._nvenc_manager.init",
+            lambda max_per_gpu=5: pytest.fail("unexpected inline nvenc init"),
+        )
+        monkeypatch.setattr(
+            "vat.embedder.ffmpeg_wrapper._nvenc_manager.select_gpu",
+            lambda: pytest.fail("unexpected inline gpu selection"),
+        )
+        monkeypatch.setattr(
+            "vat.embedder.ffmpeg_wrapper._nvenc_manager.acquire",
+            lambda gpu_id, timeout=300: pytest.fail("unexpected inline nvenc acquire"),
+        )
+        monkeypatch.setattr(
+            wrapper,
+            "_plan_mask_violation_execution",
+            lambda **kwargs: delegated.append(kwargs) or (4, ["ffmpeg", "planned"]),
+            raising=False,
+        )
+        monkeypatch.setattr("vat.embedder.ffmpeg_wrapper._nvenc_manager.release", lambda gpu_id: released.append(gpu_id))
+
+        def fake_run(cmd, capture_output, text, timeout):
+            assert cmd == ["ffmpeg", "planned"]
+            out.write_bytes(b"ok")
+            return SimpleNamespace(returncode=0, stderr="")
+
+        monkeypatch.setattr("subprocess.run", fake_run)
+
+        result = wrapper.mask_violation_segments(
+            video_path=video,
+            output_path=out,
+            violation_ranges=[(10.0, 12.0)],
+            mask_text="此处内容因平台合规要求已被遮罩",
+            gpu_device="cuda:4",
+            margin_sec=1.5,
+        )
+
+        assert result is True
+        assert delegated == [{
+            "video_path": video,
+            "output_path": out,
+            "vf": "vf=planned",
+            "af": "af=planned",
+            "video_info": video_info,
+            "gpu_device": "cuda:4",
+        }]
+        assert released == [4]
+
     def test_mask_violation_segments_delegates_filter_planning_stage(self, monkeypatch, tmp_path):
         monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/ffmpeg")
         wrapper = FFmpegWrapper()

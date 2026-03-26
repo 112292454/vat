@@ -1130,7 +1130,7 @@ class TestFFmpegWrapperHardEmbedPlanning:
             "temp_files_to_cleanup": [str(temp_ass), str(wrapped_ass)],
         }]
 
-
+    def test_prepare_hard_embed_nvenc_session_acquires_slot_and_checks_support(self, monkeypatch):
         monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/ffmpeg")
         wrapper = FFmpegWrapper()
         acquired = []
@@ -1401,6 +1401,145 @@ class TestFFmpegWrapperHardEmbedPlanning:
 
 
 class TestFFmpegWrapperHardEmbedRuntime:
+    def test_run_hard_embed_runtime_stage_runs_ffmpeg_and_finalizes_resources(self, monkeypatch, tmp_path):
+        monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/ffmpeg")
+        wrapper = FFmpegWrapper()
+        out = tmp_path / "out.mp4"
+        temp_ass = tmp_path / "temp.ass"
+        calls = []
+
+        monkeypatch.setattr(
+            wrapper,
+            "_run_ffmpeg_embed_process",
+            lambda **kwargs: calls.append(("run", kwargs)) or True,
+            raising=False,
+        )
+        monkeypatch.setattr(
+            wrapper,
+            "_finalize_hard_embed_resources",
+            lambda **kwargs: calls.append(("finalize", kwargs)),
+            raising=False,
+        )
+
+        result = wrapper._run_hard_embed_runtime_stage(
+            gpu_id=4,
+            cmd=["ffmpeg", "planned"],
+            output_path=out,
+            progress_callback=None,
+            temp_files_to_cleanup=[str(temp_ass)],
+        )
+
+        assert result is True
+        assert calls == [
+            ("run", {
+                "cmd": ["ffmpeg", "planned"],
+                "output_path": out,
+                "progress_callback": None,
+            }),
+            ("finalize", {
+                "gpu_id": 4,
+                "temp_files_to_cleanup": [str(temp_ass)],
+            }),
+        ]
+
+    def test_run_hard_embed_runtime_stage_finalizes_resources_when_ffmpeg_process_raises(self, monkeypatch, tmp_path):
+        monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/ffmpeg")
+        wrapper = FFmpegWrapper()
+        out = tmp_path / "out.mp4"
+        temp_ass = tmp_path / "temp.ass"
+        finalized = []
+
+        monkeypatch.setattr(
+            wrapper,
+            "_run_ffmpeg_embed_process",
+            lambda **kwargs: (_ for _ in ()).throw(RuntimeError("boom")),
+            raising=False,
+        )
+        monkeypatch.setattr(
+            wrapper,
+            "_finalize_hard_embed_resources",
+            lambda **kwargs: finalized.append(kwargs),
+            raising=False,
+        )
+
+        with pytest.raises(RuntimeError, match="boom"):
+            wrapper._run_hard_embed_runtime_stage(
+                gpu_id=2,
+                cmd=["ffmpeg", "planned"],
+                output_path=out,
+                progress_callback=None,
+                temp_files_to_cleanup=[str(temp_ass)],
+            )
+
+        assert finalized == [{
+            "gpu_id": 2,
+            "temp_files_to_cleanup": [str(temp_ass)],
+        }]
+
+    def test_embed_subtitle_hard_delegates_runtime_stage(self, monkeypatch, tmp_path):
+        monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/ffmpeg")
+        wrapper = FFmpegWrapper()
+        video = tmp_path / "video.mp4"
+        sub = tmp_path / "sub.ass"
+        out = tmp_path / "out.mp4"
+        processed_ass = tmp_path / "processed.ass"
+        temp_ass = tmp_path / "temp.ass"
+        video.write_bytes(b"00")
+        sub.write_text("dummy", encoding="utf-8")
+        delegated = []
+
+        monkeypatch.setattr(wrapper, "_prepare_hard_embed_preflight", lambda **kwargs: True, raising=False)
+        monkeypatch.setattr(
+            wrapper,
+            "_plan_hard_embed_subtitle_inputs",
+            lambda **kwargs: (".ass", processed_ass, [str(temp_ass)], "ass='planned'"),
+            raising=False,
+        )
+        monkeypatch.setattr(
+            wrapper,
+            "_plan_hard_embed_execution",
+            lambda **kwargs: (4, ["ffmpeg", "planned"]),
+            raising=False,
+        )
+        monkeypatch.setattr(
+            wrapper,
+            "_run_ffmpeg_embed_process",
+            lambda **kwargs: pytest.fail("unexpected inline ffmpeg execution"),
+            raising=False,
+        )
+        monkeypatch.setattr(
+            wrapper,
+            "_finalize_hard_embed_resources",
+            lambda **kwargs: pytest.fail("unexpected inline finalize cleanup"),
+            raising=False,
+        )
+        monkeypatch.setattr(
+            wrapper,
+            "_run_hard_embed_runtime_stage",
+            lambda **kwargs: delegated.append(kwargs) or True,
+            raising=False,
+        )
+
+        result = wrapper.embed_subtitle_hard(
+            video,
+            sub,
+            out,
+            gpu_device="cuda:4",
+            subtitle_style="named-style",
+            style_dir="/styles",
+            fonts_dir="/fonts",
+            reference_height=900,
+        )
+
+        assert result is True
+        assert delegated == [{
+            "gpu_id": 4,
+            "cmd": ["ffmpeg", "planned"],
+            "output_path": out,
+            "progress_callback": None,
+            "temp_files_to_cleanup": [str(temp_ass)],
+        }]
+
     def test_run_ffmpeg_embed_process_reports_progress_writes_log_and_succeeds(self, monkeypatch, tmp_path):
         monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/ffmpeg")
         monkeypatch.setattr("time.sleep", lambda _seconds: None)
@@ -1496,42 +1635,6 @@ class TestFFmpegWrapperHardEmbedRuntime:
         log_text = (output.parent / "ffmpeg_embed.log").read_text(encoding="utf-8")
         assert "Error while filtering" in log_text
         assert "fatal tail" in log_text
-
-    def test_embed_subtitle_hard_delegates_ffmpeg_execution_stage(self, monkeypatch, tmp_path):
-        monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/ffmpeg")
-        wrapper = FFmpegWrapper()
-        video = tmp_path / "video.mp4"
-        sub = tmp_path / "sub.srt"
-        out = tmp_path / "out.mp4"
-        video.write_bytes(b"00")
-        sub.write_text("dummy", encoding="utf-8")
-        delegated = []
-        released = []
-
-        monkeypatch.setattr("vat.embedder.ffmpeg_wrapper._nvenc_manager.init", lambda max_per_gpu=5: None)
-        monkeypatch.setattr("vat.embedder.ffmpeg_wrapper._nvenc_manager.select_gpu", lambda: 0)
-        monkeypatch.setattr("vat.embedder.ffmpeg_wrapper._nvenc_manager.acquire", lambda gpu_id, timeout=600: True)
-        monkeypatch.setattr("vat.embedder.ffmpeg_wrapper._nvenc_manager.release", lambda gpu_id: released.append(gpu_id))
-        monkeypatch.setattr(wrapper, "_check_nvenc_support", lambda: True)
-        monkeypatch.setattr(wrapper, "get_video_info", lambda _path: {"bit_rate": 1000})
-        monkeypatch.setattr(
-            wrapper,
-            "_run_ffmpeg_embed_process",
-            lambda **kwargs: delegated.append(kwargs) or True,
-            raising=False,
-        )
-        monkeypatch.setattr(
-            "subprocess.Popen",
-            lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should delegate to helper")),
-        )
-
-        result = wrapper.embed_subtitle_hard(video, sub, out, gpu_device="auto")
-
-        assert result is True
-        assert delegated and delegated[0]["output_path"] == out
-        assert "ffmpeg" in delegated[0]["cmd"]
-        assert released == [0]
-
 
 class TestFFmpegWrapperHardEmbedContracts:
     def test_embed_subtitle_hard_rejects_cpu_gpu_device(self, monkeypatch, tmp_path):

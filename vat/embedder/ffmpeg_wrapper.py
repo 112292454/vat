@@ -412,17 +412,13 @@ class FFmpegWrapper:
             max_nvenc_sessions=max_nvenc_sessions,
         )
 
-        try:
-            return self._run_ffmpeg_embed_process(
-                cmd=cmd,
-                output_path=output_path,
-                progress_callback=progress_callback,
-            )
-        finally:
-            self._finalize_hard_embed_resources(
-                gpu_id=gpu_id,
-                temp_files_to_cleanup=temp_files_to_cleanup,
-            )
+        return self._run_hard_embed_runtime_stage(
+            gpu_id=gpu_id,
+            cmd=cmd,
+            output_path=output_path,
+            progress_callback=progress_callback,
+            temp_files_to_cleanup=temp_files_to_cleanup,
+        )
 
     def _prepare_hard_embed_preflight(
         self,
@@ -541,6 +537,28 @@ class FFmpegWrapper:
             original_bitrate=original_bitrate,
         )
         return gpu_id, cmd
+
+    def _run_hard_embed_runtime_stage(
+        self,
+        *,
+        gpu_id: int,
+        cmd: List[str],
+        output_path: Path,
+        progress_callback: Optional[Callable[[str, str], None]],
+        temp_files_to_cleanup: list[str],
+    ) -> bool:
+        """执行硬字幕合成运行阶段并确保资源清理。"""
+        try:
+            return self._run_ffmpeg_embed_process(
+                cmd=cmd,
+                output_path=output_path,
+                progress_callback=progress_callback,
+            )
+        finally:
+            self._finalize_hard_embed_resources(
+                gpu_id=gpu_id,
+                temp_files_to_cleanup=temp_files_to_cleanup,
+            )
 
     def _prepare_hard_embed_ass_subtitle(
         self,

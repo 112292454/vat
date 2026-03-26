@@ -557,35 +557,54 @@ class FFmpegWrapper:
         ]
         
         try:
-            # 保存 FFmpeg 输出日志到视频文件夹
+            return self._run_ffmpeg_embed_process(
+                cmd=cmd,
+                output_path=output_path,
+                progress_callback=progress_callback,
+            )
+        finally:
+            # 释放 NVENC 会话槽位
+            _nvenc_manager.release(gpu_id)
+            # 清理临时文件
+            for temp_file in temp_files_to_cleanup:
+                try:
+                    Path(temp_file).unlink(missing_ok=True)
+                except Exception:
+                    pass
+
+    def _run_ffmpeg_embed_process(
+        self,
+        *,
+        cmd: List[str],
+        output_path: Path,
+        progress_callback: Optional[Callable[[str, str], None]] = None,
+    ) -> bool:
+        """执行 FFmpeg 硬字幕合成并处理进度与日志。"""
+        try:
             log_path = output_path.parent / "ffmpeg_embed.log"
             ffmpeg_log_lines = []
-            
-            # 使用 Popen 实时读取进度
+
             process = subprocess.Popen(
-                    cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                )
-                
-            # 实时读取输出并调用回调
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+
             total_duration = None
             current_time = 0
             last_progress = -1
             start_time = time.time()
-            
+
             while True:
                 output_line = process.stderr.readline()
                 if not output_line or (process.poll() is not None):
                     break
-                
-                # 保存所有输出行到日志
+
                 ffmpeg_log_lines.append(output_line)
-                
-                # 解析总时长
+
                 if total_duration is None:
                     duration_match = re.search(
                         r"Duration: (\d{2}):(\d{2}):(\d{2}\.\d{2})", output_line
@@ -593,41 +612,41 @@ class FFmpegWrapper:
                     if duration_match:
                         h, m, s = map(float, duration_match.groups())
                         total_duration = h * 3600 + m * 60 + s
-                
-                # 解析当前处理时间
+
                 time_match = re.search(
                     r"time=(\d{2}):(\d{2}):(\d{2}\.\d{2})", output_line
                 )
                 if time_match:
                     h, m, s = map(float, time_match.groups())
                     current_time = h * 3600 + m * 60 + s
-                
-                # 计算进度百分比
+
                 if total_duration:
                     progress = (current_time / total_duration) * 100
                     current_progress_int = int(progress)
-                    
-                    # 只有当进度增加至少 5% 时才打印，或者刚开始/结束时
-                    if current_progress_int >= last_progress + 5 or (last_progress == -1 and current_progress_int == 0) or current_progress_int == 100:
+
+                    if (
+                        current_progress_int >= last_progress + 5
+                        or (last_progress == -1 and current_progress_int == 0)
+                        or current_progress_int == 100
+                    ):
                         elapsed = time.time() - start_time
                         info_str = f"{current_progress_int}%"
-                        
+
                         if current_progress_int > 0:
                             total_estimated = elapsed / (progress / 100)
                             remaining = total_estimated - elapsed
                             info_str += f" | 耗时: {_format_time(elapsed)} | 预计剩余: {_format_time(remaining)}"
-                        
-                        progress_callback(info_str, "正在合成")
+
+                        if progress_callback:
+                            progress_callback(info_str, "正在合成")
                         last_progress = current_progress_int
                 time.sleep(0.1)
-            
+
             if progress_callback:
                 progress_callback("100", "合成完成")
-            
-            # 检查返回码
+
             return_code = process.wait()
-            
-            # 写入完整日志
+
             try:
                 with open(log_path, "w", encoding="utf-8") as f:
                     f.write("=== FFmpeg 命令 ===\n")
@@ -640,15 +659,14 @@ class FFmpegWrapper:
                             f.write(remaining_output)
             except Exception as e:
                 logger.warning(f"无法保存 FFmpeg 日志: {e}")
-            
+
             if return_code != 0:
-                # 从已收集的日志行中提取错误信息（stderr 已被 readline 循环消费）
                 error_lines = [l.strip() for l in ffmpeg_log_lines if 'error' in l.lower() or 'failed' in l.lower()]
                 error_summary = '; '.join(error_lines[-3:]) if error_lines else '(无详细错误，见日志)'
                 logger.error(f"硬字幕嵌入失败: {error_summary}")
                 logger.info(f"完整日志已保存至: {log_path}")
                 return False
-            
+
             if not output_path.exists():
                 logger.error(f"硬字幕嵌入完成但未生成文件: {output_path}")
                 return False
@@ -656,16 +674,7 @@ class FFmpegWrapper:
         except subprocess.CalledProcessError as e:
             logger.error(f"硬字幕嵌入失败: {e.stderr}")
             return False
-        finally:
-            # 释放 NVENC 会话槽位
-            _nvenc_manager.release(gpu_id)
-            # 清理临时文件
-            for temp_file in temp_files_to_cleanup:
-                try:
-                    Path(temp_file).unlink(missing_ok=True)
-                except Exception:
-                    pass
-    
+
     def _check_encoder_support(self, encoder_name: str) -> bool:
         """检查是否支持特定编码器"""
         try:

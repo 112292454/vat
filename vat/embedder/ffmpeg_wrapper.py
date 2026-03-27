@@ -1099,6 +1099,50 @@ class FFmpegWrapper:
         ]
         return gpu_id, cmd
 
+    def _run_mask_violation_runtime_stage(
+        self,
+        *,
+        video_path: Path,
+        output_path: Path,
+        gpu_id: int,
+        cmd: List[str],
+    ) -> bool:
+        """执行违规遮罩运行阶段并确保释放 NVENC 会话。"""
+        try:
+            logger.info(f"开始遮罩处理 (GPU {gpu_id})...")
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=3600,  # 1小时超时
+            )
+
+            if result.returncode != 0:
+                logger.error(f"ffmpeg 遮罩处理失败: {result.stderr[-500:]}")
+                return False
+
+            if not output_path.exists():
+                logger.error("遮罩处理完成但未生成文件")
+                return False
+
+            in_size = video_path.stat().st_size
+            out_size = output_path.stat().st_size
+            ratio = out_size / in_size if in_size > 0 else 0
+            logger.info(
+                f"遮罩处理完成: {output_path.name} "
+                f"({out_size / 1024 / 1024:.1f}MB, 相对原文件 {ratio:.1%})"
+            )
+            return True
+
+        except subprocess.TimeoutExpired:
+            logger.error("ffmpeg 遮罩处理超时 (>1小时)")
+            return False
+        except Exception as e:
+            logger.error(f"遮罩处理异常: {e}")
+            return False
+        finally:
+            _nvenc_manager.release(gpu_id)
+
     def mask_violation_segments(
         self,
         video_path: Path,
@@ -1159,42 +1203,12 @@ class FFmpegWrapper:
             return False
 
         gpu_id, cmd = planned_execution
-
-        try:
-            logger.info(f"开始遮罩处理 (GPU {gpu_id})...")
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=3600,  # 1小时超时
-            )
-
-            if result.returncode != 0:
-                logger.error(f"ffmpeg 遮罩处理失败: {result.stderr[-500:]}")
-                return False
-
-            if not output_path.exists():
-                logger.error("遮罩处理完成但未生成文件")
-                return False
-
-            # 检查输出文件大小合理性
-            in_size = video_path.stat().st_size
-            out_size = output_path.stat().st_size
-            ratio = out_size / in_size if in_size > 0 else 0
-            logger.info(
-                f"遮罩处理完成: {output_path.name} "
-                f"({out_size / 1024 / 1024:.1f}MB, 相对原文件 {ratio:.1%})"
-            )
-            return True
-
-        except subprocess.TimeoutExpired:
-            logger.error("ffmpeg 遮罩处理超时 (>1小时)")
-            return False
-        except Exception as e:
-            logger.error(f"遮罩处理异常: {e}")
-            return False
-        finally:
-            _nvenc_manager.release(gpu_id)
+        return self._run_mask_violation_runtime_stage(
+            video_path=video_path,
+            output_path=output_path,
+            gpu_id=gpu_id,
+            cmd=cmd,
+        )
 
     @staticmethod
     def _merge_ranges(

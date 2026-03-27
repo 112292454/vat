@@ -1974,6 +1974,183 @@ class TestFFmpegWrapperMaskViolationPlanning:
         assert result is False
         assert released == []
 
+    def test_run_mask_violation_runtime_stage_runs_ffmpeg_checks_output_and_releases_gpu(self, monkeypatch, tmp_path):
+        monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/ffmpeg")
+        wrapper = FFmpegWrapper()
+        video = tmp_path / "video.mp4"
+        out = tmp_path / "masked.mp4"
+        video.write_bytes(b"00")
+        released = []
+
+        def fake_run(cmd, capture_output, text, timeout):
+            assert cmd == ["ffmpeg", "planned"]
+            assert capture_output is True
+            assert text is True
+            assert timeout == 3600
+            out.write_bytes(b"ok")
+            return SimpleNamespace(returncode=0, stderr="")
+
+        monkeypatch.setattr("subprocess.run", fake_run)
+        monkeypatch.setattr("vat.embedder.ffmpeg_wrapper._nvenc_manager.release", lambda gpu_id: released.append(gpu_id))
+
+        result = wrapper._run_mask_violation_runtime_stage(
+            video_path=video,
+            output_path=out,
+            gpu_id=4,
+            cmd=["ffmpeg", "planned"],
+        )
+
+        assert result is True
+        assert released == [4]
+
+    def test_run_mask_violation_runtime_stage_returns_false_when_output_missing_and_releases_gpu(self, monkeypatch, tmp_path):
+        monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/ffmpeg")
+        wrapper = FFmpegWrapper()
+        video = tmp_path / "video.mp4"
+        out = tmp_path / "masked.mp4"
+        video.write_bytes(b"00")
+        released = []
+
+        monkeypatch.setattr(
+            "subprocess.run",
+            lambda cmd, capture_output, text, timeout: SimpleNamespace(returncode=0, stderr=""),
+        )
+        monkeypatch.setattr("vat.embedder.ffmpeg_wrapper._nvenc_manager.release", lambda gpu_id: released.append(gpu_id))
+
+        result = wrapper._run_mask_violation_runtime_stage(
+            video_path=video,
+            output_path=out,
+            gpu_id=2,
+            cmd=["ffmpeg", "planned"],
+        )
+
+        assert result is False
+        assert released == [2]
+
+    def test_run_mask_violation_runtime_stage_returns_false_when_subprocess_run_raises_and_releases_gpu(self, monkeypatch, tmp_path):
+        monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/ffmpeg")
+        wrapper = FFmpegWrapper()
+        video = tmp_path / "video.mp4"
+        out = tmp_path / "masked.mp4"
+        video.write_bytes(b"00")
+        released = []
+
+        monkeypatch.setattr(
+            "subprocess.run",
+            lambda cmd, capture_output, text, timeout: (_ for _ in ()).throw(RuntimeError("boom")),
+        )
+        monkeypatch.setattr("vat.embedder.ffmpeg_wrapper._nvenc_manager.release", lambda gpu_id: released.append(gpu_id))
+
+        result = wrapper._run_mask_violation_runtime_stage(
+            video_path=video,
+            output_path=out,
+            gpu_id=6,
+            cmd=["ffmpeg", "planned"],
+        )
+
+        assert result is False
+        assert released == [6]
+
+    def test_run_mask_violation_runtime_stage_returns_false_when_ffmpeg_exits_nonzero_and_releases_gpu(self, monkeypatch, tmp_path):
+        monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/ffmpeg")
+        wrapper = FFmpegWrapper()
+        video = tmp_path / "video.mp4"
+        out = tmp_path / "masked.mp4"
+        video.write_bytes(b"00")
+        released = []
+
+        monkeypatch.setattr(
+            "subprocess.run",
+            lambda cmd, capture_output, text, timeout: SimpleNamespace(returncode=1, stderr="encode failed"),
+        )
+        monkeypatch.setattr("vat.embedder.ffmpeg_wrapper._nvenc_manager.release", lambda gpu_id: released.append(gpu_id))
+
+        result = wrapper._run_mask_violation_runtime_stage(
+            video_path=video,
+            output_path=out,
+            gpu_id=5,
+            cmd=["ffmpeg", "planned"],
+        )
+
+        assert result is False
+        assert released == [5]
+
+    def test_run_mask_violation_runtime_stage_returns_false_when_ffmpeg_times_out_and_releases_gpu(self, monkeypatch, tmp_path):
+        monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/ffmpeg")
+        wrapper = FFmpegWrapper()
+        video = tmp_path / "video.mp4"
+        out = tmp_path / "masked.mp4"
+        video.write_bytes(b"00")
+        released = []
+
+        monkeypatch.setattr(
+            "subprocess.run",
+            lambda cmd, capture_output, text, timeout: (_ for _ in ()).throw(subprocess.TimeoutExpired(cmd=cmd, timeout=timeout)),
+        )
+        monkeypatch.setattr("vat.embedder.ffmpeg_wrapper._nvenc_manager.release", lambda gpu_id: released.append(gpu_id))
+
+        result = wrapper._run_mask_violation_runtime_stage(
+            video_path=video,
+            output_path=out,
+            gpu_id=7,
+            cmd=["ffmpeg", "planned"],
+        )
+
+        assert result is False
+        assert released == [7]
+
+    def test_mask_violation_segments_delegates_runtime_stage(self, monkeypatch, tmp_path):
+        monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/ffmpeg")
+        wrapper = FFmpegWrapper()
+        video = tmp_path / "video.mp4"
+        out = tmp_path / "masked.mp4"
+        video.write_bytes(b"00")
+        delegated = []
+
+        monkeypatch.setattr(
+            wrapper,
+            "_prepare_mask_violation_context",
+            lambda **kwargs: ({"duration": 120.0, "video": {"width": 1280, "height": 720}, "bit_rate": 2468}, 1280, 720, [(8.5, 13.5)]),
+            raising=False,
+        )
+        monkeypatch.setattr(
+            wrapper,
+            "_plan_mask_violation_filters",
+            lambda **kwargs: ("vf=planned", "af=planned"),
+            raising=False,
+        )
+        monkeypatch.setattr(
+            wrapper,
+            "_plan_mask_violation_execution",
+            lambda **kwargs: (4, ["ffmpeg", "planned"]),
+            raising=False,
+        )
+        monkeypatch.setattr("subprocess.run", lambda *args, **kwargs: pytest.fail("unexpected inline subprocess.run"))
+        monkeypatch.setattr("vat.embedder.ffmpeg_wrapper._nvenc_manager.release", lambda gpu_id: pytest.fail("unexpected inline gpu release"))
+        monkeypatch.setattr(
+            wrapper,
+            "_run_mask_violation_runtime_stage",
+            lambda **kwargs: delegated.append(kwargs) or True,
+            raising=False,
+        )
+
+        result = wrapper.mask_violation_segments(
+            video_path=video,
+            output_path=out,
+            violation_ranges=[(10.0, 12.0)],
+            mask_text="此处内容因平台合规要求已被遮罩",
+            gpu_device="cuda:4",
+            margin_sec=1.5,
+        )
+
+        assert result is True
+        assert delegated == [{
+            "video_path": video,
+            "output_path": out,
+            "gpu_id": 4,
+            "cmd": ["ffmpeg", "planned"],
+        }]
+
     def test_mask_violation_segments_delegates_execution_planning_stage(self, monkeypatch, tmp_path):
         monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/ffmpeg")
         wrapper = FFmpegWrapper()
@@ -1981,9 +2158,8 @@ class TestFFmpegWrapperMaskViolationPlanning:
         out = tmp_path / "masked.mp4"
         video.write_bytes(b"00")
         delegated = []
-        released = []
-        video_info = {"duration": 120.0, "video": {"width": 1280, "height": 720}, "bit_rate": 2468}
 
+        video_info = {"duration": 120.0, "video": {"width": 1280, "height": 720}, "bit_rate": 2468}
         monkeypatch.setattr(
             wrapper,
             "_prepare_mask_violation_context",
@@ -2014,14 +2190,12 @@ class TestFFmpegWrapperMaskViolationPlanning:
             lambda **kwargs: delegated.append(kwargs) or (4, ["ffmpeg", "planned"]),
             raising=False,
         )
-        monkeypatch.setattr("vat.embedder.ffmpeg_wrapper._nvenc_manager.release", lambda gpu_id: released.append(gpu_id))
-
-        def fake_run(cmd, capture_output, text, timeout):
-            assert cmd == ["ffmpeg", "planned"]
-            out.write_bytes(b"ok")
-            return SimpleNamespace(returncode=0, stderr="")
-
-        monkeypatch.setattr("subprocess.run", fake_run)
+        monkeypatch.setattr(
+            wrapper,
+            "_run_mask_violation_runtime_stage",
+            lambda **kwargs: True,
+            raising=False,
+        )
 
         result = wrapper.mask_violation_segments(
             video_path=video,
@@ -2041,7 +2215,6 @@ class TestFFmpegWrapperMaskViolationPlanning:
             "video_info": video_info,
             "gpu_device": "cuda:4",
         }]
-        assert released == [4]
 
     def test_mask_violation_segments_delegates_filter_planning_stage(self, monkeypatch, tmp_path):
         monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/ffmpeg")

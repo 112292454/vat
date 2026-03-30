@@ -291,6 +291,15 @@ class TestFFmpegWrapperConvertVideoContracts:
 
 
 class TestFFmpegWrapperExtractThumbnailContracts:
+    def test_prepare_extract_thumbnail_preflight_creates_output_directory(self, monkeypatch, tmp_path):
+        monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/ffmpeg")
+        wrapper = FFmpegWrapper()
+        out = tmp_path / "nested" / "thumb.jpg"
+
+        wrapper._prepare_extract_thumbnail_preflight(output_path=out)
+
+        assert out.parent.is_dir()
+
     def test_plan_extract_thumbnail_command_builds_expected_ffmpeg_args(self, monkeypatch, tmp_path):
         monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/ffmpeg")
         wrapper = FFmpegWrapper()
@@ -311,6 +320,45 @@ class TestFFmpegWrapperExtractThumbnailContracts:
             "-q:v", "2",
             "-y",
             str(out),
+        ]
+
+    def test_extract_thumbnail_delegates_preflight_stage(self, monkeypatch, tmp_path):
+        monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/ffmpeg")
+        wrapper = FFmpegWrapper()
+        video = tmp_path / "input.mov"
+        out = tmp_path / "nested" / "thumb.jpg"
+        delegated = []
+
+        monkeypatch.setattr(
+            wrapper,
+            "_prepare_extract_thumbnail_preflight",
+            lambda **kwargs: delegated.append(("preflight", kwargs)),
+            raising=False,
+        )
+        monkeypatch.setattr(
+            wrapper,
+            "_plan_extract_thumbnail_command",
+            lambda **kwargs: delegated.append(("plan", kwargs)) or ["ffmpeg", "planned", str(out)],
+            raising=False,
+        )
+        monkeypatch.setattr(
+            wrapper,
+            "_run_extract_thumbnail_runtime_stage",
+            lambda **kwargs: delegated.append(("run", kwargs)) or True,
+            raising=False,
+        )
+
+        result = wrapper.extract_thumbnail(video, out, time_position="00:00:09")
+
+        assert result is True
+        assert delegated == [
+            ("preflight", {"output_path": out}),
+            ("plan", {
+                "video_path": video,
+                "output_path": out,
+                "time_position": "00:00:09",
+            }),
+            ("run", {"cmd": ["ffmpeg", "planned", str(out)]}),
         ]
 
     def test_extract_thumbnail_delegates_command_planning_stage(self, monkeypatch, tmp_path):

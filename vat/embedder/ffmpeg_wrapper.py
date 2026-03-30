@@ -988,13 +988,21 @@ class FFmpegWrapper:
         Returns:
             是否成功
         """
-        output_path.parent.mkdir(parents=True, exist_ok=True)
+        self._prepare_extract_thumbnail_preflight(output_path=output_path)
         cmd = self._plan_extract_thumbnail_command(
             video_path=video_path,
             output_path=output_path,
             time_position=time_position,
         )
         return self._run_extract_thumbnail_runtime_stage(cmd=cmd)
+
+    def _prepare_extract_thumbnail_preflight(
+        self,
+        *,
+        output_path: Path,
+    ) -> None:
+        """执行提取缩略图 preflight 阶段。"""
+        output_path.parent.mkdir(parents=True, exist_ok=True)
 
     def _plan_extract_thumbnail_command(
         self,

@@ -917,7 +917,7 @@ class FFmpegWrapper:
         Returns:
             是否成功
         """
-        output_path.parent.mkdir(parents=True, exist_ok=True)
+        self._prepare_convert_video_preflight(output_path=output_path)
         cmd = self._plan_convert_video_command(
             input_path=input_path,
             output_path=output_path,
@@ -927,6 +927,14 @@ class FFmpegWrapper:
             preset=preset,
         )
         return self._run_convert_video_runtime_stage(cmd=cmd)
+
+    def _prepare_convert_video_preflight(
+        self,
+        *,
+        output_path: Path,
+    ) -> None:
+        """执行视频转换 preflight 阶段。"""
+        output_path.parent.mkdir(parents=True, exist_ok=True)
 
     def _plan_convert_video_command(
         self,

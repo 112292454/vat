@@ -74,6 +74,15 @@ class TestFFmpegWrapperHelpers:
 
 
 class TestFFmpegWrapperConvertVideoContracts:
+    def test_prepare_convert_video_preflight_creates_output_directory(self, monkeypatch, tmp_path):
+        monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/ffmpeg")
+        wrapper = FFmpegWrapper()
+        out = tmp_path / "nested" / "output.mp4"
+
+        wrapper._prepare_convert_video_preflight(output_path=out)
+
+        assert out.parent.is_dir()
+
     def test_plan_convert_video_command_builds_expected_ffmpeg_args(self, monkeypatch, tmp_path):
         monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/ffmpeg")
         wrapper = FFmpegWrapper()
@@ -98,6 +107,55 @@ class TestFFmpegWrapperConvertVideoContracts:
             "-c:a", "copy",
             "-y",
             str(out),
+        ]
+
+    def test_convert_video_delegates_preflight_stage(self, monkeypatch, tmp_path):
+        monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/ffmpeg")
+        wrapper = FFmpegWrapper()
+        src = tmp_path / "input.mov"
+        out = tmp_path / "nested" / "output.mp4"
+        delegated = []
+
+        monkeypatch.setattr(
+            wrapper,
+            "_prepare_convert_video_preflight",
+            lambda **kwargs: delegated.append(("preflight", kwargs)),
+            raising=False,
+        )
+        monkeypatch.setattr(
+            wrapper,
+            "_plan_convert_video_command",
+            lambda **kwargs: delegated.append(("plan", kwargs)) or ["ffmpeg", "planned", str(out)],
+            raising=False,
+        )
+        monkeypatch.setattr(
+            wrapper,
+            "_run_convert_video_runtime_stage",
+            lambda **kwargs: delegated.append(("run", kwargs)) or True,
+            raising=False,
+        )
+
+        result = wrapper.convert_video(
+            src,
+            out,
+            video_codec="libx265",
+            audio_codec="copy",
+            crf=19,
+            preset="slow",
+        )
+
+        assert result is True
+        assert delegated == [
+            ("preflight", {"output_path": out}),
+            ("plan", {
+                "input_path": src,
+                "output_path": out,
+                "video_codec": "libx265",
+                "audio_codec": "copy",
+                "crf": 19,
+                "preset": "slow",
+            }),
+            ("run", {"cmd": ["ffmpeg", "planned", str(out)]}),
         ]
 
     def test_convert_video_delegates_command_planning_stage(self, monkeypatch, tmp_path):

@@ -14,14 +14,14 @@ from typing import Optional, List, Dict, Any
 from fastapi import APIRouter, Query, HTTPException
 from fastapi.responses import JSONResponse
 
-from vat.config import load_config
+from vat.web.deps import get_web_config
 
 router = APIRouter(prefix="/api/database", tags=["database"])
 
 
 def _get_db_path() -> str:
     """获取数据库路径"""
-    config = load_config()
+    config = get_web_config()
     return str(config.storage.database_path)
 
 

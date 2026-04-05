@@ -415,6 +415,51 @@ class ASRData:
             )
         return self
 
+    @staticmethod
+    def _normalize_ass_display_text(text: str) -> str:
+        """仅对 ASS 显示文本做最小归一化，不改动字幕语义产物。
+
+        当前仅用于译文显示层：
+        - 将常见全角/弯引号统一为 ASCII 英文引号
+        - 保留日文/中文括号式引号 `「」`、`『』`
+        - 去掉中文字幕里常见但烧录时较占宽度的 `，。；：`
+        - 保留 `？！…`
+        - 压缩多余空白，但保留显式换行分隔符
+        """
+        if not text:
+            return ""
+
+        quote_map = str.maketrans({
+            "“": '"',
+            "”": '"',
+            "„": '"',
+            "‟": '"',
+            "〝": '"',
+            "〞": '"',
+            "＂": '"',
+            "‘": "'",
+            "’": "'",
+            "‚": "'",
+            "‛": "'",
+            "‹": "'",
+            "›": "'",
+            "＇": "'",
+        })
+
+        parts = re.split(r"(\\N|\n)", text)
+        normalized_parts = []
+        for part in parts:
+            if part in {"\\N", "\n"}:
+                normalized_parts.append(part)
+                continue
+
+            cleaned = part.translate(quote_map)
+            cleaned = re.sub(r"[，。；：]+", "", cleaned)
+            cleaned = re.sub(r"[ \t\u3000]+", " ", cleaned).strip()
+            normalized_parts.append(cleaned)
+
+        return "".join(normalized_parts)
+
     def save(
         self,
         save_path: str,
@@ -557,7 +602,7 @@ class ASRData:
         for seg in self.segments:
             start_time, end_time = seg.to_ass_ts()
             original = seg.text
-            translated = seg.translated_text
+            translated = self._normalize_ass_display_text(seg.translated_text)
             has_translation = bool(translated and translated.strip())
 
             # 确定样式名称

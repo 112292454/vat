@@ -298,3 +298,25 @@ class TestDedupChainEffects:
         asr = ASRData([_seg("唯一", 0, 1000)])
         asr.dedup_adjacent_segments()
         assert len(asr.segments) == 1
+
+
+class TestAssDisplayNormalization:
+    def test_to_ass_normalizes_translated_display_text_without_mutating_segments(self):
+        style = (
+            "[V4+ Styles]\n"
+            "Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,"
+            "Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,"
+            "Alignment,MarginL,MarginR,MarginV,Encoding\n"
+            "Style: Default,Arial,40,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,-1,0,0,0,100,100,"
+            "0,0,1,2,0,2,10,10,15,1\n"
+            "Style: Secondary,Arial,30,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,-1,0,0,0,100,100,"
+            "0,0,1,2,0,2,10,10,15,1"
+        )
+        asr = ASRData([_seg("原文「你好」", 0, 1000, "译文“你好”“引用”「台词」『标题』，。；：？！…")])
+
+        ass = asr.to_ass(style_str=style)
+
+        assert '{\\blur0}译文"你好""引用"「台词」『标题』？！…' in ass
+        assert "{\\blur0}原文「你好」" in ass
+        assert "译文“你好”“引用”「台词」『标题』，。；：？！…" not in ass
+        assert asr.segments[0].translated_text == "译文“你好”“引用”「台词」『标题』，。；：？！…"

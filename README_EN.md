@@ -12,6 +12,36 @@ Supports both **CLI** and **Web UI**. The CLI is the core capability layer; the 
 
 ---
 
+## First Successful Run (Minimum Local-File Path)
+
+If this is your first time using VAT, do not start with playlists, watch mode, upload, or WebUI. First make sure one local video can run through the minimum path:
+
+```bash
+git clone <repo-url> && cd vat
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+pip install -e .
+
+# Generate a starter config safe for new users
+vat init
+
+# Edit config/config.yaml and change at least:
+# 1) storage.work_dir / output_dir / database_path / models_dir
+# 2) llm.api_key / llm.base_url (or set VAT_LLM_APIKEY)
+# 3) keep download/upload cookies empty unless you actually need those stages
+
+vat pipeline --url "/path/to/video.mp4" --title "demo"
+```
+
+Notes:
+- Recommended environment: Linux + Python 3.10+ + CUDA GPU + system-level `ffmpeg`
+- For the first run, prefer a local video so download / playlist / upload / WebUI are not mixed into the same debugging session
+- On the first ASR run, the Whisper model is downloaded into `storage.models_dir/asr.models_subdir` (default: `./models/whisper`); this requires working network access to HuggingFace, or a pre-populated local model cache in that directory
+- For fuller details, see [Quick Start](#quick-start) and [CLI Usage](#cli-usage)
+
+---
+
 ## Development & Runtime Environment
 
 > ⚠️ VAT is primarily developed and tested on **Linux multi-GPU servers** (Ubuntu 22.04, CUDA 12.x, multiple RTX 4090s).
@@ -190,10 +220,10 @@ Place fonts in `vat/resources/fonts/`. Most Ubuntu systems already include NotoS
 # Set LLM API Key (environment variable)
 export VAT_LLM_APIKEY="your-api-key"
 
-# Generate config file
+# Generate a starter config (you still need to edit it for your machine)
 vat init
 
-# Edit configuration (paths, models, translation params, etc.)
+# Edit configuration (at minimum: paths and LLM settings)
 nano config/config.yaml
 ```
 
@@ -212,6 +242,8 @@ Key configuration items:
 | `translator.llm.enable_reflect` | Enable reflective translation |
 
 Each stage (split, translate, optimize) supports independent `api_key` / `base_url` / `model` overrides; empty values inherit from global config.
+
+> `vat init` generates a **starter config safe for new users**, not a dump of the author's production machine settings. You still need to adjust paths, LLM settings, and fill cookies only if you actually use download/upload.
 
 Proxy also supports per-stage overrides: `proxy.http_proxy` is the global default; use `proxy.llm`, `proxy.translate`, `proxy.downloader`, etc. to specify independent proxies per component. LLM stage fallback chain: stage-specific → `proxy.llm` → `proxy.http_proxy`.
 

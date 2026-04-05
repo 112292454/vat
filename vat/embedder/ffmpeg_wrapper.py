@@ -430,7 +430,7 @@ class FFmpegWrapper:
         ):
             return False
 
-        subtitle_ext, processed_subtitle, temp_files_to_cleanup, vf = self._plan_hard_embed_subtitle_inputs(
+        temp_files_to_cleanup, vf = self._plan_hard_embed_subtitle_inputs(
             video_path=video_path,
             subtitle_path=subtitle_path,
             subtitle_style=subtitle_style,
@@ -442,17 +442,23 @@ class FFmpegWrapper:
         # ========== 阶段 2: 获取 NVENC 会话 + 构建 ffmpeg 命令 ==========
         # 预处理完成后才获取 GPU session，最大化 session 利用率。
         # ================================================================
-        gpu_id, cmd = self._plan_hard_embed_execution(
-            video_path=video_path,
-            output_path=output_path,
-            vf=vf,
-            video_codec=video_codec,
-            audio_codec=audio_codec,
-            crf=crf,
-            preset=preset,
-            gpu_device=gpu_device,
-            max_nvenc_sessions=max_nvenc_sessions,
-        )
+        try:
+            gpu_id, cmd = self._plan_hard_embed_execution(
+                video_path=video_path,
+                output_path=output_path,
+                vf=vf,
+                video_codec=video_codec,
+                audio_codec=audio_codec,
+                crf=crf,
+                preset=preset,
+                gpu_device=gpu_device,
+                max_nvenc_sessions=max_nvenc_sessions,
+            )
+        except Exception:
+            self._cleanup_hard_embed_temp_files(
+                temp_files_to_cleanup=temp_files_to_cleanup,
+            )
+            raise
 
         return self._run_hard_embed_runtime_stage(
             gpu_id=gpu_id,
@@ -497,6 +503,16 @@ class FFmpegWrapper:
     ) -> None:
         """释放硬字幕合成阶段占用的资源。"""
         _nvenc_manager.release(gpu_id)
+        self._cleanup_hard_embed_temp_files(
+            temp_files_to_cleanup=temp_files_to_cleanup,
+        )
+
+    def _cleanup_hard_embed_temp_files(
+        self,
+        *,
+        temp_files_to_cleanup: list[str],
+    ) -> None:
+        """清理硬字幕阶段产生的临时字幕文件。"""
         for temp_file in temp_files_to_cleanup:
             try:
                 Path(temp_file).unlink(missing_ok=True)
@@ -524,7 +540,7 @@ class FFmpegWrapper:
         style_dir: Optional[str],
         fonts_dir: Optional[str],
         reference_height: int,
-    ) -> tuple[str, Path, list[str], str]:
+    ) -> tuple[list[str], str]:
         """规划硬字幕合成使用的字幕输入与滤镜。"""
         subtitle_ext = subtitle_path.suffix.lower()
         processed_subtitle = subtitle_path
@@ -545,7 +561,7 @@ class FFmpegWrapper:
             processed_subtitle=processed_subtitle,
             fonts_dir=fonts_dir,
         )
-        return subtitle_ext, processed_subtitle, temp_files_to_cleanup, vf
+        return temp_files_to_cleanup, vf
 
     def _plan_hard_embed_execution(
         self,
@@ -566,8 +582,40 @@ class FFmpegWrapper:
             gpu_id=gpu_id,
             max_nvenc_sessions=max_nvenc_sessions,
         )
+        try:
+            cmd = self._plan_hard_embed_command(
+                video_path=video_path,
+                output_path=output_path,
+                vf=vf,
+                video_codec=video_codec,
+                audio_codec=audio_codec,
+                crf=crf,
+                preset=preset,
+                gpu_id=gpu_id,
+            )
+        except Exception:
+            self._finalize_hard_embed_resources(
+                gpu_id=gpu_id,
+                temp_files_to_cleanup=[],
+            )
+            raise
+        return gpu_id, cmd
+
+    def _plan_hard_embed_command(
+        self,
+        *,
+        video_path: Path,
+        output_path: Path,
+        vf: str,
+        video_codec: str,
+        audio_codec: str,
+        crf: int,
+        preset: str,
+        gpu_id: int,
+    ) -> List[str]:
+        """规划硬字幕合成使用的码率探测与 FFmpeg 命令。"""
         original_bitrate = self._probe_hard_embed_original_bitrate(video_path)
-        cmd = self._build_hard_embed_ffmpeg_command(
+        return self._build_hard_embed_ffmpeg_command(
             video_path=video_path,
             output_path=output_path,
             vf=vf,
@@ -578,7 +626,6 @@ class FFmpegWrapper:
             gpu_id=gpu_id,
             original_bitrate=original_bitrate,
         )
-        return gpu_id, cmd
 
     def _run_hard_embed_runtime_stage(
         self,
@@ -615,6 +662,7 @@ class FFmpegWrapper:
         """为硬字幕合成预处理 ASS 字幕输入。"""
         processed_subtitle = subtitle_path
         temp_files_to_cleanup: list[str] = []
+        temp_ass_path: Optional[str] = None
 
         try:
             from vat.asr import ASRData
@@ -640,20 +688,22 @@ class FFmpegWrapper:
             with tempfile.NamedTemporaryFile(
                 mode="w", suffix=".ass", delete=False, encoding="utf-8"
             ) as temp_file:
+                temp_ass_path = temp_file.name
                 ass_content = asr_data.to_ass(
                     style_str=style_str,
                     video_width=width,
                     video_height=height,
                 )
-                temp_file.write(ass_content)
-                temp_ass_path = temp_file.name
                 temp_files_to_cleanup.append(temp_ass_path)
+                temp_file.write(ass_content)
 
             processed_subtitle_path = auto_wrap_ass_file(temp_ass_path, fonts_dir=fonts_dir)
             processed_subtitle = Path(processed_subtitle_path)
             if processed_subtitle_path != temp_ass_path:
                 temp_files_to_cleanup.append(processed_subtitle_path)
         except Exception as e:
+            if temp_ass_path and temp_ass_path not in temp_files_to_cleanup:
+                temp_files_to_cleanup.append(temp_ass_path)
             logger.warning(f"ASS 预处理失败，使用原始文件: {e}")
             processed_subtitle = subtitle_path
 
@@ -817,7 +867,7 @@ class FFmpegWrapper:
                     if (
                         current_progress_int >= last_progress + 5
                         or (last_progress == -1 and current_progress_int == 0)
-                        or current_progress_int == 100
+                        or (current_progress_int == 100 and last_progress < 100)
                     ):
                         elapsed = time.time() - start_time
                         info_str = f"{current_progress_int}%"
@@ -831,9 +881,6 @@ class FFmpegWrapper:
                             progress_callback(info_str, "正在合成")
                         last_progress = current_progress_int
                 time.sleep(0.1)
-
-            if progress_callback:
-                progress_callback("100", "合成完成")
 
             return_code = process.wait()
 
@@ -860,6 +907,8 @@ class FFmpegWrapper:
             if not output_path.exists():
                 logger.error(f"硬字幕嵌入完成但未生成文件: {output_path}")
                 return False
+            if progress_callback:
+                progress_callback("100", "合成完成")
             return True
         except subprocess.CalledProcessError as e:
             logger.error(f"硬字幕嵌入失败: {e.stderr}")

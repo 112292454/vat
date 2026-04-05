@@ -44,8 +44,8 @@ biliup>=0.4.0
 python-dateutil>=2.8.0
 croniter>=1.3.0            # Cron 表达式解析（定时上传）
 
-# GalTransl 依赖
-httpx<0.28
+# HTTP 客户端：需兼容 biliup（>=0.28.1）和项目内 LLM/Web API 用法
+httpx>=0.28.1,<1
 packaging
 prompt_toolkit
 pysrt

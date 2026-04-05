@@ -9,16 +9,13 @@ from typing import List, Optional
 from datetime import datetime
 from tabulate import tabulate
 
-from ..config import Config, load_config
+from ..config import Config, load_config, write_starter_config
 from ..database import Database
 from ..models import (
     Video, Task, SourceType, TaskStep, TaskStatus,
     STAGE_GROUPS, expand_stage_group, get_required_stages, DEFAULT_STAGE_SEQUENCE,
     is_task_status_satisfied,
 )
-from ..pipeline import create_video_from_url, create_video_from_source, detect_source_type, VideoProcessor, schedule_videos, run_video_batch
-from ..downloaders import YouTubeDownloader
-from ..services import PlaylistService
 from ..utils.logger import setup_logger
 
 
@@ -49,6 +46,46 @@ def get_logger():
     return LOGGER
 
 
+def create_video_from_url(*args, **kwargs):
+    from ..pipeline import create_video_from_url as impl
+    return impl(*args, **kwargs)
+
+
+def create_video_from_source(*args, **kwargs):
+    from ..pipeline import create_video_from_source as impl
+    return impl(*args, **kwargs)
+
+
+def detect_source_type(*args, **kwargs):
+    from ..pipeline import detect_source_type as impl
+    return impl(*args, **kwargs)
+
+
+def schedule_videos(*args, **kwargs):
+    from ..pipeline import schedule_videos as impl
+    return impl(*args, **kwargs)
+
+
+def run_video_batch(*args, **kwargs):
+    from ..pipeline import run_video_batch as impl
+    return impl(*args, **kwargs)
+
+
+def _get_video_processor_cls():
+    from ..pipeline import VideoProcessor
+    return VideoProcessor
+
+
+def _get_youtube_downloader_cls():
+    from ..downloaders import YouTubeDownloader
+    return YouTubeDownloader
+
+
+def _get_playlist_service_cls():
+    from ..services import PlaylistService
+    return PlaylistService
+
+
 @click.group()
 @click.option('--config', '-c', type=click.Path(exists=True), help='配置文件路径')
 @click.pass_context
@@ -63,13 +100,15 @@ def cli(ctx, config):
 def init(output):
     """初始化配置文件"""
     try:
-        # 直接从默认配置读取并保存
-        config = load_config()
-        config.to_yaml(output)
+        write_starter_config(output)
         click.echo(f"✓ 已创建默认配置文件: {output}")
-        click.echo(f"请编辑配置文件以设置API密钥等参数")
+        click.echo("下一步至少先确认这些项：")
+        click.echo("1. storage.work_dir / output_dir / database_path / models_dir")
+        click.echo("2. llm.api_key / llm.base_url（或设置环境变量 VAT_LLM_APIKEY）")
+        click.echo("3. 首次 ASR 需要可访问 HuggingFace，或预先把 Whisper 模型缓存放到 storage.models_dir/asr.models_subdir（默认 ./models/whisper）")
+        click.echo("4. 若暂不做下载/上传，cookies 可先留空")
     except Exception as e:
-        click.echo(f"✗ 创建配置文件失败: {e}", err=True)
+        raise click.ClickException(f"创建配置文件失败: {e}") from e
 
 
 @cli.command()
@@ -89,7 +128,7 @@ def download(ctx, url, playlist, file):
     # 从播放列表获取
     if playlist:
         logger.info(f"获取播放列表: {playlist}")
-        downloader = YouTubeDownloader(
+        downloader = _get_youtube_downloader_cls()(
             proxy=config.get_stage_proxy("downloader"),
             video_format=config.downloader.youtube.format,
             cookies_file=config.downloader.youtube.cookies_file,
@@ -248,6 +287,21 @@ def embed(ctx, video_id, process_all, force):
 
 
 @cli.command()
+@click.option('--host', help='监听地址（默认使用配置中的 web.host）')
+@click.option('--port', type=int, help='监听端口（默认使用配置中的 web.port）')
+@click.pass_context
+def web(ctx, host, port):
+    """启动 Web 管理界面"""
+    from ..web.app import run_server
+
+    run_server(
+        host=host,
+        port=port,
+        config_path=ctx.obj.get('config_path'),
+    )
+
+
+@cli.command()
 @click.option('--url', '-u', multiple=True, help='视频源（YouTube URL / 直链 / 本地路径，自动检测类型）')
 @click.option('--playlist', '-p', help='YouTube播放列表URL')
 @click.option('--file', '-f', type=click.Path(exists=True), help='URL/路径列表文件（每行一个，# 开头为注释）')
@@ -276,7 +330,7 @@ def pipeline(ctx, url, playlist, file, title, gpus, force):
     
     if playlist:
         logger.info(f"获取播放列表: {playlist}")
-        downloader = YouTubeDownloader(
+        downloader = _get_youtube_downloader_cls()(
             proxy=config.get_stage_proxy("downloader"),
             video_format=config.downloader.youtube.format,
             cookies_file=config.downloader.youtube.cookies_file,
@@ -623,7 +677,7 @@ def process(ctx, video_id, process_all, playlist, stages, gpu, force, dry_run, c
     
     if playlist:
         # 从 Playlist 获取信息
-        playlist_service = PlaylistService(db)
+        playlist_service = _get_playlist_service_cls()(db)
         pl = playlist_service.get_playlist(playlist)
         if not pl:
             click.echo(f"错误: Playlist 不存在: {playlist}", err=True)
@@ -775,7 +829,7 @@ def process(ctx, video_id, process_all, playlist, stages, gpu, force, dry_run, c
         max_retry_rounds=2,
         logger_override=logger,
         db=db,
-        processor_cls=VideoProcessor,
+        processor_cls=_get_video_processor_cls(),
     )
     
     # ========== 批量上传后自动 upload sync ==========
@@ -829,7 +883,7 @@ def watch(ctx, playlist, interval, once, stages, gpu, concurrency, force, fail_f
     effective_concurrency = concurrency if concurrency is not None else watch_config.default_concurrency
     
     # 验证所有 playlist 存在
-    playlist_service = PlaylistService(db)
+    playlist_service = _get_playlist_service_cls()(db)
     for pl_id in playlist:
         pl = playlist_service.get_playlist(pl_id)
         if not pl:
@@ -844,7 +898,13 @@ def watch(ctx, playlist, interval, once, stages, gpu, concurrency, force, fail_f
         f"once={once}, force={force}"
     )
     
+    from ..services.process_job_submitter import build_process_job_submitter
     from ..services.watch_service import WatchService
+
+    process_job_submitter = build_process_job_submitter(
+        config,
+        config_path=ctx.obj.get('config_path'),
+    )
     
     service = WatchService(
         config=config,
@@ -857,6 +917,7 @@ def watch(ctx, playlist, interval, once, stages, gpu, concurrency, force, fail_f
         force=force,
         fail_fast=fail_fast,
         once=once,
+        process_job_submitter=process_job_submitter,
     )
     
     try:
@@ -1052,7 +1113,7 @@ def _run_scheduled_uploads(config, db, logger, video_ids, cron_expr, force, dry_
             title = video.title[:30] if video and video.title else vid
             logger.info(f"[UPLOAD-SCHEDULE] 上传 ({uploaded + failed + 1}/{len(queue)}): {title}")
             try:
-                processor = VideoProcessor(
+                processor = _get_video_processor_cls()(
                     video_id=vid,
                     config=config,
                     gpu_id=None,
@@ -1197,7 +1258,7 @@ def _run_dtime_uploads(config, db, logger, video_ids, cron_expr, force, dry_run,
             title = video.title[:30] if video and video.title else vid
             logger.info(f"[DTIME] 上传 ({uploaded + failed + 1}/{len(queue)}): {title}")
             try:
-                processor = VideoProcessor(
+                processor = _get_video_processor_cls()(
                     video_id=vid,
                     config=config,
                     gpu_id=None,
@@ -1287,7 +1348,7 @@ def playlist_add(ctx, url, sync):
     logger = get_logger()
     db = Database(config.storage.database_path, output_base_dir=config.storage.output_dir)
     
-    playlist_service = PlaylistService(db, config)
+    playlist_service = _get_playlist_service_cls()(db, config)
     
     try:
         result = playlist_service.sync_playlist(
@@ -1346,7 +1407,7 @@ def playlist_sync(ctx, playlist_id):
         click.echo(f"错误: Playlist 不存在: {playlist_id}", err=True)
         return
     
-    playlist_service = PlaylistService(db, config)
+    playlist_service = _get_playlist_service_cls()(db, config)
     
     try:
         result = playlist_service.sync_playlist(
@@ -1399,7 +1460,7 @@ def playlist_refresh(ctx, playlist_id, force_refetch, force_retranslate):
                     "如只需重新翻译，请使用 'vat playlist retranslate'", err=True)
         return
     
-    playlist_service = PlaylistService(db, config)
+    playlist_service = _get_playlist_service_cls()(db, config)
     
     try:
         result = playlist_service.refresh_videos(
@@ -1426,7 +1487,7 @@ def playlist_show(ctx, playlist_id):
     config = get_config(ctx.obj.get('config_path'))
     db = Database(config.storage.database_path, output_base_dir=config.storage.output_dir)
     
-    playlist_service = PlaylistService(db)
+    playlist_service = _get_playlist_service_cls()(db)
     
     pl = playlist_service.get_playlist(playlist_id)
     if not pl:
@@ -1478,7 +1539,7 @@ def playlist_delete(ctx, playlist_id, delete_videos, yes):
     config = get_config(ctx.obj.get('config_path'))
     db = Database(config.storage.database_path, output_base_dir=config.storage.output_dir)
     
-    playlist_service = PlaylistService(db)
+    playlist_service = _get_playlist_service_cls()(db)
     pl = playlist_service.get_playlist(playlist_id)
     if not pl:
         click.echo(f"错误: Playlist 不存在: {playlist_id}", err=True)
@@ -1573,7 +1634,7 @@ def upload_video(ctx, video_id, upload_playlist_id, platform, season, dry_run):
             return
     playlist_info = None
     if effective_playlist_id:
-        playlist_service = PlaylistService(db)
+        playlist_service = _get_playlist_service_cls()(db)
         pl = playlist_service.get_playlist(effective_playlist_id)
         if pl:
             pl_upload_config = (pl.metadata or {}).get('upload_config', {})
@@ -1731,7 +1792,7 @@ def upload_sync(ctx, playlist, retry_delay):
     db = Database(config.storage.database_path, output_base_dir=config.storage.output_dir)
     
     # 验证 playlist 存在
-    playlist_service = PlaylistService(db)
+    playlist_service = _get_playlist_service_cls()(db)
     pl = playlist_service.get_playlist(playlist)
     if not pl:
         click.echo(f"错误: Playlist 不存在: {playlist}", err=True)
@@ -1824,7 +1885,7 @@ def upload_update_info(ctx, playlist, dry_run, yes):
     
     from ..uploaders.template import render_upload_metadata
     
-    playlist_service = PlaylistService(db)
+    playlist_service = _get_playlist_service_cls()(db)
     pl = playlist_service.get_playlist(playlist)
     if not pl:
         click.echo(f"错误: Playlist 不存在: {playlist}", err=True)
@@ -1969,7 +2030,7 @@ def upload_sync_db(ctx, season, playlist, dry_run):
     logger = get_logger()
     db = Database(config.storage.database_path, output_base_dir=config.storage.output_dir)
     
-    playlist_service = PlaylistService(db)
+    playlist_service = _get_playlist_service_cls()(db)
     pl = playlist_service.get_playlist(playlist)
     if not pl:
         click.echo(f"错误: Playlist 不存在: {playlist}", err=True)
@@ -2598,7 +2659,7 @@ def upload_playlist(ctx, playlist_id, platform, season, limit, dry_run):
     config = get_config(ctx.obj.get('config_path'))
     db = Database(config.storage.database_path, output_base_dir=config.storage.output_dir)
     
-    playlist_service = PlaylistService(db)
+    playlist_service = _get_playlist_service_cls()(db)
     pl = playlist_service.get_playlist(playlist_id)
     
     if not pl:

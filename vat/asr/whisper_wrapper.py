@@ -17,6 +17,10 @@ except ImportError:
 
 from .asr_data import ASRData, ASRDataSeg
 from .chunked_asr import ChunkedASR
+from .model_source import (
+    ensure_whisper_model_source_available,
+    format_whisper_model_load_error,
+)
 from vat.media import extract_audio_ffmpeg
 from vat.utils.gpu import resolve_gpu_device, is_cuda_available
 from vat.utils.logger import setup_logger
@@ -272,8 +276,19 @@ class WhisperASR:
             # 在模型下载时禁用 tqdm 以避免并发问题
             # 通过环境变量禁用 huggingface_hub 的 tqdm
             original_hf_hub_disable_progress = os.environ.get("HF_HUB_DISABLE_PROGRESS")
+            original_hf_hub_etag_timeout = os.environ.get("HF_HUB_ETAG_TIMEOUT")
             try:
                 os.environ["HF_HUB_DISABLE_PROGRESS"] = "1"
+                # fresh env 首次运行且网络不可达时，HuggingFace 元数据探测可能长时间挂起。
+                # 只收紧 etag 探测超时，不改实际大文件下载超时，避免影响正常下载大模型。
+                if not original_hf_hub_etag_timeout:
+                    os.environ["HF_HUB_ETAG_TIMEOUT"] = "10"
+
+                ensure_whisper_model_source_available(
+                    self.model_name,
+                    self.download_root,
+                    timeout_seconds=5.0,
+                )
                 
                 
                 # 构建模型参数
@@ -291,10 +306,19 @@ class WhisperASR:
                     model_kwargs["device_index"] = self.gpu_id if self.gpu_id is not None else 0
                 
                 # 加载模型
-                model = WhisperModel(
-                    self.model_name,
-                    **model_kwargs
-                )
+                try:
+                    model = WhisperModel(
+                        self.model_name,
+                        **model_kwargs
+                    )
+                except Exception as e:
+                    raise RuntimeError(
+                        format_whisper_model_load_error(
+                            self.model_name,
+                            self.download_root,
+                            e,
+                        )
+                    ) from e
                 
                 # 缓存模型
                 with self._model_cache_lock:
@@ -308,6 +332,10 @@ class WhisperASR:
                     os.environ.pop("HF_HUB_DISABLE_PROGRESS", None)
                 else:
                     os.environ["HF_HUB_DISABLE_PROGRESS"] = original_hf_hub_disable_progress
+                if original_hf_hub_etag_timeout is None:
+                    os.environ.pop("HF_HUB_ETAG_TIMEOUT", None)
+                else:
+                    os.environ["HF_HUB_ETAG_TIMEOUT"] = original_hf_hub_etag_timeout
     
     def asr_audio(
         self,

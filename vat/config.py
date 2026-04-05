@@ -818,7 +818,11 @@ class Config:
         """转换为字典"""
         def convert(obj):
             if hasattr(obj, '__dict__'):
-                return {k: convert(v) for k, v in obj.__dict__.items()}
+                return {
+                    k: convert(v)
+                    for k, v in obj.__dict__.items()
+                    if not k.startswith('_')
+                }
             elif isinstance(obj, list):
                 return [convert(item) for item in obj]
             elif isinstance(obj, dict):
@@ -1005,3 +1009,86 @@ def load_config(config_path: Optional[str] = None) -> Config:
     apply_log_level(config.logging.level)
     
     return config
+
+
+def build_starter_config() -> Dict[str, Any]:
+    """构建面向新手的 starter config 数据。
+
+    目标：
+    - 不把作者机器绝对路径、代理、cookies、Vertex 凭据直接导出给新用户
+    - 保留项目当前结构与大部分默认行为，便于用户基于 starter config 编辑
+    """
+    project_default = Path(__file__).parent.parent / "config" / "default.yaml"
+    with open(project_default, 'r', encoding='utf-8') as f:
+        starter_data = yaml.safe_load(f)
+
+    starter_data["storage"]["work_dir"] = "./work"
+    starter_data["storage"]["output_dir"] = "./data/videos"
+    starter_data["storage"]["database_path"] = "./data/database.db"
+    starter_data["storage"]["models_dir"] = "./models"
+    starter_data["storage"]["resource_dir"] = "vat/resources"
+    starter_data["storage"]["fonts_dir"] = "vat/resources/fonts"
+    starter_data["storage"]["subtitle_style_dir"] = "vat/resources/subtitle_style"
+    starter_data["storage"]["cache_dir"] = "~/.vat/cache"
+
+    starter_data["downloader"]["youtube"]["cookies_file"] = ""
+    starter_data["downloader"]["youtube"]["remote_components"] = []
+
+    scene_identify = starter_data["downloader"].setdefault("scene_identify", {})
+    scene_identify["model"] = ""
+    scene_identify["api_key"] = ""
+    scene_identify["base_url"] = ""
+
+    video_info_translate = starter_data["downloader"].setdefault("video_info_translate", {})
+    video_info_translate["model"] = ""
+    video_info_translate["api_key"] = ""
+    video_info_translate["base_url"] = ""
+
+    starter_data["asr"]["split"]["model"] = "gpt-4o-mini"
+    starter_data["asr"]["split"]["api_key"] = ""
+    starter_data["asr"]["split"]["base_url"] = ""
+
+    starter_data["translator"]["llm"]["model"] = "gpt-4o-mini"
+    starter_data["translator"]["llm"]["api_key"] = ""
+    starter_data["translator"]["llm"]["base_url"] = ""
+    starter_data["translator"]["llm"]["custom_prompt"] = ""
+    starter_data["translator"]["llm"]["optimize"]["model"] = ""
+    starter_data["translator"]["llm"]["optimize"]["api_key"] = ""
+    starter_data["translator"]["llm"]["optimize"]["base_url"] = ""
+    starter_data["translator"]["llm"]["optimize"]["custom_prompt"] = ""
+
+    bilibili_data = starter_data["uploader"]["bilibili"]
+    bilibili_data["cookies_file"] = ""
+    bilibili_data["default_tags"] = []
+    bilibili_data["season_id"] = None
+    bilibili_data.setdefault("templates", {})
+    bilibili_data["templates"]["title"] = "${translated_title}"
+    bilibili_data["templates"]["description"] = "${translated_desc}"
+    bilibili_data["templates"]["custom_vars"] = {}
+
+    starter_data["llm"]["provider"] = "openai_compatible"
+    starter_data["llm"]["auth_mode"] = "api_key"
+    starter_data["llm"]["api_key"] = "${VAT_LLM_APIKEY}"
+    starter_data["llm"]["base_url"] = "https://api.openai.com/v1"
+    starter_data["llm"]["model"] = "gpt-4o-mini"
+    starter_data["llm"]["location"] = "global"
+    starter_data["llm"]["project_id"] = ""
+    starter_data["llm"]["credentials_path"] = ""
+
+    starter_data["proxy"]["http_proxy"] = ""
+    for key in [
+        "downloader", "llm", "split", "translate", "optimize",
+        "scene_identify", "video_info_translate",
+    ]:
+        starter_data["proxy"][key] = ""
+
+    return starter_data
+
+
+def write_starter_config(yaml_path: str) -> None:
+    """将新手安全 starter config 写入 YAML 文件。"""
+    path = Path(yaml_path).expanduser()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    starter_data = build_starter_config()
+    with open(path, 'w', encoding='utf-8') as f:
+        yaml.dump(starter_data, f, allow_unicode=True, default_flow_style=False, sort_keys=False)

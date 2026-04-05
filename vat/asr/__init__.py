@@ -1,6 +1,8 @@
 """
 语音识别模块（集成 ASRData、ChunkedASR 和智能断句）
 """
+from importlib import import_module
+
 from .whisper_wrapper import WhisperASR, WhisperCPPASR, WhisperASRAdapter
 from .asr_data import ASRData, ASRDataSeg
 from .chunked_asr import ChunkedASR
@@ -18,20 +20,28 @@ from .postprocessing import (
     postprocess_asr_text,
     is_hallucination,
 )
-from .vocal_separation import (
-    VocalSeparator,
-    VocalSeparationResult,
-    separate_vocals,
-    is_vocal_separation_available,
-    check_vocal_separation_requirements,
-    get_vocal_separator,
-    get_mel_band_roformer,
-)
 from .dynamic_chunker import (
     DynamicChunker,
     AudioChunk,
     is_vad_available,
 )
+
+_VOCAL_SEPARATION_EXPORTS = {
+    'VocalSeparator',
+    'VocalSeparationResult',
+    'separate_vocals',
+    'is_vocal_separation_available',
+    'check_vocal_separation_requirements',
+    'get_vocal_separator',
+    'get_mel_band_roformer',
+}
+
+
+def __getattr__(name):
+    if name in _VOCAL_SEPARATION_EXPORTS:
+        module = import_module('.vocal_separation', __name__)
+        return getattr(module, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 __all__ = [
     # Whisper 转录器

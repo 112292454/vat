@@ -100,9 +100,20 @@ def _gpu_worker_loop(
     while True:
         # 确保模型已加载再取 chunk（不持有 chunk 等待显存，避免 chunk 被卡住）
         if asr_model is None:
-            asr_model = _load_model_with_memory_check(
-                gpu_id, whisper_kwargs, min_free_memory_mb, worker_logger
-            )
+            try:
+                asr_model = _load_model_with_memory_check(
+                    gpu_id, whisper_kwargs, min_free_memory_mb, worker_logger
+                )
+            except Exception as e:
+                worker_logger.error(f"GPU {gpu_id} 模型加载失败: {e}")
+                result_queue.put({
+                    'chunk_idx': -1,
+                    'segments': [],
+                    'error': str(e),
+                    'fatal': True,
+                    'gpu_id': gpu_id,
+                })
+                break
         
         # 从共享队列取任务
         try:
@@ -246,7 +257,17 @@ def _load_model_with_memory_check(
                 # 重新创建 ASR 实例（旧实例可能处于异常状态）
                 asr = WhisperASR(**whisper_kwargs)
             else:
-                raise
+                from .whisper_wrapper import format_whisper_model_load_error
+
+                if isinstance(e, RuntimeError) and "Whisper 模型加载失败" in str(e):
+                    raise
+                raise RuntimeError(
+                    format_whisper_model_load_error(
+                        whisper_kwargs.get('model_name', '<unknown>'),
+                        whisper_kwargs.get('download_root'),
+                        e,
+                    )
+                ) from e
     worker_logger.info(f"GPU {gpu_id} 模型加载完成")
     return asr
 
@@ -464,6 +485,14 @@ class ChunkedASR:
             
             init_kwargs = self._extract_whisper_init_kwargs(whisper_instance)
             language = self.asr_kwargs.get('language', whisper_instance.language)
+
+            from .model_source import ensure_whisper_model_source_available
+
+            ensure_whisper_model_source_available(
+                init_kwargs.get('model_name', '<unknown>'),
+                init_kwargs.get('download_root'),
+                timeout_seconds=5.0,
+            )
             
             # min_free_memory_mb: 使用 ASR 模型的显存要求（与 whisper_wrapper._resolve_device 一致）
             # TODO: 应从 config.gpu.min_free_memory_mb 统一传入，而非硬编码
@@ -531,6 +560,12 @@ class ChunkedASR:
                     )
                     continue
                 
+                if result.get('fatal'):
+                    error = result.get('error', '未知模型初始化错误')
+                    gpu_id = result.get('gpu_id', '?')
+                    logger.error(f"GPU {gpu_id} 初始化失败，提前终止分块 ASR: {error}")
+                    raise RuntimeError(error)
+
                 idx = result['chunk_idx']
                 received_results += 1
                 

@@ -87,6 +87,7 @@ def _get_uploader(with_upload_params: bool = False) -> BilibiliUploader:
         kwargs['threads'] = config.uploader.bilibili.threads
     kwargs['lock_db_path'] = config.storage.database_path
     kwargs['upload_interval'] = config.uploader.bilibili.upload_interval
+    kwargs['max_concurrent_uploads'] = getattr(config.concurrency, 'max_concurrent_uploads', 1)
     return BilibiliUploader(**kwargs)
 
 

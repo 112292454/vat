@@ -67,6 +67,7 @@ def _get_bilibili_uploader(config):
         threads=bilibili_config.threads,
         lock_db_path=config.storage.database_path,
         upload_interval=bilibili_config.upload_interval,
+        max_concurrent_uploads=getattr(config.concurrency, "max_concurrent_uploads", 1),
     )
 
 

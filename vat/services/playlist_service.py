@@ -146,6 +146,9 @@ class PlaylistService:
                 downloader_kwargs["lock_db_path"] = storage.database_path
             if hasattr(yt_cfg, "download_delay"):
                 downloader_kwargs["download_cooldown"] = yt_cfg.download_delay
+            concurrency_cfg = getattr(self._config, "concurrency", None)
+            if concurrency_cfg is not None and hasattr(concurrency_cfg, "max_concurrent_downloads"):
+                downloader_kwargs["max_concurrent_downloads"] = concurrency_cfg.max_concurrent_downloads
             self._downloader = YouTubeDownloader(**downloader_kwargs)
         return self._downloader
     

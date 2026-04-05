@@ -502,6 +502,22 @@ class ConcurrencyConfig:
     """并发配置"""
     gpu_devices: List[int]
     max_concurrent_per_gpu: int
+    max_concurrent_downloads: int = 1  # 所有 VAT 实例合计允许同时进行的下载数（默认 1 = 全局串行）
+    max_concurrent_uploads: int = 1    # 所有 VAT 实例合计允许同时进行的上传数（默认 1 = 全局串行）
+
+    def __post_init__(self):
+        if self.max_concurrent_per_gpu < 1:
+            raise ValueError(
+                f"concurrency.max_concurrent_per_gpu 必须 >= 1，得到 {self.max_concurrent_per_gpu}"
+            )
+        if self.max_concurrent_downloads < 1:
+            raise ValueError(
+                f"concurrency.max_concurrent_downloads 必须 >= 1，得到 {self.max_concurrent_downloads}"
+            )
+        if self.max_concurrent_uploads < 1:
+            raise ValueError(
+                f"concurrency.max_concurrent_uploads 必须 >= 1，得到 {self.max_concurrent_uploads}"
+            )
 
 
 @dataclass

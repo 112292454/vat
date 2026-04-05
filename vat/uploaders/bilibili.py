@@ -73,6 +73,7 @@ class BilibiliUploader(BaseUploader):
         threads: int = 3,
         lock_db_path: str = "",
         upload_interval: int = 0,
+        max_concurrent_uploads: int = 1,
     ):
         """
         初始化B站上传器
@@ -90,6 +91,11 @@ class BilibiliUploader(BaseUploader):
         self.threads = threads
         self.lock_db_path = str(Path(lock_db_path).expanduser()) if lock_db_path else ""
         self.upload_interval = int(upload_interval or 0)
+        self.max_concurrent_uploads = int(max_concurrent_uploads)
+        if self.max_concurrent_uploads < 1:
+            raise ValueError(
+                f"max_concurrent_uploads 必须 >= 1，得到 {self.max_concurrent_uploads}"
+            )
         self.cookie_data = None
         self._raw_cookie_data = None
         self._cookie_loaded = False
@@ -111,6 +117,7 @@ class BilibiliUploader(BaseUploader):
             cooldown_seconds=self.upload_interval,
             timeout_seconds=1800,
             lock_ttl_seconds=7200,
+            max_concurrent=self.max_concurrent_uploads,
         )
     
     def _load_cookie(self):
@@ -2089,4 +2096,5 @@ def create_bilibili_uploader(config: Any) -> BilibiliUploader:
         threads=config.uploader.bilibili.threads,
         lock_db_path=config.storage.database_path,
         upload_interval=config.uploader.bilibili.upload_interval,
+        max_concurrent_uploads=config.concurrency.max_concurrent_uploads,
     )

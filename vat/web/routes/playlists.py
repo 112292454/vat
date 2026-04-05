@@ -222,6 +222,7 @@ async def add_playlist(
         remote_components=config.downloader.youtube.remote_components,
         lock_db_path=config.storage.database_path,
         download_cooldown=config.downloader.youtube.download_delay,
+        max_concurrent_downloads=getattr(config.concurrency, "max_concurrent_downloads", 1),
     )
     
     try:

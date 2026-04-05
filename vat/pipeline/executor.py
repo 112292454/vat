@@ -175,6 +175,7 @@ class VideoProcessor:
                 remote_components=self.config.downloader.youtube.remote_components,
                 lock_db_path=str(self.db.db_path),
                 download_cooldown=self.config.downloader.youtube.download_delay,
+                max_concurrent_downloads=self.config.concurrency.max_concurrent_downloads,
             )
         elif st == SourceType.LOCAL:
             return LocalImporter()
@@ -2050,6 +2051,7 @@ class VideoProcessor:
                 threads=self.config.uploader.bilibili.threads,
                 lock_db_path=str(self.db.db_path),
                 upload_interval=self.config.uploader.bilibili.upload_interval,
+                max_concurrent_uploads=self.config.concurrency.max_concurrent_uploads,
             )
 
             result = uploader.upload(

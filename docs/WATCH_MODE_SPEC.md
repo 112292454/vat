@@ -151,8 +151,8 @@ CREATE TABLE resource_locks (
 
 | 资源类型 | 最大并发 | 最小间隔 | 锁超时 |
 |----------|----------|----------|--------|
-| `youtube_download` | 1 | 配置项 `downloader.youtube.download_delay`（当前默认 10s） | 30 分钟 |
-| `bilibili_upload` | 1 | 配置项 `uploader.bilibili.upload_interval`（当前默认值） | 60 分钟 |
+| `youtube_download` | 配置项 `concurrency.max_concurrent_downloads`（默认 1） | 配置项 `downloader.youtube.download_delay` | 30 分钟 |
+| `bilibili_upload` | 配置项 `concurrency.max_concurrent_uploads`（默认 1） | 配置项 `uploader.bilibili.upload_interval` | 60 分钟 |
 
 **获取锁流程**:
 
@@ -184,7 +184,7 @@ def release_lock(resource_type):
 
 ```python
 # 推荐使用方式：确保异常/kill 场景下锁的安全释放
-with resource_lock('youtube_download', timeout=300) as lock:
+with resource_lock(db_path, 'youtube_download', timeout_seconds=300, max_concurrent=1):
     do_download()
 # __exit__ 中自动 release_lock
 # 进程被 kill 时，心跳停止 → 其他进程通过心跳超时检测到死锁 → 自动清理
@@ -215,14 +215,18 @@ CREATE TABLE resource_cooldowns (
 #### 3.4.3 配置
 
 ```yaml
-# 现有配置的复用（无需新增配置项）
+# 新增全局资源并发上限；冷却间隔继续复用现有 download_delay / upload_interval
+concurrency:
+  max_concurrent_downloads: 1  # 全局下载总并发上限（所有 VAT 实例合计）
+  max_concurrent_uploads: 1    # 全局上传总并发上限（所有 VAT 实例合计）
+
 downloader:
   youtube:
-    download_delay: 10  # 已有，作为下载间隔的最小值
+    download_delay: 10  # 已有，作为下载冷却间隔的最小值
 
 uploader:
   bilibili:
-    upload_interval: 60  # 已有，作为上传间隔的最小值
+    upload_interval: 60  # 已有，作为上传冷却间隔的最小值
 ```
 
 #### 3.4.4 集成点

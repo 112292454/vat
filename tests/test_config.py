@@ -5,7 +5,7 @@ config.py 单元测试
 """
 import pytest
 from vat.config import (
-    Config, YouTubeDownloaderConfig, GPUConfig, DownloaderConfig,
+    Config, YouTubeDownloaderConfig, GPUConfig, DownloaderConfig, ConcurrencyConfig,
 )
 
 
@@ -149,10 +149,12 @@ class TestYouTubeDownloaderConfig:
     def test_download_delay_from_full_config(self):
         """通过 Config.from_dict 加载 download_delay"""
         data = _minimal_config_dict(
-            downloader={'youtube': {'format': 'best', 'max_workers': 1, 'download_delay': 15}}
+            downloader={'youtube': {'format': 'best', 'max_workers': 1, 'download_delay': 15}},
+            concurrency={'gpu_devices': [0], 'max_concurrent_per_gpu': 1, 'max_concurrent_downloads': 2}
         )
         config = Config.from_dict(data)
         assert config.downloader.youtube.download_delay == 15
+        assert config.concurrency.max_concurrent_downloads == 2
 
     def test_cookies_from_full_config(self):
         data = _minimal_config_dict(
@@ -165,6 +167,23 @@ class TestYouTubeDownloaderConfig:
         config = Config.from_dict(data)
         assert config.downloader.youtube.cookies_file == '/path/to/cookies.txt'
         assert config.downloader.youtube.remote_components == ['ejs:github']
+
+
+class TestConcurrencyConfig:
+    def test_default_transfer_limits(self):
+        cfg = ConcurrencyConfig(gpu_devices=[0], max_concurrent_per_gpu=1)
+        assert cfg.max_concurrent_downloads == 1
+        assert cfg.max_concurrent_uploads == 1
+
+    def test_explicit_transfer_limits(self):
+        cfg = ConcurrencyConfig(
+            gpu_devices=[0],
+            max_concurrent_per_gpu=1,
+            max_concurrent_downloads=3,
+            max_concurrent_uploads=4,
+        )
+        assert cfg.max_concurrent_downloads == 3
+        assert cfg.max_concurrent_uploads == 4
 
 
 class TestProxyConfig:

@@ -301,6 +301,7 @@ class YouTubeDownloader(PlatformDownloader):
         remote_components: List[str] = None,
         lock_db_path: str = "",
         download_cooldown: float = 0,
+        max_concurrent_downloads: int = 1,
     ):
         """
         初始化YouTube下载器
@@ -317,6 +318,11 @@ class YouTubeDownloader(PlatformDownloader):
         self.remote_components = remote_components or []
         self.lock_db_path = str(Path(lock_db_path).expanduser()) if lock_db_path else ""
         self.download_cooldown = float(download_cooldown or 0)
+        self.max_concurrent_downloads = int(max_concurrent_downloads)
+        if self.max_concurrent_downloads < 1:
+            raise ValueError(
+                f"max_concurrent_downloads 必须 >= 1，得到 {self.max_concurrent_downloads}"
+            )
         
         # 编译URL正则表达式
         self.video_pattern = re.compile(
@@ -346,6 +352,7 @@ class YouTubeDownloader(PlatformDownloader):
             cooldown_seconds=self.download_cooldown,
             timeout_seconds=1800,
             lock_ttl_seconds=5400,
+            max_concurrent=self.max_concurrent_downloads,
         )
     
     def _get_ydl_opts(

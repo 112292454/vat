@@ -147,6 +147,7 @@ def download(ctx, url, playlist, file):
             remote_components=config.downloader.youtube.remote_components,
             lock_db_path=config.storage.database_path,
             download_cooldown=config.downloader.youtube.download_delay,
+            max_concurrent_downloads=getattr(config.concurrency, "max_concurrent_downloads", 1),
         )
         playlist_urls = downloader.get_playlist_urls(playlist)
         urls.extend(playlist_urls)
@@ -351,6 +352,7 @@ def pipeline(ctx, url, playlist, file, title, gpus, force):
             remote_components=config.downloader.youtube.remote_components,
             lock_db_path=config.storage.database_path,
             download_cooldown=config.downloader.youtube.download_delay,
+            max_concurrent_downloads=getattr(config.concurrency, "max_concurrent_downloads", 1),
         )
         playlist_urls = downloader.get_playlist_urls(playlist)
         sources.extend(playlist_urls)
@@ -975,6 +977,7 @@ def _auto_season_sync(config, db, logger, playlist_id: str, retry_delay_minutes:
             threads=bilibili_config.threads,
             lock_db_path=config.storage.database_path,
             upload_interval=bilibili_config.upload_interval,
+            max_concurrent_uploads=getattr(config.concurrency, "max_concurrent_uploads", 1),
         )
         
         # 第一次尝试
@@ -1005,6 +1008,7 @@ def _auto_season_sync(config, db, logger, playlist_id: str, retry_delay_minutes:
             threads=bilibili_config.threads,
             lock_db_path=config.storage.database_path,
             upload_interval=bilibili_config.upload_interval,
+            max_concurrent_uploads=getattr(config.concurrency, "max_concurrent_uploads", 1),
         )
         
         logger.info(f"=== Season Sync: 第2次尝试 (playlist={playlist_id}) ===")
@@ -1708,6 +1712,7 @@ def upload_video(ctx, video_id, upload_playlist_id, platform, season, dry_run):
             threads=bilibili_config.threads,
             lock_db_path=config.storage.database_path,
             upload_interval=bilibili_config.upload_interval,
+            max_concurrent_uploads=getattr(config.concurrency, "max_concurrent_uploads", 1),
         )
         
         # 查找封面
@@ -1839,6 +1844,7 @@ def upload_sync(ctx, playlist, retry_delay):
             threads=bilibili_config.threads,
             lock_db_path=config.storage.database_path,
             upload_interval=bilibili_config.upload_interval,
+            max_concurrent_uploads=getattr(config.concurrency, "max_concurrent_uploads", 1),
         )
         
         # 第一次同步
@@ -1870,6 +1876,7 @@ def upload_sync(ctx, playlist, retry_delay):
                 threads=bilibili_config.threads,
                 lock_db_path=config.storage.database_path,
                 upload_interval=bilibili_config.upload_interval,
+                max_concurrent_uploads=getattr(config.concurrency, "max_concurrent_uploads", 1),
             )
             click.echo("开始重试...")
             result2 = season_sync(db, uploader2, playlist)
@@ -2003,6 +2010,7 @@ def upload_update_info(ctx, playlist, dry_run, yes):
             threads=bilibili_config.threads,
             lock_db_path=config.storage.database_path,
             upload_interval=bilibili_config.upload_interval,
+            max_concurrent_uploads=getattr(config.concurrency, "max_concurrent_uploads", 1),
         )
         
         success = 0
@@ -2076,6 +2084,7 @@ def upload_sync_db(ctx, season, playlist, dry_run):
             threads=bilibili_config.threads,
             lock_db_path=config.storage.database_path,
             upload_interval=bilibili_config.upload_interval,
+            max_concurrent_uploads=getattr(config.concurrency, "max_concurrent_uploads", 1),
         )
         
         # 1. 获取合集中的所有视频
@@ -2217,6 +2226,7 @@ def _get_bilibili_uploader(ctx):
         cookies_file=str(cookies_file),
         lock_db_path=config.storage.database_path,
         upload_interval=bilibili_config.upload_interval,
+        max_concurrent_uploads=getattr(config.concurrency, "max_concurrent_uploads", 1),
     )
 
 

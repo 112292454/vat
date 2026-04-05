@@ -112,16 +112,35 @@ class TestResourceLockBasic:
         assert row is None
         conn.close()
     
-    def test_reentrant(self, db_path):
-        """测试同进程重入"""
-        lock = ResourceLock(db_path, 'test_reentrant', timeout_seconds=5)
+    def test_same_process_second_instance_blocks_when_max_concurrent_is_one(self, db_path):
+        """同进程不同实例也必须遵守全局上限，不能按 PID 重入绕过"""
+        lock = ResourceLock(db_path, 'test_reentrant', timeout_seconds=5, max_concurrent=1)
         assert lock.acquire() is True
         
-        # 同进程再次尝试获取应成功（重入）
-        lock2 = ResourceLock(db_path, 'test_reentrant', timeout_seconds=5)
-        assert lock2._try_acquire() is True
+        lock2 = ResourceLock(db_path, 'test_reentrant', timeout_seconds=5, max_concurrent=1)
+        assert lock2._try_acquire() is False
         
         lock.release()
+
+    def test_max_concurrent_two_allows_two_holders(self, db_path):
+        """配置 max_concurrent=2 时，应允许同时持有两个 permit"""
+        lock1 = ResourceLock(db_path, 'test_multi', timeout_seconds=5, max_concurrent=2)
+        lock2 = ResourceLock(db_path, 'test_multi', timeout_seconds=5, max_concurrent=2)
+        lock3 = ResourceLock(db_path, 'test_multi', timeout_seconds=5, max_concurrent=2)
+
+        assert lock1.acquire() is True
+        assert lock2._try_acquire() is True
+        assert lock3._try_acquire() is False
+
+        conn = sqlite3.connect(db_path)
+        count = conn.execute(
+            "SELECT COUNT(*) FROM resource_locks WHERE resource_type = 'test_multi'"
+        ).fetchone()[0]
+        conn.close()
+        assert count == 2
+
+        lock1.release()
+        lock2.release()
     
     def test_different_resource_types(self, db_path):
         """测试不同资源类型互不影响"""
@@ -397,9 +416,32 @@ class TestConcurrency:
         for t in threads:
             t.join(timeout=30)
         
-        # 同进程内线程共享 PID，会重入成功
-        # 所以这里验证所有线程都成功完成
+        # 同进程线程不再按 PID 重入，但会在释放后依次获取
         assert len(results) == 3, f"部分线程失败: results={results}, errors={errors}"
+
+    def test_max_concurrent_threads(self, db_path):
+        """max_concurrent=2 时，最多只允许两个线程同时进入临界区"""
+        active = 0
+        peak_active = 0
+        active_lock = threading.Lock()
+
+        def worker():
+            nonlocal active, peak_active
+            with resource_lock(db_path, 'test_thread_multi', cooldown_seconds=0, timeout_seconds=10, max_concurrent=2):
+                with active_lock:
+                    active += 1
+                    peak_active = max(peak_active, active)
+                time.sleep(0.2)
+                with active_lock:
+                    active -= 1
+
+        threads = [threading.Thread(target=worker) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30)
+
+        assert peak_active == 2
 
 
 class TestIsPidAlive:

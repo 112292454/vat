@@ -17,6 +17,7 @@ def _make_uploader(tmp_path):
     uploader.threads = 3
     uploader.lock_db_path = str(tmp_path / "locks.db")
     uploader.upload_interval = 60
+    uploader.max_concurrent_uploads = 1
     uploader.cookie_data = {"SESSDATA": "s", "bili_jct": "csrf", "DedeUserID": "uid"}
     uploader._raw_cookie_data = {"cookie_info": {"cookies": []}}
     uploader._cookie_loaded = True
@@ -100,6 +101,7 @@ class TestUploadContracts:
     def test_upload_acquires_global_resource_lock(self, tmp_path, monkeypatch):
         uploader = _make_uploader(tmp_path)
         uploader.upload_interval = 42
+        uploader.max_concurrent_uploads = 3
         video = tmp_path / "video.mp4"
         video.write_bytes(b"00")
         calls = []
@@ -128,6 +130,7 @@ class TestUploadContracts:
             "cooldown_seconds": 42,
             "timeout_seconds": 1800,
             "lock_ttl_seconds": 7200,
+            "max_concurrent": 3,
         }]
 
     def test_upload_returns_failure_when_video_path_missing(self, tmp_path):
@@ -277,6 +280,7 @@ class TestReplacementUploadContracts:
     def test_upload_replacement_file_acquires_global_resource_lock(self, tmp_path, monkeypatch):
         uploader = _make_uploader(tmp_path)
         uploader.upload_interval = 33
+        uploader.max_concurrent_uploads = 2
         video = tmp_path / "replacement.mp4"
         video.write_bytes(b"00")
         calls = []
@@ -299,6 +303,7 @@ class TestReplacementUploadContracts:
             "cooldown_seconds": 33,
             "timeout_seconds": 1800,
             "lock_ttl_seconds": 7200,
+            "max_concurrent": 2,
         }]
 
 
@@ -416,6 +421,9 @@ class TestBilibiliUploaderHelpers:
             storage=SimpleNamespace(
                 database_path="/tmp/test.db",
             ),
+            concurrency=SimpleNamespace(
+                max_concurrent_uploads=4,
+            ),
             uploader=SimpleNamespace(
                 bilibili=SimpleNamespace(
                     cookies_file="cookies.json",
@@ -434,3 +442,4 @@ class TestBilibiliUploaderHelpers:
         assert uploader.threads == 5
         assert uploader.lock_db_path == "/tmp/test.db"
         assert uploader.upload_interval == 75
+        assert uploader.max_concurrent_uploads == 4

@@ -164,15 +164,15 @@ logger.info("处理开始")
 
 | 资源 | 最大并发 | 最小间隔 | 锁超时 |
 |------|----------|----------|--------|
-| `youtube_download` | 1 | 配置项 `download_delay` | 30 分钟 |
-| `bilibili_upload` | 1 | 配置项 `upload_interval` | 60 分钟 |
+| `youtube_download` | 配置项 `concurrency.max_concurrent_downloads`（默认 1） | 配置项 `download_delay` | 30 分钟 |
+| `bilibili_upload` | 配置项 `concurrency.max_concurrent_uploads`（默认 1） | 配置项 `upload_interval` | 60 分钟 |
 
 ### 使用方式
 
 ```python
 from vat.utils.resource_lock import resource_lock
 
-with resource_lock(db_path, 'youtube_download', timeout_seconds=300):
+with resource_lock(db_path, 'youtube_download', timeout_seconds=300, max_concurrent=1):
     do_download()
 # 自动释放 + 冷却间隔控制
 ```

@@ -142,6 +142,7 @@ class TestDownloadPathResilience:
         downloader = YouTubeDownloader(
             lock_db_path=str(tmp_path / "locks.db"),
             download_cooldown=17,
+            max_concurrent_downloads=2,
         )
 
         monkeypatch.setattr("vat.downloaders.youtube.resource_lock", fake_resource_lock, raising=False)
@@ -175,6 +176,7 @@ class TestDownloadPathResilience:
             "cooldown_seconds": 17,
             "timeout_seconds": 1800,
             "lock_ttl_seconds": 5400,
+            "max_concurrent": 2,
         }]
 
     def test_get_ydl_opts_does_not_force_player_clients_by_default(self, tmp_path):

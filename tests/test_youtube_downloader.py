@@ -1,6 +1,9 @@
 """youtube downloader 行为测试。"""
 
+from contextlib import contextmanager
 from pathlib import Path
+
+import pytest
 
 from vat.downloaders.youtube import YouTubeDownloader
 
@@ -101,6 +104,79 @@ class TestGetVideoInfoFallback:
 
 
 class TestDownloadPathResilience:
+    def test_download_requires_lock_db_path(self, monkeypatch, tmp_path):
+        downloader = YouTubeDownloader()
+
+        monkeypatch.setattr(
+            downloader,
+            "_extract_info_with_retry",
+            lambda *_args, **_kwargs: {
+                "id": "abc123def45",
+                "title": "Test Title",
+                "description": "Test Description",
+                "duration": 123,
+                "uploader": "Uploader",
+                "upload_date": "20250101",
+                "thumbnail": "https://example.com/thumb.jpg",
+                "subtitles": {},
+                "automatic_captions": {},
+            },
+        )
+        monkeypatch.setattr(
+            downloader,
+            "_download_with_retry",
+            lambda *_args, **_kwargs: (tmp_path / "abc123def45.mp4").write_bytes(b"00"),
+        )
+
+        with pytest.raises(RuntimeError, match="lock_db_path"):
+            downloader.download("https://www.youtube.com/watch?v=abc123def45", tmp_path)
+
+    def test_download_acquires_global_resource_lock(self, monkeypatch, tmp_path):
+        calls = []
+
+        @contextmanager
+        def fake_resource_lock(**kwargs):
+            calls.append(kwargs)
+            yield object()
+
+        downloader = YouTubeDownloader(
+            lock_db_path=str(tmp_path / "locks.db"),
+            download_cooldown=17,
+        )
+
+        monkeypatch.setattr("vat.downloaders.youtube.resource_lock", fake_resource_lock, raising=False)
+        monkeypatch.setattr(
+            downloader,
+            "_extract_info_with_retry",
+            lambda *_args, **_kwargs: {
+                "id": "abc123def45",
+                "title": "Test Title",
+                "description": "Test Description",
+                "duration": 123,
+                "uploader": "Uploader",
+                "upload_date": "20250101",
+                "thumbnail": "https://example.com/thumb.jpg",
+                "subtitles": {},
+                "automatic_captions": {},
+            },
+        )
+        monkeypatch.setattr(
+            downloader,
+            "_download_with_retry",
+            lambda *_args, **_kwargs: (tmp_path / "abc123def45.mp4").write_bytes(b"00"),
+        )
+
+        result = downloader.download("https://www.youtube.com/watch?v=abc123def45", tmp_path)
+
+        assert result["video_path"] == tmp_path / "abc123def45.mp4"
+        assert calls == [{
+            "db_path": str(tmp_path / "locks.db"),
+            "resource_type": "youtube_download",
+            "cooldown_seconds": 17,
+            "timeout_seconds": 1800,
+            "lock_ttl_seconds": 5400,
+        }]
+
     def test_get_ydl_opts_does_not_force_player_clients_by_default(self, tmp_path):
         downloader = YouTubeDownloader()
 

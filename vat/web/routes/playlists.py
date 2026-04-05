@@ -220,6 +220,8 @@ async def add_playlist(
         video_format=config.downloader.youtube.format,
         cookies_file=config.downloader.youtube.cookies_file,
         remote_components=config.downloader.youtube.remote_components,
+        lock_db_path=config.storage.database_path,
+        download_cooldown=config.downloader.youtube.download_delay,
     )
     
     try:

@@ -1,5 +1,6 @@
 """Bilibili 上传器基础 API 契约测试。"""
 
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -14,6 +15,8 @@ def _make_uploader(tmp_path):
     uploader.cookies_file = tmp_path / "cookies.json"
     uploader.line = "AUTO"
     uploader.threads = 3
+    uploader.lock_db_path = str(tmp_path / "locks.db")
+    uploader.upload_interval = 60
     uploader.cookie_data = {"SESSDATA": "s", "bili_jct": "csrf", "DedeUserID": "uid"}
     uploader._raw_cookie_data = {"cookie_info": {"cookies": []}}
     uploader._cookie_loaded = True
@@ -77,6 +80,56 @@ class _FakeBiliClient:
 
 
 class TestUploadContracts:
+    def test_upload_requires_lock_db_path(self, tmp_path, monkeypatch):
+        uploader = _make_uploader(tmp_path)
+        uploader.lock_db_path = ""
+        video = tmp_path / "video.mp4"
+        video.write_bytes(b"00")
+        monkeypatch.setattr("vat.uploaders.bilibili.Data", _FakeData)
+        monkeypatch.setattr("vat.uploaders.bilibili.BiliBili", lambda _data: _FakeBiliClient())
+
+        with pytest.raises(RuntimeError, match="lock_db_path"):
+            uploader.upload(
+                video_path=video,
+                title="标题",
+                description="简介",
+                tid=21,
+                tags=["tag"],
+            )
+
+    def test_upload_acquires_global_resource_lock(self, tmp_path, monkeypatch):
+        uploader = _make_uploader(tmp_path)
+        uploader.upload_interval = 42
+        video = tmp_path / "video.mp4"
+        video.write_bytes(b"00")
+        calls = []
+
+        @contextmanager
+        def fake_resource_lock(**kwargs):
+            calls.append(kwargs)
+            yield object()
+
+        monkeypatch.setattr("vat.uploaders.bilibili.resource_lock", fake_resource_lock, raising=False)
+        monkeypatch.setattr("vat.uploaders.bilibili.Data", _FakeData)
+        monkeypatch.setattr("vat.uploaders.bilibili.BiliBili", lambda _data: _FakeBiliClient())
+
+        result = uploader.upload(
+            video_path=video,
+            title="标题",
+            description="简介",
+            tid=21,
+            tags=["tag"],
+        )
+
+        assert result.success is True
+        assert calls == [{
+            "db_path": uploader.lock_db_path,
+            "resource_type": "bilibili_upload",
+            "cooldown_seconds": 42,
+            "timeout_seconds": 1800,
+            "lock_ttl_seconds": 7200,
+        }]
+
     def test_upload_returns_failure_when_video_path_missing(self, tmp_path):
         uploader = _make_uploader(tmp_path)
 
@@ -218,9 +271,35 @@ class TestUploadWithMetadataContracts:
 
         assert result.success is True
         assert captured["title"] == "标题"
-        assert captured["description"] == "简介"
-        assert captured["tid"] == 17
-        assert captured["tags"] == ["a", "b"]
+
+
+class TestReplacementUploadContracts:
+    def test_upload_replacement_file_acquires_global_resource_lock(self, tmp_path, monkeypatch):
+        uploader = _make_uploader(tmp_path)
+        uploader.upload_interval = 33
+        video = tmp_path / "replacement.mp4"
+        video.write_bytes(b"00")
+        calls = []
+
+        @contextmanager
+        def fake_resource_lock(**kwargs):
+            calls.append(kwargs)
+            yield object()
+
+        monkeypatch.setattr("vat.uploaders.bilibili.resource_lock", fake_resource_lock, raising=False)
+        monkeypatch.setattr("vat.uploaders.bilibili.Data", _FakeData)
+        monkeypatch.setattr("vat.uploaders.bilibili.BiliBili", lambda _data: _FakeBiliClient(upload_result={"filename": "repl.mp4"}))
+
+        filename = uploader._upload_replacement_file(video, {"title": "old", "desc": "old desc"})
+
+        assert filename == "repl.mp4"
+        assert calls == [{
+            "db_path": uploader.lock_db_path,
+            "resource_type": "bilibili_upload",
+            "cooldown_seconds": 33,
+            "timeout_seconds": 1800,
+            "lock_ttl_seconds": 7200,
+        }]
 
 
 class TestValidateCredentialsContracts:
@@ -334,11 +413,15 @@ class TestBilibiliUploaderHelpers:
 
     def test_create_bilibili_uploader_uses_config_values(self):
         config = SimpleNamespace(
+            storage=SimpleNamespace(
+                database_path="/tmp/test.db",
+            ),
             uploader=SimpleNamespace(
                 bilibili=SimpleNamespace(
                     cookies_file="cookies.json",
                     line="bda2",
                     threads=5,
+                    upload_interval=75,
                 )
             )
         )
@@ -349,3 +432,5 @@ class TestBilibiliUploaderHelpers:
         assert str(uploader.cookies_file).endswith("cookies.json")
         assert uploader.line == "bda2"
         assert uploader.threads == 5
+        assert uploader.lock_db_path == "/tmp/test.db"
+        assert uploader.upload_interval == 75

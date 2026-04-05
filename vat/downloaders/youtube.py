@@ -14,6 +14,7 @@ from yt_dlp import YoutubeDL
 
 from .base import PlatformDownloader
 from vat.utils.logger import setup_logger
+from vat.utils.resource_lock import resource_lock
 
 logger = setup_logger("downloader.youtube")
 
@@ -292,8 +293,15 @@ class YouTubeDownloader(PlatformDownloader):
     def guaranteed_fields(self) -> set:
         return {'title', 'duration', 'description', 'uploader', 'thumbnail'}
     
-    def __init__(self, proxy: str = None, video_format: str = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]",
-                 cookies_file: str = "", remote_components: List[str] = None):
+    def __init__(
+        self,
+        proxy: str = None,
+        video_format: str = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]",
+        cookies_file: str = "",
+        remote_components: List[str] = None,
+        lock_db_path: str = "",
+        download_cooldown: float = 0,
+    ):
         """
         初始化YouTube下载器
         
@@ -307,6 +315,8 @@ class YouTubeDownloader(PlatformDownloader):
         self.video_format = video_format
         self.cookies_file = cookies_file or ""
         self.remote_components = remote_components or []
+        self.lock_db_path = str(Path(lock_db_path).expanduser()) if lock_db_path else ""
+        self.download_cooldown = float(download_cooldown or 0)
         
         # 编译URL正则表达式
         self.video_pattern = re.compile(
@@ -317,6 +327,25 @@ class YouTubeDownloader(PlatformDownloader):
         )
         self.channel_pattern = re.compile(
             r'(?:https?://)?(?:www\.)?youtube\.com/(?:c/|channel/|user/|@)([a-zA-Z0-9_-]+)'
+        )
+
+    def _require_lock_db_path(self) -> None:
+        """真实下载必须显式提供锁库路径，避免出现无锁旁路。"""
+        if not self.lock_db_path:
+            raise RuntimeError(
+                "YouTubeDownloader.download() 需要 lock_db_path 才允许执行，"
+                "以保证 youtube_download 全局锁生效。"
+            )
+
+    def _download_lock(self):
+        """构造 YouTube 下载的跨进程全局锁。"""
+        self._require_lock_db_path()
+        return resource_lock(
+            db_path=self.lock_db_path,
+            resource_type='youtube_download',
+            cooldown_seconds=self.download_cooldown,
+            timeout_seconds=1800,
+            lock_ttl_seconds=5400,
         )
     
     def _get_ydl_opts(
@@ -383,6 +412,7 @@ class YouTubeDownloader(PlatformDownloader):
             下载信息字典，包含 video_path, title, metadata, subtitles
         """
         assert url and isinstance(url, str), "调用契约错误: url 必须是非空字符串"
+        self._require_lock_db_path()
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         
@@ -443,7 +473,8 @@ class YouTubeDownloader(PlatformDownloader):
             logger.info(f"开始下载视频: {title}")
             if download_subs and (available_subs or available_auto_subs):
                 logger.info(f"同时下载字幕 - 手动: {available_subs[:5]}, 自动: {available_auto_subs[:5]}...")
-            self._download_with_retry(url, ydl_opts, video_id)
+            with self._download_lock():
+                self._download_with_retry(url, ydl_opts, video_id)
         
         # 查找下载的视频文件
         video_path = None
@@ -724,8 +755,9 @@ class YouTubeDownloader(PlatformDownloader):
             
             try:
                 logger.info(f"[直播] 尝试 live_from_start 从开头下载: {video_id} (第 {attempt} 次)")
-                with YoutubeDL(live_opts) as ydl:
-                    ret_code = ydl.download([url])
+                with self._download_lock():
+                    with YoutubeDL(live_opts) as ydl:
+                        ret_code = ydl.download([url])
                 if ret_code == 0:
                     logger.info(f"[直播] live_from_start 成功完成: {video_id}")
                     return
@@ -764,7 +796,8 @@ class YouTubeDownloader(PlatformDownloader):
         # === 阶段 3：直播结束，作为普通 VOD 下载 ===
         logger.info(f"[直播] 直播已结束，开始下载完整 VOD: {video_id}")
         vod_opts = self._get_ydl_opts(output_dir, download_subs=download_subs, sub_langs=sub_langs)
-        self._download_with_retry(url, vod_opts, video_id)
+        with self._download_lock():
+            self._download_with_retry(url, vod_opts, video_id)
     
     def _wait_for_stream_end(self, url: str, video_id: str) -> None:
         """阻塞轮询等待直播结束

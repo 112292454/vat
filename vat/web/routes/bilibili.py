@@ -85,6 +85,8 @@ def _get_uploader(with_upload_params: bool = False) -> BilibiliUploader:
     if with_upload_params:
         kwargs['line'] = config.uploader.bilibili.line
         kwargs['threads'] = config.uploader.bilibili.threads
+    kwargs['lock_db_path'] = config.storage.database_path
+    kwargs['upload_interval'] = config.uploader.bilibili.upload_interval
     return BilibiliUploader(**kwargs)
 
 

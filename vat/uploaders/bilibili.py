@@ -12,8 +12,12 @@ from dataclasses import dataclass
 
 from .base import BaseUploader
 from vat.utils.logger import setup_logger
+from vat.utils.resource_lock import resource_lock
 
 logger = setup_logger("uploader.bilibili")
+
+BiliBili = None
+Data = None
 
 try:
     from biliup.plugins.bili_webup import BiliBili, Data
@@ -66,7 +70,9 @@ class BilibiliUploader(BaseUploader):
         self,
         cookies_file: str,
         line: str = 'AUTO',
-        threads: int = 3
+        threads: int = 3,
+        lock_db_path: str = "",
+        upload_interval: int = 0,
     ):
         """
         初始化B站上传器
@@ -82,9 +88,30 @@ class BilibiliUploader(BaseUploader):
         self.cookies_file = Path(cookies_file).expanduser()
         self.line = line
         self.threads = threads
+        self.lock_db_path = str(Path(lock_db_path).expanduser()) if lock_db_path else ""
+        self.upload_interval = int(upload_interval or 0)
         self.cookie_data = None
         self._raw_cookie_data = None
         self._cookie_loaded = False
+
+    def _require_lock_db_path(self, method_name: str) -> None:
+        """真实视频上传必须显式提供锁库路径，避免出现无锁旁路。"""
+        if not self.lock_db_path:
+            raise RuntimeError(
+                f"BilibiliUploader.{method_name}() 需要 lock_db_path 才允许执行，"
+                "以保证 bilibili_upload 全局锁生效。"
+            )
+
+    def _upload_lock(self, method_name: str):
+        """构造 B站上传的跨进程全局锁。"""
+        self._require_lock_db_path(method_name)
+        return resource_lock(
+            db_path=self.lock_db_path,
+            resource_type='bilibili_upload',
+            cooldown_seconds=self.upload_interval,
+            timeout_seconds=1800,
+            lock_ttl_seconds=7200,
+        )
     
     def _load_cookie(self):
         """加载cookie文件"""
@@ -152,6 +179,8 @@ class BilibiliUploader(BaseUploader):
         video_path = Path(video_path)
         if not video_path.exists():
             return UploadResult(success=False, error=f"视频文件不存在: {video_path}")
+
+        self._require_lock_db_path("upload")
         
         # 加载cookie
         try:
@@ -186,54 +215,55 @@ class BilibiliUploader(BaseUploader):
             if dynamic:
                 data.dynamic = dynamic
             
-            with BiliBili(data) as bili:
-                # 登录（biliup 要求原始 JSON 结构，含 cookie_info/token_info）
-                bili.login_by_cookies(self._raw_cookie_data)
-                if 'access_token' in self.cookie_data:
-                    bili.access_token = self.cookie_data['access_token']
-                
-                # 上传封面
-                if cover_path and Path(cover_path).exists():
-                    logger.info(f"上传封面: {cover_path}")
-                    try:
-                        cover_url = bili.cover_up(str(cover_path))
-                        data.cover = cover_url.replace('http:', '')
-                        logger.info(f"封面上传成功")
-                    except Exception as e:
-                        logger.warning(f"封面上传失败，继续上传视频: {e}")
-                
-                # 上传视频文件（含 B站风控重试：preupload 不返回 auth 时等待后重试）
-                logger.info("上传视频文件...")
-                max_retries = 3
-                retry_base_wait = 120  # 首次重试等待 120s，后续指数递增
-                for attempt in range(max_retries + 1):
-                    try:
-                        video_part = bili.upload_file(str(video_path), lines=self.line, tasks=self.threads)
-                        break
-                    except KeyError as ke:
-                        if attempt < max_retries:
-                            wait = retry_base_wait * (2 ** attempt)
-                            logger.warning(
-                                f"上传视频文件失败 (KeyError: {ke})，疑似B站风控。"
-                                f"等待 {wait}s 后重试 ({attempt + 1}/{max_retries})..."
-                            )
-                            time.sleep(wait)
-                        else:
-                            raise
-                video_part['title'] = 'P1'
-                data.append(video_part)
-                
-                # 使用 Web 端 API 提交（TV 端 API 已停用）
-                logger.info("提交视频（Web端API）...")
-                ret = bili.submit_web()
-                
-                if ret.get('code') == 0:
-                    resp_data = ret.get('data', {})
-                    bvid = resp_data.get('bvid', '')
-                    aid = resp_data.get('aid', 0)
-                    logger.info(f"上传成功: {title}, BV号: {bvid}, AV号: {aid}")
-                    return UploadResult(success=True, bvid=bvid, aid=aid)
-                else:
+            with self._upload_lock("upload"):
+                with BiliBili(data) as bili:
+                    # 登录（biliup 要求原始 JSON 结构，含 cookie_info/token_info）
+                    bili.login_by_cookies(self._raw_cookie_data)
+                    if 'access_token' in self.cookie_data:
+                        bili.access_token = self.cookie_data['access_token']
+
+                    # 上传封面
+                    if cover_path and Path(cover_path).exists():
+                        logger.info(f"上传封面: {cover_path}")
+                        try:
+                            cover_url = bili.cover_up(str(cover_path))
+                            data.cover = cover_url.replace('http:', '')
+                            logger.info(f"封面上传成功")
+                        except Exception as e:
+                            logger.warning(f"封面上传失败，继续上传视频: {e}")
+
+                    # 上传视频文件（含 B站风控重试：preupload 不返回 auth 时等待后重试）
+                    logger.info("上传视频文件...")
+                    max_retries = 3
+                    retry_base_wait = 120  # 首次重试等待 120s，后续指数递增
+                    for attempt in range(max_retries + 1):
+                        try:
+                            video_part = bili.upload_file(str(video_path), lines=self.line, tasks=self.threads)
+                            break
+                        except KeyError as ke:
+                            if attempt < max_retries:
+                                wait = retry_base_wait * (2 ** attempt)
+                                logger.warning(
+                                    f"上传视频文件失败 (KeyError: {ke})，疑似B站风控。"
+                                    f"等待 {wait}s 后重试 ({attempt + 1}/{max_retries})..."
+                                )
+                                time.sleep(wait)
+                            else:
+                                raise
+                    video_part['title'] = 'P1'
+                    data.append(video_part)
+
+                    # 使用 Web 端 API 提交（TV 端 API 已停用）
+                    logger.info("提交视频（Web端API）...")
+                    ret = bili.submit_web()
+
+                    if ret.get('code') == 0:
+                        resp_data = ret.get('data', {})
+                        bvid = resp_data.get('bvid', '')
+                        aid = resp_data.get('aid', 0)
+                        logger.info(f"上传成功: {title}, BV号: {bvid}, AV号: {aid}")
+                        return UploadResult(success=True, bvid=bvid, aid=aid)
+
                     error_msg = ret.get('message', '未知错误')
                     logger.error(f"上传失败: {error_msg}")
                     return UploadResult(success=False, error=error_msg)
@@ -1499,31 +1529,31 @@ class BilibiliUploader(BaseUploader):
     def _upload_replacement_file(self, new_video_path: Path, old_video: Dict[str, Any]) -> Optional[str]:
         """上传替换视频文件，返回新 filename。"""
         try:
-            from biliup.plugins.bili_webup import BiliBili, Data
-
+            self._require_lock_db_path("_upload_replacement_file")
             self._load_cookie()
             video_part = Data()
             video_part.title = old_video.get('title', '')
             video_part.desc = old_video.get('desc', '')
 
-            with BiliBili(video_part) as bili:
-                bili.login_by_cookies(self._raw_cookie_data)
+            with self._upload_lock("_upload_replacement_file"):
+                with BiliBili(video_part) as bili:
+                    bili.login_by_cookies(self._raw_cookie_data)
 
-                new_video_path = Path(new_video_path)
-                uploaded = bili.upload_file(str(new_video_path), lines=self.line, tasks=self.threads)
-                logger.info(f"  upload_file 返回值: {uploaded}")
+                    new_video_path = Path(new_video_path)
+                    uploaded = bili.upload_file(str(new_video_path), lines=self.line, tasks=self.threads)
+                    logger.info(f"  upload_file 返回值: {uploaded}")
 
-                if not uploaded:
-                    logger.error("视频文件上传失败: 返回值为空")
-                    return None
+                    if not uploaded:
+                        logger.error("视频文件上传失败: 返回值为空")
+                        return None
 
-                new_filename = uploaded.get('bili_filename') or uploaded.get('filename')
-                if not new_filename:
-                    logger.error(f"视频文件上传后无 filename 字段: {uploaded}")
-                    return None
+                    new_filename = uploaded.get('bili_filename') or uploaded.get('filename')
+                    if not new_filename:
+                        logger.error(f"视频文件上传后无 filename 字段: {uploaded}")
+                        return None
 
-                logger.info(f"  新视频上传成功: filename={new_filename}")
-                return new_filename
+                    logger.info(f"  新视频上传成功: filename={new_filename}")
+                    return new_filename
         except Exception as e:
             logger.error(f"上传新视频文件异常: {e}")
             return None
@@ -2056,5 +2086,7 @@ def create_bilibili_uploader(config: Any) -> BilibiliUploader:
     return BilibiliUploader(
         cookies_file=config.uploader.bilibili.cookies_file,
         line=config.uploader.bilibili.line,
-        threads=config.uploader.bilibili.threads
+        threads=config.uploader.bilibili.threads,
+        lock_db_path=config.storage.database_path,
+        upload_interval=config.uploader.bilibili.upload_interval,
     )

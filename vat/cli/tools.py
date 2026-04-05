@@ -64,7 +64,9 @@ def _get_bilibili_uploader(config):
     return BilibiliUploader(
         cookies_file=str(cookies_file),
         line=bilibili_config.line,
-        threads=bilibili_config.threads
+        threads=bilibili_config.threads,
+        lock_db_path=config.storage.database_path,
+        upload_interval=bilibili_config.upload_interval,
     )
 
 

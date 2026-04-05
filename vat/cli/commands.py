@@ -24,6 +24,9 @@ CONFIG = None
 LOGGER = None
 os.environ["USE_TF"] = "0"
 os.environ["USE_FLAX"] = "0"
+VideoProcessor = None
+YouTubeDownloader = None
+PlaylistService = None
 
 def get_config(config_path: Optional[str] = None) -> Config:
     """获取配置（延迟加载）
@@ -72,17 +75,26 @@ def run_video_batch(*args, **kwargs):
 
 
 def _get_video_processor_cls():
-    from ..pipeline import VideoProcessor
+    global VideoProcessor
+    if VideoProcessor is None:
+        from ..pipeline import VideoProcessor as _VideoProcessor
+        VideoProcessor = _VideoProcessor
     return VideoProcessor
 
 
 def _get_youtube_downloader_cls():
-    from ..downloaders import YouTubeDownloader
+    global YouTubeDownloader
+    if YouTubeDownloader is None:
+        from ..downloaders import YouTubeDownloader as _YouTubeDownloader
+        YouTubeDownloader = _YouTubeDownloader
     return YouTubeDownloader
 
 
 def _get_playlist_service_cls():
-    from ..services import PlaylistService
+    global PlaylistService
+    if PlaylistService is None:
+        from ..services import PlaylistService as _PlaylistService
+        PlaylistService = _PlaylistService
     return PlaylistService
 
 
@@ -133,6 +145,8 @@ def download(ctx, url, playlist, file):
             video_format=config.downloader.youtube.format,
             cookies_file=config.downloader.youtube.cookies_file,
             remote_components=config.downloader.youtube.remote_components,
+            lock_db_path=config.storage.database_path,
+            download_cooldown=config.downloader.youtube.download_delay,
         )
         playlist_urls = downloader.get_playlist_urls(playlist)
         urls.extend(playlist_urls)
@@ -335,6 +349,8 @@ def pipeline(ctx, url, playlist, file, title, gpus, force):
             video_format=config.downloader.youtube.format,
             cookies_file=config.downloader.youtube.cookies_file,
             remote_components=config.downloader.youtube.remote_components,
+            lock_db_path=config.storage.database_path,
+            download_cooldown=config.downloader.youtube.download_delay,
         )
         playlist_urls = downloader.get_playlist_urls(playlist)
         sources.extend(playlist_urls)
@@ -956,7 +972,9 @@ def _auto_season_sync(config, db, logger, playlist_id: str, retry_delay_minutes:
         uploader = BilibiliUploader(
             cookies_file=str(cookies_file),
             line=bilibili_config.line,
-            threads=bilibili_config.threads
+            threads=bilibili_config.threads,
+            lock_db_path=config.storage.database_path,
+            upload_interval=bilibili_config.upload_interval,
         )
         
         # 第一次尝试
@@ -984,7 +1002,9 @@ def _auto_season_sync(config, db, logger, playlist_id: str, retry_delay_minutes:
         uploader2 = BilibiliUploader(
             cookies_file=str(cookies_file),
             line=bilibili_config.line,
-            threads=bilibili_config.threads
+            threads=bilibili_config.threads,
+            lock_db_path=config.storage.database_path,
+            upload_interval=bilibili_config.upload_interval,
         )
         
         logger.info(f"=== Season Sync: 第2次尝试 (playlist={playlist_id}) ===")
@@ -1685,7 +1705,9 @@ def upload_video(ctx, video_id, upload_playlist_id, platform, season, dry_run):
         uploader = BilibiliUploader(
             cookies_file=str(cookies_file),
             line=bilibili_config.line,
-            threads=bilibili_config.threads
+            threads=bilibili_config.threads,
+            lock_db_path=config.storage.database_path,
+            upload_interval=bilibili_config.upload_interval,
         )
         
         # 查找封面
@@ -1814,7 +1836,9 @@ def upload_sync(ctx, playlist, retry_delay):
         uploader = BilibiliUploader(
             cookies_file=str(cookies_file),
             line=bilibili_config.line,
-            threads=bilibili_config.threads
+            threads=bilibili_config.threads,
+            lock_db_path=config.storage.database_path,
+            upload_interval=bilibili_config.upload_interval,
         )
         
         # 第一次同步
@@ -1843,7 +1867,9 @@ def upload_sync(ctx, playlist, retry_delay):
             uploader2 = BilibiliUploader(
                 cookies_file=str(cookies_file),
                 line=bilibili_config.line,
-                threads=bilibili_config.threads
+                threads=bilibili_config.threads,
+                lock_db_path=config.storage.database_path,
+                upload_interval=bilibili_config.upload_interval,
             )
             click.echo("开始重试...")
             result2 = season_sync(db, uploader2, playlist)
@@ -1974,7 +2000,9 @@ def upload_update_info(ctx, playlist, dry_run, yes):
         uploader = BilibiliUploader(
             cookies_file=str(cookies_file),
             line=bilibili_config.line,
-            threads=bilibili_config.threads
+            threads=bilibili_config.threads,
+            lock_db_path=config.storage.database_path,
+            upload_interval=bilibili_config.upload_interval,
         )
         
         success = 0
@@ -2045,7 +2073,9 @@ def upload_sync_db(ctx, season, playlist, dry_run):
         uploader = BilibiliUploader(
             cookies_file=str(cookies_file),
             line=bilibili_config.line,
-            threads=bilibili_config.threads
+            threads=bilibili_config.threads,
+            lock_db_path=config.storage.database_path,
+            upload_interval=bilibili_config.upload_interval,
         )
         
         # 1. 获取合集中的所有视频
@@ -2183,7 +2213,11 @@ def _get_bilibili_uploader(ctx):
     project_root = Path(__file__).parent.parent.parent
     cookies_file = project_root / bilibili_config.cookies_file
     
-    return BilibiliUploader(cookies_file=str(cookies_file))
+    return BilibiliUploader(
+        cookies_file=str(cookies_file),
+        lock_db_path=config.storage.database_path,
+        upload_interval=bilibili_config.upload_interval,
+    )
 
 
 @bilibili.command('seasons')

@@ -29,7 +29,6 @@ from ..utils.cache import disable_cache, enable_cache
 from ..utils.logger import setup_logger, set_video_id
 from .exceptions import PipelineError, ASRError, TranslateError, EmbedError, DownloadError, UploadError
 from .progress import ProgressTracker, ProgressEvent
-from ..utils.resource_lock import resource_lock
 
 class VideoProcessor:
     """单个视频的完整处理流程"""
@@ -174,6 +173,8 @@ class VideoProcessor:
                 video_format=self.config.downloader.youtube.format,
                 cookies_file=self.config.downloader.youtube.cookies_file,
                 remote_components=self.config.downloader.youtube.remote_components,
+                lock_db_path=str(self.db.db_path),
+                download_cooldown=self.config.downloader.youtube.download_delay,
             )
         elif st == SourceType.LOCAL:
             return LocalImporter()
@@ -2046,29 +2047,22 @@ class VideoProcessor:
             uploader = BilibiliUploader(
                 cookies_file=str(cookie_file),
                 line=self.config.uploader.bilibili.line,
-                threads=self.config.uploader.bilibili.threads
+                threads=self.config.uploader.bilibili.threads,
+                lock_db_path=str(self.db.db_path),
+                upload_interval=self.config.uploader.bilibili.upload_interval,
             )
-            
-            # 获取跨进程上传锁（同一时间只允许一个进程上传，防止 B站风控）
-            upload_cooldown = self.config.uploader.bilibili.upload_interval
-            with resource_lock(
-                db_path=str(self.db.db_path),
-                resource_type='bilibili_upload',
-                cooldown_seconds=upload_cooldown,
-                timeout_seconds=1200,
-                lock_ttl_seconds=3600,
-            ):
-                result = uploader.upload(
-                    video_path=final_video,
-                    title=title[:80],  # B站标题限制80字符
-                    description=description[:2000],  # B站简介限制2000字符
-                    tid=tid,
-                    tags=tags,
-                    copyright=copyright_type,
-                    source=source_url,
-                    cover_path=cover_path,
-                    dtime=self._upload_dtime,
-                )
+
+            result = uploader.upload(
+                video_path=final_video,
+                title=title[:80],  # B站标题限制80字符
+                description=description[:2000],  # B站简介限制2000字符
+                tid=tid,
+                tags=tags,
+                copyright=copyright_type,
+                source=source_url,
+                cover_path=cover_path,
+                dtime=self._upload_dtime,
+            )
             
             # 清理临时封面文件
             if temp_cover_file:

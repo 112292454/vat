@@ -134,12 +134,19 @@ class PlaylistService:
                 from vat.config import load_config
                 logger.warning("PlaylistService 未传入 config，自动 load_config()")
                 self._config = load_config()
-            self._downloader = YouTubeDownloader(
-                proxy=self._config.get_stage_proxy("downloader"),
-                video_format=self._config.downloader.youtube.format,
-                cookies_file=self._config.downloader.youtube.cookies_file,
-                remote_components=self._config.downloader.youtube.remote_components,
-            )
+            storage = getattr(self._config, "storage", None)
+            yt_cfg = self._config.downloader.youtube
+            downloader_kwargs = {
+                "proxy": self._config.get_stage_proxy("downloader"),
+                "video_format": yt_cfg.format,
+                "cookies_file": yt_cfg.cookies_file,
+                "remote_components": yt_cfg.remote_components,
+            }
+            if storage is not None and getattr(storage, "database_path", ""):
+                downloader_kwargs["lock_db_path"] = storage.database_path
+            if hasattr(yt_cfg, "download_delay"):
+                downloader_kwargs["download_cooldown"] = yt_cfg.download_delay
+            self._downloader = YouTubeDownloader(**downloader_kwargs)
         return self._downloader
     
     def sync_playlist(

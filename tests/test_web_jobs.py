@@ -5,6 +5,7 @@ web/jobs.py 单元测试
 不测试子进程启动（需要真实 CLI 环境）。
 """
 import os
+import sys
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
@@ -491,6 +492,22 @@ class TestTaskParamsPersistence:
         idx_m = cmd.index("--upload-mode")
         assert cmd[idx_m + 1] == "dtime"
 
+    def test_build_process_command_includes_group_config_path(self):
+        """process 子进程应继承 web 启动时的 group 级 --config。"""
+        cmd = JobManager._build_process_command(
+            video_ids=["v1"],
+            steps=["download"],
+            gpu_device="auto",
+            force=False,
+            concurrency=1,
+            upload_cron=None,
+            fail_fast=False,
+            task_params={},
+            config_path="config/custom.yaml",
+        )
+        assert cmd[:5] == [sys.executable, "-m", "vat", "-c", "config/custom.yaml"]
+        assert cmd[5] == "process"
+
     def test_build_process_command_empty_task_params(self):
         """task_params 为空时不生成额外参数"""
         cmd = JobManager._build_process_command(
@@ -567,6 +584,16 @@ class TestTaskParamsPersistence:
         assert "--delay-start" in cmd
         idx = cmd.index("--delay-start")
         assert cmd[idx + 1] == "120"
+
+    def test_build_tools_command_includes_group_config_path_for_watch(self):
+        """tools/watch 子进程应继承 web 启动时的 group 级 --config。"""
+        cmd = JobManager._build_tools_command(
+            "watch",
+            {"playlist_ids": ["PL1"], "once": True},
+            config_path="config/custom.yaml",
+        )
+        assert cmd[:6] == [sys.executable, "-m", "vat", "-c", "config/custom.yaml", "tools"]
+        assert cmd[6] == "watch"
 
 
 class TestProcessJobResultContracts:

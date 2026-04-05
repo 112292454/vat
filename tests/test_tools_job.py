@@ -6,11 +6,13 @@
 - resync_video_info 元信息渲染与同步
 """
 import json
-import tempfile
 import os
+import sys
+import tempfile
 from pathlib import Path
 from unittest import TestCase
 from unittest.mock import MagicMock, patch
+from types import SimpleNamespace
 
 from vat.web.jobs import JobManager, WebJob, JobStatus, TOOLS_TASK_TYPES
 
@@ -20,7 +22,7 @@ class TestBuildToolsCommand(TestCase):
 
     def test_fix_violation_basic(self):
         cmd = JobManager._build_tools_command('fix-violation', {'aid': 12345})
-        self.assertEqual(cmd[:5], ['python', '-m', 'vat', 'tools', 'fix-violation'])
+        self.assertEqual(cmd[:5], [sys.executable, '-m', 'vat', 'tools', 'fix-violation'])
         self.assertIn('--aid', cmd)
         self.assertIn('12345', cmd)
 
@@ -79,7 +81,7 @@ class TestBuildToolsCommand(TestCase):
         cmd = JobManager._build_tools_command('season-sync', {
             'playlist_id': 'PL_ss',
         })
-        self.assertEqual(cmd[:5], ['python', '-m', 'vat', 'tools', 'season-sync'])
+        self.assertEqual(cmd[:5], [sys.executable, '-m', 'vat', 'tools', 'season-sync'])
         self.assertIn('--playlist', cmd)
 
     def test_none_values_skipped(self):
@@ -96,7 +98,16 @@ class TestBuildToolsCommand(TestCase):
     def test_unknown_task_type(self):
         """未知 task_type 应返回基础命令"""
         cmd = JobManager._build_tools_command('unknown-type', {})
-        self.assertEqual(cmd, ['python', '-m', 'vat', 'tools', 'unknown-type'])
+        self.assertEqual(cmd, [sys.executable, '-m', 'vat', 'tools', 'unknown-type'])
+
+    def test_watch_command_includes_group_config_path(self):
+        cmd = JobManager._build_tools_command(
+            'watch',
+            {'playlist_ids': ['PL_A'], 'once': True},
+            config_path='config/custom.yaml',
+        )
+        self.assertEqual(cmd[:6], [sys.executable, '-m', 'vat', '-c', 'config/custom.yaml', 'tools'])
+        self.assertEqual(cmd[6], 'watch')
 
 
 class TestDetermineToolsJobResult(TestCase):
@@ -228,6 +239,105 @@ class TestToolsJobLifecycle(TestCase):
 
         job = self.jm.get_job("job-cancelled")
         self.assertEqual(job.status, JobStatus.CANCELLED)
+
+
+class TestToolsWatchCommand(TestCase):
+    def test_tools_watch_passes_group_config_to_process_job_submitter(self):
+        from click.testing import CliRunner
+        from vat.cli.tools import tools_watch
+
+        fake_config = SimpleNamespace(
+            watch=SimpleNamespace(
+                default_interval=60,
+                default_stages='all',
+                default_concurrency=1,
+            )
+        )
+        fake_db = object()
+        captured = {}
+
+        def fake_submitter_builder(config, config_path=None):
+            captured['config'] = config
+            captured['config_path'] = config_path
+            return MagicMock()
+
+        class FakeWatchService:
+            def __init__(self, **kwargs):
+                captured['service_kwargs'] = kwargs
+
+            def run(self):
+                return None
+
+        with patch('vat.cli.tools._get_config_and_db', return_value=(fake_config, fake_db)), \
+             patch('vat.services.process_job_submitter.build_process_job_submitter', side_effect=fake_submitter_builder), \
+             patch('vat.services.watch_service.WatchService', FakeWatchService):
+            result = CliRunner().invoke(
+                tools_watch,
+                ['--playlist', 'PL_A', '--once'],
+                obj={'config_path': 'config/custom.yaml'},
+                catch_exceptions=False,
+            )
+
+        self.assertEqual(result.exit_code, 0)
+        self.assertIs(captured['config'], fake_config)
+        self.assertEqual(captured['config_path'], 'config/custom.yaml')
+        self.assertIn('process_job_submitter', captured['service_kwargs'])
+
+
+class TestToolsConfigPropagation(TestCase):
+    def test_tools_sync_playlist_uses_group_config_path(self):
+        from click.testing import CliRunner
+        from vat.cli.tools import tools_sync_playlist
+
+        fake_config = SimpleNamespace()
+        fake_db = MagicMock()
+        fake_db.get_playlist.return_value = SimpleNamespace(id='PL1', title='Playlist 1', source_url='https://example.com/pl')
+        fake_service = MagicMock()
+        fake_service.sync_playlist.return_value = SimpleNamespace(new_count=1, existing_count=2)
+        captured = {}
+
+        def fake_get_config_and_db(ctx):
+            captured['config_path'] = ctx.obj.get('config_path')
+            return fake_config, fake_db
+
+        with patch('vat.cli.tools._get_config_and_db', side_effect=fake_get_config_and_db), \
+             patch('vat.cli.tools._get_playlist_service', return_value=fake_service):
+            result = CliRunner().invoke(
+                tools_sync_playlist,
+                ['--playlist', 'PL1'],
+                obj={'config_path': 'config/custom.yaml'},
+                catch_exceptions=False,
+            )
+
+        self.assertEqual(result.exit_code, 0)
+        self.assertEqual(captured['config_path'], 'config/custom.yaml')
+        fake_service.sync_playlist.assert_called_once()
+
+    def test_tools_season_sync_uses_group_config_path(self):
+        from click.testing import CliRunner
+        from vat.cli.tools import tools_season_sync
+
+        fake_config = SimpleNamespace()
+        fake_db = MagicMock()
+        fake_uploader = object()
+        captured = {}
+
+        def fake_get_config_and_db(ctx):
+            captured['config_path'] = ctx.obj.get('config_path')
+            return fake_config, fake_db
+
+        with patch('vat.cli.tools._get_config_and_db', side_effect=fake_get_config_and_db), \
+             patch('vat.cli.tools._get_bilibili_uploader', return_value=fake_uploader), \
+             patch('vat.uploaders.bilibili.season_sync', return_value={'success': 1, 'failed': 0, 'total': 1}):
+            result = CliRunner().invoke(
+                tools_season_sync,
+                ['--playlist', 'PL1'],
+                obj={'config_path': 'config/custom.yaml'},
+                catch_exceptions=False,
+            )
+
+        self.assertEqual(result.exit_code, 0)
+        self.assertEqual(captured['config_path'], 'config/custom.yaml')
 
 
 class TestWebJobToolsFields(TestCase):

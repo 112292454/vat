@@ -13,6 +13,7 @@ from pydantic import BaseModel
 
 from vat.models import expand_stage_group
 from vat.web.jobs import JobManager, JobStatus
+from vat.web.deps import get_web_config, get_web_config_path
 
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
 
@@ -24,10 +25,13 @@ def get_job_manager() -> JobManager:
     """获取 JobManager 实例"""
     global _job_manager
     if _job_manager is None:
-        from vat.config import load_config
-        config = load_config()
+        config = get_web_config()
         log_dir = Path(config.storage.database_path).parent / "job_logs"
-        _job_manager = JobManager(config.storage.database_path, str(log_dir))
+        _job_manager = JobManager(
+            config.storage.database_path,
+            str(log_dir),
+            config_path=get_web_config_path(),
+        )
     return _job_manager
 
 

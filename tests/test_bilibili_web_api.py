@@ -98,7 +98,7 @@ class TestResyncSeasonInfoRoute:
         fake_db = _FakeDatabase("db.sqlite3", "outputs")
 
         app.include_router(router)
-        monkeypatch.setattr("vat.web.routes.bilibili.load_config", lambda: fake_config)
+        monkeypatch.setattr("vat.web.routes.bilibili.get_web_config", lambda: fake_config)
         monkeypatch.setattr("vat.web.routes.bilibili.get_db", lambda: fake_db)
         monkeypatch.setattr("vat.web.routes.bilibili._get_uploader", lambda with_upload_params=False: fake_uploader)
 
@@ -143,7 +143,7 @@ class TestResyncSeasonInfoRoute:
         fake_uploader = object()
 
         app.include_router(router)
-        monkeypatch.setattr("vat.web.routes.bilibili.load_config", lambda: fake_config)
+        monkeypatch.setattr("vat.web.routes.bilibili.get_web_config", lambda: fake_config)
         monkeypatch.setattr("vat.web.routes.bilibili.Database", _FakeDatabase)
         monkeypatch.setattr("vat.web.routes.bilibili._get_uploader", lambda with_upload_params=False: fake_uploader)
         monkeypatch.setattr(
@@ -185,7 +185,7 @@ class TestResyncSeasonInfoRoute:
         )
 
         app.include_router(router)
-        monkeypatch.setattr("vat.web.routes.bilibili.load_config", lambda: fake_config)
+        monkeypatch.setattr("vat.web.routes.bilibili.get_web_config", lambda: fake_config)
         monkeypatch.setattr("vat.web.routes.bilibili.Database", _FakeDatabase)
         monkeypatch.setattr("vat.web.routes.bilibili._get_uploader", lambda with_upload_params=False: object())
         monkeypatch.setattr(
@@ -232,7 +232,7 @@ class TestSyncSeasonTitlesRoute:
         fake_db = _FakeDatabase("db.sqlite3", "outputs")
 
         app.include_router(router)
-        monkeypatch.setattr("vat.web.routes.bilibili.load_config", lambda: fake_config)
+        monkeypatch.setattr("vat.web.routes.bilibili.get_web_config", lambda: fake_config)
         monkeypatch.setattr("vat.web.routes.bilibili.get_db", lambda: fake_db)
         monkeypatch.setattr("vat.web.routes.bilibili._get_uploader", lambda with_upload_params=False: fake_uploader)
 

@@ -12,6 +12,7 @@ Watch 服务单元测试
 import json
 import os
 import sqlite3
+import sys
 import tempfile
 from datetime import datetime
 from pathlib import Path
@@ -22,6 +23,7 @@ from typing import Optional, Dict, List
 import pytest
 
 from vat.services.watch_service import WatchService
+from vat.services.process_job_submitter import build_process_job_submitter
 from vat.models import TaskStep, TaskStatus, DEFAULT_STAGE_SEQUENCE
 
 
@@ -1103,7 +1105,7 @@ class TestJobManagerCommandConstruction:
         }
         cmd = JobManager._build_tools_command('watch', params)
         
-        assert cmd[:5] == ["python", "-m", "vat", "tools", "watch"]
+        assert cmd[:5] == [sys.executable, "-m", "vat", "tools", "watch"]
         assert "--playlist" in cmd
         assert "PL_A" in cmd
         assert "PL_B" in cmd
@@ -1156,3 +1158,40 @@ class TestJobManagerCommandConstruction:
         assert len(playlist_indices) == 3
         for idx in playlist_indices:
             assert cmd[idx + 1] in ['PL_1', 'PL_2', 'PL_3']
+
+
+class TestProcessJobSubmitterConfigPropagation:
+    def test_build_process_job_submitter_passes_config_path_to_job_manager(self):
+        fake_config = MagicMock()
+        fake_config.storage.database_path = "/tmp/custom.db"
+
+        captured = {}
+
+        class FakeJobManager:
+            def __init__(self, db_path, log_dir, config_path=None):
+                captured["init"] = {
+                    "db_path": db_path,
+                    "log_dir": log_dir,
+                    "config_path": config_path,
+                }
+
+            def submit_job(self, **kwargs):
+                captured["submit"] = kwargs
+                return "job-123"
+
+        with patch("vat.web.jobs.JobManager", FakeJobManager):
+            submitter = build_process_job_submitter(fake_config, config_path="config/custom.yaml")
+            job_id = submitter(
+                video_ids=["vid1"],
+                steps=["download"],
+                gpu_device="auto",
+                force=False,
+                concurrency=1,
+                playlist_id="PL1",
+                fail_fast=False,
+            )
+
+        assert job_id == "job-123"
+        assert captured["init"]["db_path"] == "/tmp/custom.db"
+        assert captured["init"]["config_path"] == "config/custom.yaml"
+        assert captured["submit"]["task_type"] == "process"

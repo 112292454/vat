@@ -8,6 +8,7 @@ import signal
 import subprocess
 import json
 import sqlite3
+import sys
 from typing import Optional, List, Dict
 from dataclasses import dataclass
 from datetime import datetime
@@ -105,9 +106,10 @@ class JobManager:
     任务通过子进程执行，与 Web 服务器生命周期解耦
     """
     
-    def __init__(self, db_path: str, log_dir: str):
+    def __init__(self, db_path: str, log_dir: str, config_path: Optional[str] = None):
         self.db_path = db_path
         self.log_dir = Path(log_dir)
+        self.config_path = config_path
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self._init_table()
     
@@ -274,11 +276,11 @@ class JobManager:
         """
         params = task_params or {}
         if task_type != 'process':
-            cmd = self._build_tools_command(task_type, params)
+            cmd = self._build_tools_command(task_type, params, self.config_path)
         else:
             cmd = self._build_process_command(
                 video_ids, steps, gpu_device, force, concurrency,
-                upload_cron, fail_fast, params
+                upload_cron, fail_fast, params, self.config_path
             )
         
         logger.info(f"启动命令: {' '.join(cmd)}")
@@ -336,6 +338,7 @@ class JobManager:
         upload_cron: Optional[str],
         fail_fast: bool,
         task_params: Dict,
+        config_path: Optional[str] = None,
     ) -> List[str]:
         """构建 vat process 命令
         
@@ -344,7 +347,10 @@ class JobManager:
         - upload_batch_size: 每次上传批次大小
         - upload_mode: 定时上传模式 (cron/dtime)
         """
-        cmd = ["python", "-m", "vat", "process"]
+        cmd = [sys.executable, "-m", "vat"]
+        if config_path:
+            cmd.extend(["-c", config_path])
+        cmd.append("process")
         
         for vid in video_ids:
             cmd.extend(["-v", vid])
@@ -390,12 +396,19 @@ class JobManager:
         return cmd
     
     @staticmethod
-    def _build_tools_command(task_type: str, params: Dict) -> List[str]:
+    def _build_tools_command(
+        task_type: str,
+        params: Dict,
+        config_path: Optional[str] = None,
+    ) -> List[str]:
         """根据 task_type 和 params 构建 vat tools <subcommand> 命令
         
         每个 task_type 对应一个 vat tools 子命令，参数从 params dict 映射到 CLI 选项。
         """
-        cmd = ["python", "-m", "vat", "tools", task_type]
+        cmd = [sys.executable, "-m", "vat"]
+        if config_path:
+            cmd.extend(["-c", config_path])
+        cmd.extend(["tools", task_type])
         
         # 通用映射：params 中的 key 转换为 CLI 选项
         # 布尔值 True → --flag，False → 不加

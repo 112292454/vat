@@ -16,10 +16,9 @@ from fastapi import APIRouter, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from vat.config import load_config
 from vat.database import Database
 from vat.services.watch_service import WatchService
-from vat.web.deps import get_db
+from vat.web.deps import get_db, get_web_config
 
 router = APIRouter(prefix="/api/watch", tags=["watch"])
 
@@ -133,11 +132,11 @@ async def start_watch(req: WatchStartRequest):
     """启动新的 Watch Session（通过 JobManager 提交子进程）"""
     from vat.services import PlaylistService
     
-    config = load_config()
+    config = get_web_config()
     db = get_db()
     
     # 验证 playlist 存在
-    playlist_service = PlaylistService(db)
+    playlist_service = PlaylistService(db, config)
     for pl_id in req.playlist_ids:
         pl = playlist_service.get_playlist(pl_id)
         if not pl:

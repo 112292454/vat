@@ -10,7 +10,10 @@ from typing import Callable, List, Optional
 from vat.config import Config
 
 
-def build_process_job_submitter(config: Config) -> Callable[..., Optional[str]]:
+def build_process_job_submitter(
+    config: Config,
+    config_path: Optional[str] = None,
+) -> Callable[..., Optional[str]]:
     """
     构造一个基于 JobManager 的 process job submitter。
 
@@ -19,7 +22,11 @@ def build_process_job_submitter(config: Config) -> Callable[..., Optional[str]]:
     from vat.web.jobs import JobManager
 
     log_dir = Path(config.storage.database_path).parent / "job_logs"
-    job_manager = JobManager(str(config.storage.database_path), str(log_dir))
+    job_manager = JobManager(
+        str(config.storage.database_path),
+        str(log_dir),
+        config_path=config_path,
+    )
 
     def submitter(
         *,

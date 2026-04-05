@@ -49,7 +49,8 @@ def _get_config_and_db(ctx):
     """获取 config 和 db 实例"""
     from ..config import load_config
     from ..database import Database
-    config = load_config()
+    config_path = ctx.obj.get('config_path') if ctx.obj else None
+    config = load_config(config_path)
     db = Database(config.storage.database_path, output_base_dir=config.storage.output_dir)
     return config, db
 
@@ -96,7 +97,8 @@ def tools():
 @click.option('--max-rounds', default=10, type=int, help='最大修复轮次（默认10，设为1则不自动循环）')
 @click.option('--wait-seconds', default=0, type=int,
               help='每轮修复后等待审核的秒数（默认0=上传耗时*2，下限900秒）')
-def tools_fix_violation(aid, video_path, margin, mask_text, dry_run, max_rounds, wait_seconds):
+@click.pass_context
+def tools_fix_violation(ctx, aid, video_path, margin, mask_text, dry_run, max_rounds, wait_seconds):
     """修复被退回的B站稿件（累积式遮罩+上传替换，默认自动循环直到通过）
     
     自动循环流程：mask→上传→等待审核→check是否通过→如不通过则再次修复。
@@ -104,11 +106,7 @@ def tools_fix_violation(aid, video_path, margin, mask_text, dry_run, max_rounds,
     修复成功后自动尝试添加到B站合集（如有配置）。
     """
     import time as _time
-    from ..config import load_config
-    from ..database import Database
-
-    config = load_config()
-    db = Database(config.storage.database_path, output_base_dir=config.storage.output_dir)
+    config, db = _get_config_and_db(ctx)
     logger = get_logger()
 
     try:
@@ -314,13 +312,10 @@ def _find_local_video_for_aid(aid, config, db, uploader):
 @click.option('--playlist', required=True, help='Playlist ID')
 @click.option('--url', default=None, help='Playlist URL（首次添加时需要）')
 @click.option('--fetch-dates', is_flag=True, default=True, help='获取上传日期')
-def tools_sync_playlist(playlist, url, fetch_dates):
+@click.pass_context
+def tools_sync_playlist(ctx, playlist, url, fetch_dates):
     """同步 YouTube Playlist（增量更新视频列表）"""
-    from ..config import load_config
-    from ..database import Database
-
-    config = load_config()
-    db = Database(config.storage.database_path, output_base_dir=config.storage.output_dir)
+    config, db = _get_config_and_db(ctx)
 
     try:
         pl = db.get_playlist(playlist)
@@ -360,13 +355,10 @@ def tools_sync_playlist(playlist, url, fetch_dates):
 @click.option('--playlist', required=True, help='Playlist ID')
 @click.option('--force-refetch', is_flag=True, help='强制重新获取所有字段')
 @click.option('--force-retranslate', is_flag=True, help='强制重新翻译')
-def tools_refresh_playlist(playlist, force_refetch, force_retranslate):
+@click.pass_context
+def tools_refresh_playlist(ctx, playlist, force_refetch, force_retranslate):
     """刷新 Playlist 视频信息（补全缺失的封面、时长、日期等）"""
-    from ..config import load_config
-    from ..database import Database
-
-    config = load_config()
-    db = Database(config.storage.database_path, output_base_dir=config.storage.output_dir)
+    config, db = _get_config_and_db(ctx)
 
     try:
         pl = db.get_playlist(playlist)
@@ -398,14 +390,12 @@ def tools_refresh_playlist(playlist, force_refetch, force_retranslate):
 
 @tools.command('retranslate-playlist')
 @click.option('--playlist', required=True, help='Playlist ID')
-def tools_retranslate_playlist(playlist):
+@click.pass_context
+def tools_retranslate_playlist(ctx, playlist):
     """重新翻译 Playlist 中所有视频的标题/简介"""
-    from ..config import load_config
-    from ..database import Database
     from ..services.playlist_service import PlaylistService
 
-    config = load_config()
-    db = Database(config.storage.database_path, output_base_dir=config.storage.output_dir)
+    config, db = _get_config_and_db(ctx)
 
     try:
         service = PlaylistService(db)
@@ -433,14 +423,12 @@ def tools_retranslate_playlist(playlist):
 @tools.command('upload-sync')
 @click.option('--playlist', required=True, help='Playlist ID')
 @click.option('--retry-delay', default=30, type=int, help='失败后重试等待（分钟），0=不重试')
-def tools_upload_sync(playlist, retry_delay):
+@click.pass_context
+def tools_upload_sync(ctx, playlist, retry_delay):
     """将已上传但未入集的视频批量添加到B站合集并排序"""
-    from ..config import load_config
-    from ..database import Database
     from ..services.playlist_service import PlaylistService
 
-    config = load_config()
-    db = Database(config.storage.database_path, output_base_dir=config.storage.output_dir)
+    config, db = _get_config_and_db(ctx)
 
     try:
         service = PlaylistService(db)
@@ -497,15 +485,13 @@ def tools_upload_sync(playlist, retry_delay):
 @tools.command('update-info')
 @click.option('--playlist', required=True, help='Playlist ID')
 @click.option('--dry-run', is_flag=True, help='仅预览不执行')
-def tools_update_info(playlist, dry_run):
+@click.pass_context
+def tools_update_info(ctx, playlist, dry_run):
     """批量更新已上传视频的标题和简介（重新渲染模板）"""
-    from ..config import load_config
-    from ..database import Database
     from ..services.playlist_service import PlaylistService
     from ..uploaders.template import render_upload_metadata
 
-    config = load_config()
-    db = Database(config.storage.database_path, output_base_dir=config.storage.output_dir)
+    config, db = _get_config_and_db(ctx)
 
     try:
         service = PlaylistService(db)
@@ -618,15 +604,13 @@ def tools_update_info(playlist, dry_run):
 @click.option('--season', required=True, type=int, help='B站合集ID')
 @click.option('--playlist', required=True, help='Playlist ID')
 @click.option('--dry-run', is_flag=True, help='仅预览不执行')
-def tools_sync_db(season, playlist, dry_run):
+@click.pass_context
+def tools_sync_db(ctx, season, playlist, dry_run):
     """将B站合集中的视频信息同步回数据库"""
     import re
-    from ..config import load_config
-    from ..database import Database
     from ..services.playlist_service import PlaylistService
 
-    config = load_config()
-    db = Database(config.storage.database_path, output_base_dir=config.storage.output_dir)
+    config, db = _get_config_and_db(ctx)
 
     try:
         service = PlaylistService(db)
@@ -720,13 +704,10 @@ def tools_sync_db(season, playlist, dry_run):
 
 @tools.command('season-sync')
 @click.option('--playlist', required=True, help='Playlist ID')
-def tools_season_sync(playlist):
+@click.pass_context
+def tools_season_sync(ctx, playlist):
     """将 Playlist 中已上传的视频同步到B站合集（添加+排序）"""
-    from ..config import load_config
-    from ..database import Database
-
-    config = load_config()
-    db = Database(config.storage.database_path, output_base_dir=config.storage.output_dir)
+    config, db = _get_config_and_db(ctx)
 
     try:
         from ..uploaders.bilibili import season_sync
@@ -762,14 +743,17 @@ def tools_season_sync(playlist):
 @click.option('--concurrency', '-c', default=None, type=int, help='并发处理数')
 @click.option('--force', '-f', is_flag=True, help='强制重处理')
 @click.option('--fail-fast', is_flag=True, help='失败时停止')
-def tools_watch(playlist, interval, once, stages, gpu, concurrency, force, fail_fast):
+@click.pass_context
+def tools_watch(ctx, playlist, interval, once, stages, gpu, concurrency, force, fail_fast):
     """自动监控 Playlist 并处理新视频"""
-    from ..config import load_config
-    from ..database import Database
     from ..services.watch_service import WatchService
+    from ..services.process_job_submitter import build_process_job_submitter
 
-    config = load_config()
-    db = Database(config.storage.database_path, output_base_dir=config.storage.output_dir)
+    config, db = _get_config_and_db(ctx)
+    process_job_submitter = build_process_job_submitter(
+        config,
+        config_path=ctx.obj.get('config_path'),
+    )
 
     watch_config = config.watch
     effective_interval = interval if interval is not None else watch_config.default_interval
@@ -791,6 +775,7 @@ def tools_watch(playlist, interval, once, stages, gpu, concurrency, force, fail_
             force=force,
             fail_fast=fail_fast,
             once=once,
+            process_job_submitter=process_job_submitter,
         )
         service.run()
         _progress(100)

@@ -238,7 +238,7 @@ async def index(
         from vat.web.routes.tasks import get_job_manager
         try:
             jm = get_job_manager()
-            exclude_ids = jm.get_running_video_ids() or None
+            exclude_ids = jm.get_running_and_queued_video_ids() or None
         except Exception:
             pass
     
@@ -474,7 +474,7 @@ async def playlist_detail_page(
         from vat.web.routes.tasks import get_job_manager
         try:
             jm = get_job_manager()
-            processing_video_ids = jm.get_running_video_ids() or set()
+            processing_video_ids = jm.get_running_and_queued_video_ids() or set()
         except Exception:
             pass
     

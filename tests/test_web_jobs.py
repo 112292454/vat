@@ -364,6 +364,28 @@ class TestVideoDeduplication:
         result = jm.get_running_video_ids()
         assert result == set()
 
+    def test_task_params_todo_video_ids_are_included_in_hide_processing_set(self, env):
+        """running job 的 task_params 待处理视频也应被首页过滤隐藏。"""
+        jm, db_path = env
+        import json
+        from datetime import datetime
+
+        with jm._get_connection() as conn:
+            conn.execute("""
+                INSERT INTO web_jobs (
+                    job_id, video_ids, steps, status, created_at, task_params
+                ) VALUES (?, ?, ?, 'running', ?, ?)
+            """, (
+                "job1",
+                json.dumps(["v_processing"]),
+                json.dumps(["download"]),
+                datetime.now().isoformat(),
+                json.dumps({"todo_video_ids": ["v_todo"]}),
+            ))
+
+        result = jm.get_running_and_queued_video_ids()
+        assert result == {"v_processing", "v_todo"}
+
 
 class TestTaskParamsPersistence:
     """测试 task_params 统一持久化：process 特有参数存入 task_params JSON 字段"""

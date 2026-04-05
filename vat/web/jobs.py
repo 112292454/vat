@@ -936,6 +936,83 @@ class JobManager:
                     if vid not in completed_vids:
                         result.add(vid)
         return result
+
+    def get_running_and_queued_video_ids(self) -> set:
+        """获取首页/列表页应隐藏的视频 ID 集合。
+
+        包含两部分：
+        1. 现有 running process job 中尚未完成处理的视频；
+        2. running job 的 task_params 中显式声明的待处理视频列表。
+        """
+        result = set(self.get_running_video_ids())
+
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT task_params FROM web_jobs WHERE status = 'running'
+            """)
+            for row in cursor.fetchall():
+                task_params = self._load_task_params(row['task_params'])
+                result.update(self._extract_task_param_video_ids(task_params))
+
+        return result
+
+    @staticmethod
+    def _load_task_params(task_params_raw) -> Dict:
+        """安全解析 task_params JSON。"""
+        if not task_params_raw:
+            return {}
+
+        if isinstance(task_params_raw, dict):
+            return task_params_raw
+
+        try:
+            parsed = json.loads(task_params_raw)
+        except Exception:
+            return {}
+
+        return parsed if isinstance(parsed, dict) else {}
+
+    @classmethod
+    def _extract_task_param_video_ids(cls, task_params: Optional[Dict]) -> set:
+        """从 task_params 中提取待处理视频 ID 列表。"""
+        if not isinstance(task_params, dict):
+            return set()
+
+        result = set()
+        for key in (
+            "todo_video_ids",
+            "pending_video_ids",
+            "queued_video_ids",
+            "candidate_video_ids",
+            "video_ids",
+        ):
+            result.update(cls._normalize_video_id_list(task_params.get(key)))
+
+        todo_list = task_params.get("todo_list")
+        if isinstance(todo_list, list):
+            for item in todo_list:
+                if isinstance(item, str) and item:
+                    result.add(item)
+                    continue
+                if isinstance(item, dict):
+                    video_id = item.get("video_id") or item.get("id")
+                    if isinstance(video_id, str) and video_id:
+                        result.add(video_id)
+
+        return result
+
+    @staticmethod
+    def _normalize_video_id_list(raw_value) -> set:
+        """将 JSON 字段中的视频 ID 列表标准化为 set[str]。"""
+        if not isinstance(raw_value, list):
+            return set()
+
+        result = set()
+        for item in raw_value:
+            if isinstance(item, str) and item:
+                result.add(item)
+        return result
     
     @staticmethod
     def _is_video_completed_in_job(cursor, video_id: str, steps: List[str]) -> bool:
